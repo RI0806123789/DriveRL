@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark light" />
+    <!--
+      ファビコンは外部ファイルにせず SVG のデータ URI で埋め込む。
+      別ファイルにすると /favicon.ico への 404 が毎回コンソールに出るうえ、
+      アイコン 1 枚のためにリクエストが増えるのを避けたい。
+    -->
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23141a20'/%3E%3Cpath d='M4 20h24' stroke='%233a4550' stroke-width='2' stroke-linecap='round'/%3E%3Cpath d='M7 13.5h18l2.2 4.2v3.1a1 1 0 0 1-1 1H5.8a1 1 0 0 1-1-1v-3.1z' fill='%239ecaff'/%3E%3Cpath d='M9.4 14.2h13.2l1.5 2.9H7.9z' fill='%230f1b26'/%3E%3Ccircle cx='10' cy='22' r='2.4' fill='%2315181c'/%3E%3Ccircle cx='22' cy='22' r='2.4' fill='%2315181c'/%3E%3C/svg%3E"
+    />
+    <title>DriveRL — 自動運転シミュレーター</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

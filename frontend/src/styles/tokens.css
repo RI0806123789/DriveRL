@@ -1,0 +1,149 @@
+/*
+ * Material 3 Expressive デザイントークン
+ * ------------------------------------------------------------------
+ * memo 4章「Android Metareal3 for Expressive」= Google の Material 3 Expressive。
+ * モバイル仕様の厳密再現ではなく、デスクトップ Web の 3D シミュレータ向けに
+ * （マウス操作・高い情報密度に合わせて）読み替えて適用している。
+ *
+ * ・カラーロール: primary / secondary / tertiary + それぞれの container
+ * ・surface の階調（lowest 〜 highest）でトーナル・エレベーションを作る
+ *   （影ではなく面の明度差で階層を表現する）
+ * ・シェイプスケール: 4 / 8 / 12 / 16 / 28 / full
+ * ・スプリング感のあるモーション: cubic-bezier(0.2, 0, 0, 1) 系, 200〜400ms
+ *
+ * 3D シーンと同居するためダークテーマを基調とする。
+ * ライトテーマは [data-theme="light"] で上書きできるようにしてある。
+ */
+
+:root {
+  /* ---------- カラー: ダーク（既定） ---------- */
+  --m3-primary: #9ecaff;
+  --m3-on-primary: #003257;
+  --m3-primary-container: #00497d;
+  --m3-on-primary-container: #d1e4ff;
+
+  --m3-secondary: #7adcc8;
+  --m3-on-secondary: #00382f;
+  --m3-secondary-container: #005045;
+  --m3-on-secondary-container: #96f8e3;
+
+  --m3-tertiary: #d6bbfb;
+  --m3-on-tertiary: #3b2159;
+  --m3-tertiary-container: #523771;
+  --m3-on-tertiary-container: #eddcff;
+
+  --m3-error: #ffb4ab;
+  --m3-on-error: #690005;
+  --m3-error-container: #93000a;
+  --m3-on-error-container: #ffdad6;
+
+  --m3-warning: #ffd08a;
+  --m3-on-warning-container: #ffe6bd;
+  --m3-warning-container: #6b4b12;
+
+  /* surface の階調（トーナル・エレベーション） */
+  --m3-surface: #101418;
+  --m3-surface-dim: #0b0f13;
+  --m3-surface-bright: #363a3e;
+  --m3-surface-container-lowest: #05080b;
+  --m3-surface-container-low: #171c20;
+  --m3-surface-container: #1b2024;
+  --m3-surface-container-high: #262b2f;
+  --m3-surface-container-highest: #31363a;
+
+  --m3-on-surface: #e1e2e8;
+  --m3-on-surface-variant: #bfc6cd;
+  --m3-outline: #89919a;
+  --m3-outline-variant: #40484f;
+
+  --m3-inverse-surface: #e1e2e8;
+  --m3-inverse-on-surface: #2e3134;
+  --m3-scrim: rgba(0, 0, 0, 0.6);
+
+  /* 3D シーンの空・霧の色（scene 側から読む） */
+  /* 3D シーンの色はここには置かない。CSS 変数は three から読まれないので、
+     ここに書くと実コードと食い違っても永久に気づけない（実際 --m3-scene-sky は
+     #0d1218 なのに実際の空は #0e1216 とずれていた）。
+     3D の色は scene/palette.ts が唯一の出どころ（code_review F-24）。 */
+
+  /* ---------- シェイプスケール ---------- */
+  --m3-shape-xs: 4px;
+  --m3-shape-sm: 8px;
+  --m3-shape-md: 12px;
+  --m3-shape-lg: 16px;
+  --m3-shape-xl: 28px;
+  --m3-shape-full: 999px;
+
+  /* ---------- モーション（Expressive: 押すと形が変わる／少し弾む） ---------- */
+  --m3-ease-emphasized: cubic-bezier(0.2, 0, 0, 1);
+  --m3-ease-emphasized-decel: cubic-bezier(0.05, 0.7, 0.1, 1);
+  --m3-ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --m3-ease-spring: cubic-bezier(0.34, 1.4, 0.64, 1);
+  --m3-dur-short: 150ms;
+  --m3-dur-medium: 250ms;
+  --m3-dur-long: 400ms;
+
+  /* ---------- タイポグラフィ ---------- */
+  --m3-font: 'Segoe UI Variable', 'Segoe UI', 'Yu Gothic UI', 'Hiragino Sans',
+    'Noto Sans JP', system-ui, sans-serif;
+  --m3-font-mono: 'Cascadia Mono', 'Consolas', 'SFMono-Regular', ui-monospace,
+    monospace;
+
+  /* ---------- レイアウト ---------- */
+  /* memo 4章: 左（シミュレーター）: 右（操作パネル） = 2 : 1 */
+  --m3-panel-ratio: 33.3333%;
+
+  /* ---------- 状態レイヤの不透明度 ---------- */
+  --m3-state-hover: 0.08;
+  --m3-state-focus: 0.1;
+  --m3-state-press: 0.12;
+
+  color-scheme: dark;
+}
+
+/* ---------- カラー: ライト（任意。data-theme="light" で有効） ---------- */
+:root[data-theme='light'] {
+  --m3-primary: #00579a;
+  --m3-on-primary: #ffffff;
+  --m3-primary-container: #d1e4ff;
+  --m3-on-primary-container: #001d34;
+
+  --m3-secondary: #006a5c;
+  --m3-on-secondary: #ffffff;
+  --m3-secondary-container: #96f8e3;
+  --m3-on-secondary-container: #00201b;
+
+  --m3-tertiary: #6a4d8f;
+  --m3-on-tertiary: #ffffff;
+  --m3-tertiary-container: #eddcff;
+  --m3-on-tertiary-container: #250d43;
+
+  --m3-error: #ba1a1a;
+  --m3-on-error: #ffffff;
+  --m3-error-container: #ffdad6;
+  --m3-on-error-container: #410002;
+
+  --m3-warning: #7a5a17;
+  --m3-on-warning-container: #2a1c00;
+  --m3-warning-container: #ffe6bd;
+
+  --m3-surface: #f7f9fc;
+  --m3-surface-dim: #d8dade;
+  --m3-surface-bright: #f7f9fc;
+  --m3-surface-container-lowest: #ffffff;
+  --m3-surface-container-low: #f1f4f8;
+  --m3-surface-container: #ebeef2;
+  --m3-surface-container-high: #e5e8ec;
+  --m3-surface-container-highest: #dfe3e7;
+
+  --m3-on-surface: #191c1f;
+  --m3-on-surface-variant: #41474d;
+  --m3-outline: #71787e;
+  --m3-outline-variant: #c1c7ce;
+
+  --m3-inverse-surface: #2e3134;
+  --m3-inverse-on-surface: #eff1f5;
+
+
+  color-scheme: light;
+}

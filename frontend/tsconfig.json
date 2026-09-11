@@ -1,0 +1,28 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "useDefineForClassFields": true,
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "skipLibCheck": true,
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "jsx": "react-jsx",
+
+    "strict": true,
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+    "noFallthroughCasesInSwitch": true,
+    "forceConsistentCasingInFileNames": true,
+
+    "types": ["vite/client", "node"]
+  },
+  // scripts/ と vite.config.ts も対象に入れる。CLAUDE.md が「向きに関わる変更を
+  // したら検証スクリプトも必ず更新すること」と要求している以上、そのスクリプトが
+  // 型の壊れたまま気づかれずに残る状態は許さない（code_review F-15）
+  "include": ["src", "scripts", "vite.config.ts"]
+}

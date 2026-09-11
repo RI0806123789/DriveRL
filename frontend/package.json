@@ -1,0 +1,37 @@
+{
+  "name": "autoware-sim-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "verify:signals": "node scripts/verify-signal-geometry.ts",
+    "verify:speedsigns": "node scripts/verify-sign-geometry.ts",
+    "verify:camera": "node scripts/verify-camera-route.ts",
+    "verify:colors": "node scripts/verify-vehicle-colors.ts",
+    "verify:vehicles": "node scripts/verify-vehicle-transforms.ts",
+    "verify:sun": "node scripts/verify-sun.ts",
+    "verify:detections": "node scripts/verify-detections.ts",
+    "verify": "npm run verify:signals && npm run verify:speedsigns && npm run verify:camera && npm run verify:colors && npm run verify:vehicles && npm run verify:sun && npm run verify:detections"
+  },
+  "dependencies": {
+    "@react-three/drei": "^10.7.8",
+    "@react-three/fiber": "^9.7.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "three": "^0.185.1",
+    "zustand": "^5.0.15"
+  },
+  "devDependencies": {
+    "@types/node": "^26.4.1",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.7",
+    "@types/three": "^0.185.4",
+    "@vitejs/plugin-react": "^6.1.1",
+    "typescript": "~5.9.0",
+    "vite": "^8.2.2"
+  }
+}

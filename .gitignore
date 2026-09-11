@@ -1,0 +1,37 @@
+# -- dev --
+/memo
+CLAUDE.md
+
+# --- モデルの重みファイル（万一 memo/ 外に置かれた場合の保険） ---
+*.pt
+*.keras
+*.torchscript.pt
+
+
+# --- Python (backend) ---
+backend/.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# --- 生成データ（OSM キャッシュ・学習チェックポイント・認識器） ---
+backend/data/osmnx_cache/
+backend/data/map_cache/
+backend/data/checkpoints/
+backend/data/exports/
+backend/data/uploads/
+backend/data/detector/
+
+# --- Node (frontend) ---
+frontend/node_modules/
+frontend/dist/
+*.local
+
+# --- 環境変数 ---
+.env
+
+# --- エディタ / OS ---
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini

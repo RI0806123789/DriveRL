@@ -1,0 +1,35 @@
+# DriveRL - バックエンド依存関係
+#
+# セットアップ:
+#   py -3.13 -m venv backend/.venv
+#   backend/.venv/Scripts/python.exe -m pip install -r requirements.txt
+#
+# torch は CUDA 非対応環境（Intel Arc 内蔵GPU）を前提に CPU ビルドを使う。
+# +cpu ローカルバージョンは PyPI には無いため、下の extra-index-url が必須。
+# この行を消すとインストールに失敗する。
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+# --- Web サーバー / WebSocket ---
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+websockets==17.1
+orjson==3.12.0                 # frame を 20Hz で流すため標準 json より速いものを使う
+pydantic-settings==2.15.0
+python-dotenv==1.2.3           # config.py がリポジトリ直下の .env を読む
+python-multipart==0.0.32       # モデルファイルのアップロード（POST /api/import）に必要
+
+# --- 地図データ処理 ---
+osmnx==2.1.1                   # OpenStreetMap から道路網・建物・信号機を取得
+geopandas==1.1.4
+shapely==2.1.2                 # 建物との衝突判定、道路のバッファ生成
+networkx==3.6.1                # 経路探索
+
+# --- 数値計算 / 強化学習 ---
+numpy==2.5.2
+torch==2.14.0+cpu              # 自作 PPO（CPU 学習）
+
+# --- モデルの書き出し（.keras 形式）---
+# Keras 3 は torch をバックエンドにできるので TensorFlow は入れない。
+# バックエンドの指定は app/rl/export.py が import 前に環境変数で行う。
+keras==3.15.1
+h5py==3.16.0                   # .keras の中の重み（model.weights.h5）
