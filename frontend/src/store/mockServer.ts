@@ -23,6 +23,8 @@
 import type {
   ClientMessage,
   Detection,
+  DetectorMessage,
+  DetectorRequest,
   FrameMessage,
   MapBuilding,
   MapEdge,
@@ -515,6 +517,45 @@ function buildRoute(v: MockVehicle): Vec2[] {
 // モック本体
 // ---------------------------------------------------------------------------
 
+/**
+ * 何も実行していないときの `detector` メッセージ。
+ * モックにはモデルのファイルが無いので `model.exists` は false のまま。
+ */
+function makeIdleDetector(): DetectorMessage {
+  return {
+    type: 'detector',
+    state: 'idle',
+    running: false,
+    message: '（モック）認識器の学習はまだ実行していません',
+    progress: 0,
+    collected: 0,
+    samples: 0,
+    epoch: 0,
+    epochs: 0,
+    batch: 0,
+    batches: 0,
+    history: [],
+    elapsedSec: 0,
+    warning: '',
+    paramCount: 0,
+    presetName: null,
+    request: null,
+    dataset: null,
+    model: { exists: false, filename: 'detector.keras', sizeBytes: 0, modifiedAt: null, inUse: false },
+    datasetFile: { exists: false, sizeBytes: 0, modifiedAt: null },
+    limits: {
+      samplesMin: 200,
+      samplesMax: 4800,
+      epochsMin: 1,
+      epochsMax: 60,
+      batchMin: 8,
+      batchMax: 128,
+      widthMin: 0.25,
+      widthMax: 2.0,
+    },
+  }
+}
+
 class MockServer {
   private emit: (json: string) => void
   private rng = makeRng(20260905)
@@ -550,6 +591,11 @@ class MockServer {
   private updates = 0
   private episodes = 0
   private progress = 0
+  // 認識器の学習（「モデル作成」タブ）の疑似ジョブ。
+  // ★ 実機と同じ**段階**を踏ませること。ここを一足飛びに done にすると、
+  //   進捗表示・中止ボタン・停止バナーがモックでは一度も確認できない
+  private detector: DetectorMessage = makeIdleDetector()
+  private detectorTimer: ReturnType<typeof setInterval> | null = null
 
   constructor(emit: (json: string) => void) {
     this.emit = emit
@@ -558,8 +604,11 @@ class MockServer {
     }
     this.applyVehicleCount(this.params.vehicleCount)
 
-    // init は接続直後に 1 回だけ
-    setTimeout(() => this.sendInit(), 60)
+    // init は接続直後に 1 回だけ。実機と同じく detector もここで 1 通送る
+    setTimeout(() => {
+      this.sendInit()
+      this.sendDetector()
+    }, 60)
 
     this.frameTimer = setInterval(() => this.step(), FRAME_MS)
     this.metricsTimer = setInterval(() => this.sendMetrics(), 1000)
@@ -590,6 +639,138 @@ class MockServer {
 
   private sendParams(): void {
     this.send({ type: 'params', params: this.params })
+  }
+
+  private sendDetector(): void {
+    this.send({ ...this.detector })
+  }
+
+  /**
+   * 認識器の学習を模した進行。**実機の段階（収集 -> 保存 -> 学習 -> 完了）を
+   * そのまま踏む**ので、進捗表示と中止ボタンをモックでも確認できる。
+   *
+   * 1 周 250ms で、収集は 8 枚/周、学習は 1 エポック 8 周。実機より桁違いに速い
+   * （実機は銀座 2,400 枚で数分）。ここを実測に寄せると UI の確認ができない。
+   */
+  private startDetectorJob(request: DetectorRequest): void {
+    const preset = MOCK_PRESETS.find((p) => p.id === request.presetId)
+    const startedAt = performance.now()
+    const collects = request.mode !== 'train'
+    const trains = request.mode !== 'collect'
+
+    this.detector = {
+      ...makeIdleDetector(),
+      state: collects ? 'collecting' : 'preparing',
+      running: true,
+      message: collects
+        ? `（モック）${preset?.name ?? 'マップ'} を走らせて教師データを集めています`
+        : '（モック）保存済みの教師データを読み込んでいます',
+      samples: request.samples,
+      epochs: request.epochs,
+      batches: 8,
+      presetName: preset?.name ?? null,
+      request,
+    }
+    // 実機と同じく走行と学習を止める
+    this.sendStatus({
+      simSuspended: true,
+      learning: false,
+      suspendReason: '（モック）認識器の学習中はシミュレーションを止めています',
+      message: '（モック）認識器の学習を始めました',
+    })
+    this.sendDetector()
+
+    let collected = collects ? 0 : request.samples
+    let epoch = 0
+    let batch = 0
+
+    if (this.detectorTimer) clearInterval(this.detectorTimer)
+    this.detectorTimer = setInterval(() => {
+      const d = this.detector
+      d.elapsedSec = (performance.now() - startedAt) / 1000
+
+      if (collected < request.samples) {
+        collected = Math.min(request.samples, collected + Math.ceil(request.samples / 24))
+        d.state = 'collecting'
+        d.collected = collected
+        d.progress = collected / request.samples
+        d.message = `（モック）教師データを集めています（${collected} / ${request.samples} 枚）`
+        if (collected >= request.samples) {
+          d.dataset = {
+            samples: request.samples,
+            objectCellRatio: 0.107,
+            objectsPerImage: 5.1,
+            classCounts: {
+              TRAFFIC_LIGHT: Math.round(request.samples * 1.1),
+              SPEED_SIGN: Math.round(request.samples * 0.25),
+              VEHICLE: Math.round(request.samples * 0.75),
+              OBSTACLE: Math.round(request.samples * 2.0),
+              LANE: request.samples,
+            },
+          }
+          d.datasetFile = {
+            exists: true,
+            sizeBytes: request.samples * 1050,
+            modifiedAt: new Date().toLocaleString('sv-SE'),
+          }
+          if (!trains) return this.finishDetectorJob('done', '（モック）教師データの収集が終わりました')
+          d.state = 'training'
+          d.progress = 0
+          d.message = '（モック）認識器を学習しています'
+        }
+        return this.sendDetector()
+      }
+
+      if (!trains) return this.finishDetectorJob('done', '（モック）教師データの収集が終わりました')
+
+      batch += 1
+      if (batch > d.batches) {
+        batch = 1
+        epoch += 1
+      }
+      if (epoch === 0) epoch = 1
+      d.state = 'training'
+      d.epoch = epoch
+      d.batch = batch
+      d.progress = (epoch - 1 + batch / d.batches) / request.epochs
+      d.message = `（モック）学習中（${epoch} / ${request.epochs} エポック）`
+      if (batch === d.batches) {
+        // エポックの終わりに損失を 1 点足す（推移グラフの確認用）
+        const t = epoch / Math.max(1, request.epochs)
+        d.history = [
+          ...d.history,
+          { epoch, loss: 2.9 * Math.exp(-1.8 * t) + 0.15, valLoss: 3.4 * Math.exp(-1.5 * t) + 0.3 },
+        ]
+      }
+      if (epoch >= request.epochs && batch >= d.batches) {
+        d.paramCount = Math.round(152992 * request.width * request.width)
+        d.model = {
+          exists: true,
+          filename: 'detector.keras',
+          sizeBytes: Math.round(1965573 * request.width * request.width),
+          modifiedAt: new Date().toLocaleString('sv-SE'),
+          inUse: true,
+        }
+        return this.finishDetectorJob(
+          'done',
+          `（モック）学習が完了しました（${request.epochs} エポック）`,
+        )
+      }
+      this.sendDetector()
+    }, 250)
+  }
+
+  private finishDetectorJob(state: DetectorMessage['state'], message: string): void {
+    if (this.detectorTimer) clearInterval(this.detectorTimer)
+    this.detectorTimer = null
+    this.detector = { ...this.detector, state, running: false, message, progress: 1 }
+    this.sendDetector()
+    this.sendStatus({
+      simSuspended: false,
+      learning: true,
+      suspendReason: '',
+      message,
+    })
   }
 
   private sendMetrics(): void {
@@ -1163,6 +1344,24 @@ class MockServer {
         this.sendStatus({ message: '（モック）ポリシーを初期化しました' })
         break
 
+      case 'start_detector_training': {
+        if (this.detector.running) {
+          this.sendStatus({ message: '（モック）すでに学習を実行中です' })
+          return
+        }
+        this.startDetectorJob(msg.request)
+        break
+      }
+
+      case 'cancel_detector_training': {
+        if (!this.detector.running) {
+          this.sendStatus({ message: '（モック）実行中の学習はありません' })
+          return
+        }
+        this.finishDetectorJob('cancelled', '（モック）学習を中断しました')
+        break
+      }
+
       case 'ping':
         this.send({ type: 'pong', t: Date.now() })
         break
@@ -1178,9 +1377,11 @@ class MockServer {
     if (this.frameTimer) clearInterval(this.frameTimer)
     if (this.metricsTimer) clearInterval(this.metricsTimer)
     if (this.loadTimer) clearTimeout(this.loadTimer)
+    if (this.detectorTimer) clearInterval(this.detectorTimer)
     this.frameTimer = null
     this.metricsTimer = null
     this.loadTimer = null
+    this.detectorTimer = null
   }
 }
 

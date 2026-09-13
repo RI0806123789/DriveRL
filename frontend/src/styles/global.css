@@ -110,12 +110,37 @@ p {
   pointer-events: none;
 }
 
-/* ハンバーガーボタン（ステージ右上に浮かせる） */
+/* 幅が縮むのに合わせて中身も右へ逃がす（引き出しを押し込む動き）。
+   幅だけを詰めると、文字が右端で潰れながら消えていく見え方になる */
+.panel {
+  transition:
+    transform var(--m3-dur-long) var(--m3-ease-emphasized),
+    opacity var(--m3-dur-medium) var(--m3-ease-emphasized);
+}
+.app-panel-slot[data-collapsed='true'] .panel {
+  transform: translateX(32px);
+  opacity: 0;
+}
+
+/* ハンバーガーボタン（ステージ右上に浮かせる）。
+   パネルが畳まれ終わる頃に現れるよう、出るときだけ遅らせる */
 .app-hamburger {
   position: absolute;
   top: 16px;
   right: 16px;
   z-index: 30;
+  transition:
+    opacity var(--m3-dur-medium) var(--m3-ease-emphasized),
+    transform var(--m3-dur-long) var(--m3-ease-spring);
+}
+.app-hamburger[data-visible='true'] {
+  transition-delay: 140ms;
+}
+.app-hamburger[data-visible='false'] {
+  opacity: 0;
+  transform: scale(0.55) rotate(75deg);
+  pointer-events: none;
+  transition-delay: 0s;
 }
 
 .app-brand {
@@ -350,13 +375,116 @@ p {
   gap: 12px;
 }
 
+/* タブの中身。タブの並び順に合わせた向きから入れる（ControlPanel が data-dir を付ける） */
+.panel-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  flex: 0 0 auto;
+}
+.panel-pane[data-dir='next'] {
+  --m3-pane-dx: 26px;
+}
+.panel-pane[data-dir='prev'] {
+  --m3-pane-dx: -26px;
+}
+
+/* カードを少しずつ遅らせて出す。全部が同時に現れると
+   「画面が入れ替わった」ようにしか見えず、上から読めばよいことが伝わらない */
+.panel-pane > * {
+  animation: m3-pane-card-in var(--m3-dur-long) var(--m3-ease-emphasized-decel) both;
+}
+.panel-pane > *:nth-child(2) {
+  animation-delay: var(--m3-stagger);
+}
+.panel-pane > *:nth-child(3) {
+  animation-delay: calc(var(--m3-stagger) * 2);
+}
+.panel-pane > *:nth-child(4) {
+  animation-delay: calc(var(--m3-stagger) * 3);
+}
+.panel-pane > *:nth-child(5) {
+  animation-delay: calc(var(--m3-stagger) * 4);
+}
+/* 6 枚目より下は最初の表示で画面に入っていない。これ以上ずらしても待ち時間が伸びるだけ */
+.panel-pane > *:nth-child(n + 6) {
+  animation-delay: calc(var(--m3-stagger) * 5);
+}
+
+@keyframes m3-pane-card-in {
+  from {
+    opacity: 0;
+    transform: translate3d(var(--m3-pane-dx, 0), 10px, 0) scale(0.99);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* 未接続のベール。接続できた瞬間に消えていくところを見せたいので、
+   表示・非表示ではなく不透明度で出し入れする */
 .panel-disabled-veil {
   position: absolute;
   inset: 0;
   z-index: 5;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 24px;
+  text-align: center;
   background: color-mix(in srgb, var(--m3-surface-dim) 62%, transparent);
-  backdrop-filter: saturate(0.4) blur(1px);
   cursor: not-allowed;
+  opacity: 0;
+  /* ★ 隠れている間は visibility で描画ごと落とし、backdrop-filter も外すこと。
+     opacity: 0 のまま置いておくと、3D キャンバスの隣に合成レイヤと
+     backdrop-filter が常駐して、接続できている間ずっと描画コストを払う */
+  visibility: hidden;
+  pointer-events: none;
+  transition:
+    opacity var(--m3-dur-medium) var(--m3-ease-emphasized),
+    visibility var(--m3-dur-medium);
+}
+.panel-disabled-veil[data-visible='true'] {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  backdrop-filter: saturate(0.4) blur(1px);
+}
+.panel-disabled-veil > * {
+  transform: translateY(10px) scale(0.96);
+  transition: transform var(--m3-dur-long) var(--m3-ease-spring);
+}
+.panel-disabled-veil[data-visible='true'] > * {
+  transform: none;
+}
+.panel-disabled-veil[data-visible='true'] > *:nth-child(2) {
+  transition-delay: 50ms;
+}
+.panel-disabled-veil[data-visible='true'] > *:nth-child(3) {
+  transition-delay: 100ms;
+}
+/* 待っている間だけゆっくり脈打たせる。「諦めた」のか「まだ試している」のかの区別 */
+.panel-disabled-veil[data-visible='true'] > svg {
+  animation: m3-veil-breathe 2.6s ease-in-out 500ms infinite;
+}
+@keyframes m3-veil-breathe {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+.panel-veil-title {
+  font-size: 15px;
+  font-weight: 600;
+}
+.panel-veil-note {
+  max-width: 300px;
 }
 
 .panel-wrap {
@@ -472,6 +600,8 @@ p {
 
 /* ---------- IconButton ---------- */
 .m3-iconbtn {
+  position: relative;
+  overflow: hidden;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -565,13 +695,32 @@ p {
 
 /* ---------- Tabs ---------- */
 .m3-tabs {
+  position: relative;
   display: flex;
   gap: 4px;
   padding: 4px;
   border-radius: var(--m3-shape-full);
   background: var(--m3-surface-container);
 }
+
+/* 選択中のタブの下敷き。位置と幅は Tabs.tsx がバネで毎フレーム書き込む。
+   ★ ここに transition を足さないこと。JS 側の追従と二重にかかって遅れる */
+.m3-tab-indicator {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  left: 0;
+  width: 0;
+  z-index: 0;
+  border-radius: var(--m3-shape-full);
+  background: var(--m3-primary-container);
+  opacity: 0;
+  pointer-events: none;
+}
+
 .m3-tab {
+  position: relative;
+  z-index: 1;
   flex: 1 1 0;
   min-width: 0;
   display: inline-flex;
@@ -601,8 +750,8 @@ p {
   background: color-mix(in srgb, var(--m3-on-surface) 8%, transparent);
   color: var(--m3-on-surface);
 }
+/* 背景は .m3-tab-indicator が受け持つ（押されたタブへ滑らせるため） */
 .m3-tab[aria-selected='true'] {
-  background: var(--m3-primary-container);
   color: var(--m3-on-primary-container);
   /* Expressive: 選択されたタブが少し広がる */
   flex-grow: 1.35;
@@ -646,6 +795,23 @@ p {
   font-size: 12px;
   font-weight: 600;
   color: var(--m3-on-surface);
+  /* 右端に置いてあるので、右を軸に伸ばさないと数字が枠から出る */
+  transform-origin: 100% 50%;
+  transition:
+    transform var(--m3-dur-short) var(--m3-ease-spring-snappy),
+    color var(--m3-dur-short) var(--m3-ease-standard);
+}
+/* つまみは細い縦棒でカーソルの下に隠れる。動かしている間は
+   離れた位置にある数字のほうを強調して、何を動かしているかを見えるようにする */
+.m3-slider[data-dragging='true'] .m3-slider-value {
+  transform: scale(1.22);
+  color: var(--m3-primary);
+}
+.m3-slider[data-dragging='true'] .m3-slider-label {
+  color: var(--m3-on-surface);
+}
+.m3-slider-label {
+  transition: color var(--m3-dur-short) var(--m3-ease-standard);
 }
 .m3-slider-input {
   -webkit-appearance: none;
@@ -683,6 +849,12 @@ p {
   transition:
     width var(--m3-dur-short) var(--m3-ease-spring),
     height var(--m3-dur-short) var(--m3-ease-spring);
+}
+/* margin-top はトラック 12px との中心合わせ: (12 - 高さ) / 2 */
+.m3-slider-input:hover:not(:disabled)::-webkit-slider-thumb {
+  width: 7px;
+  height: 26px;
+  margin-top: -7px;
 }
 .m3-slider-input:active::-webkit-slider-thumb {
   width: 3px;
@@ -783,6 +955,27 @@ p {
   outline: 2px solid var(--m3-primary);
   outline-offset: 3px;
 }
+/* 押している間つまみが横に潰れて伸びる（M3 Expressive）。
+   トラック内寸は 48 - 2*2 = 44px なので、伸ばしても右端をはみ出さない値にする */
+.m3-switch:not(.m3-switch--disabled):active input:not(:checked) + .m3-switch-track .m3-switch-thumb {
+  width: 21px;
+}
+.m3-switch:not(.m3-switch--disabled):active input:checked + .m3-switch-track .m3-switch-thumb {
+  width: 26px;
+  transform: translate(14px, -50%);
+}
+/* ホバーの状態レイヤ。つまみの周りに広がる（M3 の hover state layer） */
+.m3-switch:not(.m3-switch--disabled):hover .m3-switch-thumb {
+  box-shadow: 0 0 0 6px color-mix(in srgb, var(--m3-on-surface) 10%, transparent);
+}
+.m3-switch-thumb {
+  transition:
+    transform var(--m3-dur-medium) var(--m3-ease-spring),
+    width var(--m3-dur-medium) var(--m3-ease-spring),
+    height var(--m3-dur-medium) var(--m3-ease-spring),
+    box-shadow var(--m3-dur-short) var(--m3-ease-standard),
+    background-color var(--m3-dur-medium) var(--m3-ease-emphasized);
+}
 
 /* ---------- Select ---------- */
 .m3-select {
@@ -836,6 +1029,8 @@ p {
 
 /* ---------- Chip ---------- */
 .m3-chip {
+  position: relative;
+  overflow: hidden;
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -871,6 +1066,21 @@ button.m3-chip:active:not(:disabled) {
   background: var(--m3-secondary-container);
   color: var(--m3-on-secondary-container);
   border-color: transparent;
+  border-radius: var(--m3-shape-full);
+  /* data-selected が true になった時点で再生される（属性が変わると
+     animation-name が none から変わるため、React 側の仕掛けは要らない） */
+  animation: m3-chip-select var(--m3-dur-long) var(--m3-ease-spring-snappy);
+}
+@keyframes m3-chip-select {
+  0% {
+    transform: scale(0.9);
+  }
+  50% {
+    transform: scale(1.07);
+  }
+  100% {
+    transform: scale(1);
+  }
 }
 .m3-chip:disabled {
   opacity: 0.38;
@@ -977,6 +1187,29 @@ button.m3-chip:active:not(:disabled) {
   border-radius: var(--m3-shape-lg);
   font-size: 12px;
   line-height: 1.6;
+  animation: m3-banner-in var(--m3-dur-medium) var(--m3-ease-emphasized-decel) both;
+}
+@keyframes m3-banner-in {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+/* 閉じるボタンを押したあと、消えるところを見せてから unmount する
+   （ControlPanel が 180ms 待ってから simStore の一覧から外す） */
+.m3-banner.is-leaving {
+  animation: m3-banner-out 200ms var(--m3-ease-emphasized-accel) both;
+  pointer-events: none;
+}
+@keyframes m3-banner-out {
+  to {
+    opacity: 0;
+    transform: translateX(20px) scale(0.97);
+  }
 }
 .m3-banner--error {
   background: var(--m3-error-container);
@@ -1001,6 +1234,9 @@ button.m3-chip:active:not(:disabled) {
 }
 
 /* 破壊的操作のインライン確認 UI（window.confirm は使わない） */
+/* 出入りは Collapse（.m3-collapse）が高さのアニメーションで受け持つ。
+   ここで入場アニメーションを持たせると、Collapse が閉じている間に
+   （中身は常にマウントされているので）見えないまま再生されて終わる */
 .m3-confirm {
   display: flex;
   flex-direction: column;
@@ -1009,17 +1245,6 @@ button.m3-chip:active:not(:disabled) {
   border-radius: var(--m3-shape-md);
   background: var(--m3-error-container);
   color: var(--m3-on-error-container);
-  animation: m3-confirm-in var(--m3-dur-medium) var(--m3-ease-spring);
-}
-@keyframes m3-confirm-in {
-  from {
-    opacity: 0;
-    transform: scale(0.96);
-  }
-  to {
-    opacity: 1;
-    transform: scale(1);
-  }
 }
 .m3-confirm-text {
   font-size: 12px;
@@ -1028,6 +1253,8 @@ button.m3-chip:active:not(:disabled) {
 
 /* プリセットカード（MapTab） */
 .m3-preset {
+  position: relative;
+  overflow: hidden;
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -1047,6 +1274,7 @@ button.m3-chip:active:not(:disabled) {
 }
 .m3-preset:hover:not(:disabled) {
   border-color: var(--m3-primary);
+  transform: translateY(-2px);
 }
 .m3-preset:active:not(:disabled) {
   transform: scale(0.98);
@@ -1055,6 +1283,21 @@ button.m3-chip:active:not(:disabled) {
 .m3-preset:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+/* 読み込み中の 1 枚。他と同じ半透明にすると、どれを押したのか分からなくなる */
+.m3-preset[data-loading='true']:disabled {
+  opacity: 1;
+  border-color: var(--m3-primary);
+  animation: m3-preset-loading 1.6s ease-in-out infinite;
+}
+@keyframes m3-preset-loading {
+  0%,
+  100% {
+    border-color: color-mix(in srgb, var(--m3-primary) 35%, transparent);
+  }
+  50% {
+    border-color: var(--m3-primary);
+  }
 }
 .m3-preset:focus-visible {
   outline: 2px solid var(--m3-primary);
@@ -1081,13 +1324,39 @@ button.m3-chip:active:not(:disabled) {
 }
 
 /* 車両リスト */
+/* 車両一覧の 1 行。クリックでその車両を追跡する（＝押せることが見た目で分かる必要がある） */
 .m3-vehicle {
+  position: relative;
+  overflow: hidden;
   display: flex;
   align-items: center;
   gap: 10px;
   padding: 8px 10px;
   border-radius: var(--m3-shape-md);
   background: var(--m3-surface-container-high);
+  cursor: pointer;
+  outline: 2px solid transparent;
+  outline-offset: -2px;
+  transition:
+    background-color var(--m3-dur-short) var(--m3-ease-standard),
+    outline-color var(--m3-dur-medium) var(--m3-ease-emphasized),
+    border-radius var(--m3-dur-medium) var(--m3-ease-spring),
+    transform var(--m3-dur-short) var(--m3-ease-emphasized);
+}
+.m3-vehicle:hover {
+  background: var(--m3-surface-container-highest);
+}
+.m3-vehicle:active {
+  transform: scale(0.985);
+  border-radius: var(--m3-shape-lg);
+}
+.m3-vehicle:focus-visible {
+  outline-color: var(--m3-primary);
+}
+/* いま追跡している行。3D 側のピンと対応が付くよう、枠を出して少し右にずらす */
+.m3-vehicle[data-followed='true'] {
+  outline-color: var(--m3-primary);
+  transform: translateX(3px);
 }
 .m3-vehicle[data-collided='true'] {
   background: var(--m3-error-container);
@@ -1126,22 +1395,46 @@ button.m3-chip:active:not(:disabled) {
   overflow: hidden;
   position: relative;
 }
+/* 2 本を時間差で走らせる（M3 の indeterminate）。
+   1 本だけだと戻ってくる瞬間に間が空き、止まったように見える */
+.m3-progress::before,
 .m3-progress::after {
   content: '';
   position: absolute;
-  inset: 0;
-  width: 38%;
+  top: 0;
+  bottom: 0;
+  left: 0;
   border-radius: var(--m3-shape-full);
   background: var(--m3-primary);
-  animation: m3-progress-slide 1.5s var(--m3-ease-emphasized) infinite;
+}
+.m3-progress::before {
+  width: 42%;
+  animation: m3-progress-slide 1.9s cubic-bezier(0.65, 0, 0.35, 1) infinite;
+}
+.m3-progress::after {
+  width: 24%;
+  opacity: 0.5;
+  animation: m3-progress-slide 1.9s cubic-bezier(0.65, 0, 0.35, 1) 0.62s infinite;
 }
 @keyframes m3-progress-slide {
   0% {
-    transform: translateX(-100%);
+    transform: translateX(-110%);
   }
   100% {
-    transform: translateX(300%);
+    transform: translateX(430%);
   }
+}
+
+/* 進捗が数で分かるとき（認識器の学習）。--m3-progress-value に 0〜1 を入れる。
+   指標側（::after）は消し、1 本だけを幅で伸ばす。
+   ★ transition は width に掛ける。transform: scaleX() だと角丸まで潰れる */
+.m3-progress--determinate::before {
+  width: calc(var(--m3-progress-value, 0) * 100%);
+  animation: none;
+  transition: width var(--m3-dur-medium) var(--m3-ease-standard);
+}
+.m3-progress--determinate::after {
+  content: none;
 }
 
 /* 接続状態のドット */
@@ -1160,9 +1453,23 @@ button.m3-chip:active:not(:disabled) {
   background: var(--m3-outline);
   flex: 0 0 auto;
 }
+.m3-conn-dot {
+  animation: m3-conn-pop var(--m3-dur-xlong) var(--m3-ease-spring);
+}
 .m3-conn[data-state='open'] .m3-conn-dot {
   background: var(--m3-secondary);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--m3-secondary) 25%, transparent);
+}
+@keyframes m3-conn-pop {
+  0% {
+    transform: scale(0.2);
+  }
+  55% {
+    transform: scale(1.35);
+  }
+  100% {
+    transform: scale(1);
+  }
 }
 .m3-conn[data-state='connecting'] .m3-conn-dot {
   background: var(--m3-warning);
@@ -1175,9 +1482,11 @@ button.m3-chip:active:not(:disabled) {
   0%,
   100% {
     opacity: 1;
+    transform: scale(1);
   }
   50% {
     opacity: 0.3;
+    transform: scale(0.7);
   }
 }
 
@@ -1415,4 +1724,241 @@ button.m3-chip:active:not(:disabled) {
 }
 .netgraph-arch-confirm .m3-note {
   color: inherit;
+}
+
+
+/* ==========================================================================
+   モーション（ui/motion.ts と対になる部分）
+   --------------------------------------------------------------------------
+   ★ ここで動かしてよいのは transform と opacity だけ。操作パネルは 3D と同じ
+     メインスレッドに乗っているので、幅・高さ・影を毎フレーム変える演出を足すと
+     シミュレータ側のフレームが落ちる。
+     例外は .m3-tab-indicator（絶対配置の 1 要素でレイアウトが波及しない）と
+     .m3-collapse（開閉の瞬間だけで、定常的には動かない）。
+   ========================================================================== */
+
+/* ---------- 波紋（Material 3 の state layer） ----------
+   押した点の座標と直径は ui/motion.ts の startRipple が CSS 変数で渡す。
+   ボタンが効いたかどうかを、色の変化ではなく「押した場所」で返すための表現。 */
+.m3-ripple::after {
+  content: '';
+  position: absolute;
+  left: var(--m3-ripple-x, 50%);
+  top: var(--m3-ripple-y, 50%);
+  width: var(--m3-ripple-d, 0px);
+  height: var(--m3-ripple-d, 0px);
+  /* transform は拡大に使うので、中心合わせは負のマージンで行う */
+  margin: calc(var(--m3-ripple-d, 0px) / -2);
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0;
+  transform: scale(0);
+  pointer-events: none;
+}
+.m3-ripple.is-rippling::after {
+  animation: m3-ripple var(--m3-dur-long) var(--m3-ease-emphasized-decel);
+}
+@keyframes m3-ripple {
+  from {
+    transform: scale(0);
+    opacity: 0.26;
+  }
+  to {
+    transform: scale(1);
+    opacity: 0;
+  }
+}
+
+/* ---------- Collapse（ui/Collapse.tsx） ----------
+   高さ auto を 0fr → 1fr でアニメーションさせる。
+   ★ 中身は閉じている間も DOM に残る。Collapse の中に入場アニメーションを持つ
+     要素を置いても、閉じている最中に見えないまま再生されて終わるので意味がない。 */
+.m3-collapse {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  /* 親が gap を持つ縦積みでは、閉じていても gap が 1 つ分残る。
+     Collapse に渡された親の gap 分だけ負のマージンで詰める */
+  margin-block-start: calc(-1 * var(--m3-collapse-gap, 10px));
+  transition:
+    grid-template-rows var(--m3-dur-medium) var(--m3-ease-emphasized),
+    margin-block-start var(--m3-dur-medium) var(--m3-ease-emphasized),
+    opacity var(--m3-dur-short) var(--m3-ease-standard);
+}
+.m3-collapse[data-open='true'] {
+  grid-template-rows: 1fr;
+  opacity: 1;
+  margin-block-start: 0;
+}
+.m3-collapse-inner {
+  min-height: 0;
+  overflow: hidden;
+  /* フォーカスリング（outline-offset 2px）が切れないだけの逃げを作る。
+     margin で相殺しているのでレイアウトは変わらない */
+  padding: 3px;
+  margin: -3px;
+}
+
+/* ---------- 値の入れ替え（ui/ValueFlash.tsx） ----------
+   増えたら下から、減ったら上から。1Hz で書き換わる指標が
+   「いま更新された」のかどうかを画面から読めるようにする。 */
+.m3-valueflash {
+  display: inline-block;
+}
+.m3-valueflash.is-flash {
+  animation: m3-value-up var(--m3-dur-long) var(--m3-ease-emphasized-decel);
+}
+.m3-valueflash.is-flash[data-dir='down'] {
+  animation-name: m3-value-down;
+}
+.m3-valueflash.is-flash[data-dir='flat'] {
+  animation-name: m3-value-flat;
+}
+@keyframes m3-value-up {
+  0% {
+    transform: translateY(0.45em);
+    opacity: 0;
+  }
+  45% {
+    color: var(--m3-primary);
+  }
+  100% {
+    transform: none;
+    opacity: 1;
+  }
+}
+@keyframes m3-value-down {
+  0% {
+    transform: translateY(-0.45em);
+    opacity: 0;
+  }
+  45% {
+    color: var(--m3-primary);
+  }
+  100% {
+    transform: none;
+    opacity: 1;
+  }
+}
+/* 数値を拾えなかったとき（エリア名など）は向きを付けず、その場で差し替える */
+@keyframes m3-value-flat {
+  0% {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+  100% {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* ---------- 割合バー（追跡中の車両の達成度） ---------- */
+.m3-bar {
+  height: 8px;
+  border-radius: var(--m3-shape-full);
+  background: var(--m3-surface-container-highest);
+  overflow: hidden;
+}
+.m3-bar-fill {
+  height: 100%;
+  border-radius: var(--m3-shape-full);
+  /* 4Hz で更新されるので、次の更新（250ms）までに収まる長さにする。
+     これより遅くすると常に追いかけ続けて、いまの値がどこにも出なくなる */
+  transition: width 220ms var(--m3-ease-standard);
+}
+
+/* ---------- スクロールできることを端のぼかしで示す ----------
+   パネルは縦に長く、下に続きがあるかどうかがスクロールバーでしか分からない。
+   スクロール位置に連動させるので、上端にいるときは上をぼかさない。
+   animation-timeline 未対応のブラウザでは何も起きない（@supports で囲ってある）。 */
+@supports (animation-timeline: scroll()) {
+  @property --m3-fade-top {
+    syntax: '<length>';
+    inherits: false;
+    initial-value: 0px;
+  }
+  @property --m3-fade-bottom {
+    syntax: '<length>';
+    inherits: false;
+    initial-value: 0px;
+  }
+
+  .panel-body {
+    --m3-fade-top: 0px;
+    --m3-fade-bottom: 20px;
+    mask-image: linear-gradient(
+      to bottom,
+      transparent 0,
+      #000 var(--m3-fade-top),
+      #000 calc(100% - var(--m3-fade-bottom)),
+      transparent 100%
+    );
+    animation:
+      m3-fade-top linear both,
+      m3-fade-bottom linear both;
+    animation-timeline: scroll(self block), scroll(self block);
+    animation-range:
+      0 28px,
+      calc(100% - 28px) 100%;
+  }
+
+  @keyframes m3-fade-top {
+    from {
+      --m3-fade-top: 0px;
+    }
+    to {
+      --m3-fade-top: 20px;
+    }
+  }
+  @keyframes m3-fade-bottom {
+    from {
+      --m3-fade-bottom: 20px;
+    }
+    to {
+      --m3-fade-bottom: 0px;
+    }
+  }
+}
+
+/* ==========================================================================
+   視差効果を減らす設定（OS 側）
+   --------------------------------------------------------------------------
+   一律で止めるが、「進行中であること」を伝えているものだけは残す。
+   止めてしまうと読み込み中と固まっているのが区別できなくなり、
+   10〜60 秒かかる地図の取得で「動いていない」と誤解される。
+   ========================================================================== */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  /* 地図の読み込み中。走らせる代わりに、全幅のバーの濃さだけを往復させる */
+  .m3-progress::before {
+    width: 100% !important;
+    transform: none !important;
+    animation: m3-progress-reduced 2s ease-in-out infinite !important;
+  }
+  .m3-progress::after {
+    display: none;
+  }
+  @keyframes m3-progress-reduced {
+    0%,
+    100% {
+      opacity: 0.3;
+    }
+    50% {
+      opacity: 1;
+    }
+  }
+
+  /* 接続を試している最中。m3-pulse の transform 部分は下で打ち消す */
+  .m3-conn[data-state='connecting'] .m3-conn-dot {
+    animation: m3-pulse 1.6s var(--m3-ease-standard) infinite !important;
+    transform: none !important;
+  }
 }

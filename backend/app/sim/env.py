@@ -466,6 +466,33 @@ class SimulationEnv:
     # 観測の生成（擬似カメラ -> CNN 認識 -> 観測ベクトル）
     # ------------------------------------------------------------------
 
+    @property
+    def detector_active(self) -> bool:
+        """観測が CNN 由来か（False なら真値フォールバック）。
+
+        ★ まだ一度も観測を作っていない時点では False を返す（`_ensure_percep()` が
+          走っていないため）。**「認識器のファイルがあるか」ではなく
+          「いま実際に使っているか」**を返すことに意味がある。
+        """
+        return self._detector is not None
+
+    def reload_detector(self) -> bool:
+        """`config.DETECTOR_PATH` を読み直して認識器を差し替える。成否を返す。
+
+        「モデル作成」タブで学習し直したあと、**サーバーを再起動せずに**
+        新しい認識器へ切り替えるための入口（`runtime/detector_job.py`）。
+
+        ★ **エンジンスレッドのステップ境界からのみ呼ぶこと。** 観測を作っている
+          最中に差し替えると、同じフレームの中で古い認識器と新しい認識器が混ざる。
+        """
+        self._percep_ready = False
+        self._detector = None
+        self._camera = None
+        # 前の認識器で出ていた失敗は引き継がない（新しいモデルの失敗を黙らせないため）
+        self._detector_failed = False
+        self._ensure_percep()
+        return self._detector is not None
+
     def _ensure_percep(self) -> None:
         """擬似カメラと認識器を用意する（1 度だけ走る）。
 

@@ -85,6 +85,14 @@ export interface StatusPayload {
   /** 「一時停止」は描画のみ。学習は継続している */
   renderPaused: boolean
   learning: boolean
+  /**
+   * **物理と PPO ごと止まっているか。** `renderPaused` とは別物で、
+   * 認識器の学習（「モデル作成」タブ）の間だけ true になる。
+   * 古いサーバーだと入っていないことがある。
+   */
+  simSuspended?: boolean
+  /** `simSuspended` が true のときの理由 */
+  suspendReason?: string
   message?: string
 }
 
@@ -352,6 +360,102 @@ export interface MetricsMessage {
   laneDeviation: number
 }
 
+// ---------------------------------------------------------------------------
+// 2.9 detector — 認識器（CNN）の学習状況
+// ---------------------------------------------------------------------------
+
+/** 学習ジョブの段階 */
+export type DetectorState =
+  | 'idle'
+  | 'preparing'
+  | 'collecting'
+  | 'training'
+  | 'saving'
+  | 'done'
+  | 'error'
+  | 'cancelled'
+
+/** 何をするか。CLI の `--collect-only` / `--train-only` と同じ 3 通り */
+export type DetectorMode = 'full' | 'collect' | 'train'
+
+/** 学習の依頼内容（`start_detector_training` で送ったもののエコー） */
+export interface DetectorRequest {
+  mode: DetectorMode
+  presetId: string | null
+  samples: number
+  epochs: number
+  batchSize: number
+  /** モデルのチャンネル倍率 */
+  width: number
+}
+
+/**
+ * 集めた教師データに何が写っているか。
+ * **件数 0 のクラスは、学習しても検出できるようにならない。**
+ */
+export interface DetectorDataset {
+  samples: number
+  /** 物体があるセルの割合 0.0〜1.0 */
+  objectCellRatio: number
+  objectsPerImage: number
+  /** クラス名（バックエンドの DetClass）-> 件数 */
+  classCounts: Record<string, number>
+}
+
+/** ディスク上のファイルの情報 */
+export interface DetectorFileInfo {
+  exists: boolean
+  filename?: string
+  sizeBytes: number
+  modifiedAt: string | null
+  /** 認識器のみ: いま観測を作るのに実際に使われているか */
+  inUse?: boolean
+}
+
+/** サーバーが受け付ける値域。UI のスライダーはこれに合わせる */
+export interface DetectorLimits {
+  samplesMin: number
+  samplesMax: number
+  epochsMin: number
+  epochsMax: number
+  batchMin: number
+  batchMax: number
+  widthMin: number
+  widthMax: number
+}
+
+/**
+ * 2.9 detector — 認識器の学習状況（進捗が動いたときだけ、最大 1Hz）。
+ *
+ * 接続直後にも 1 通届くので、学習中にページをリロードしても進行中のジョブが見える。
+ */
+export interface DetectorMessage {
+  type: 'detector'
+  state: DetectorState
+  /** ジョブスレッドが走っているか */
+  running: boolean
+  message: string
+  /** **いまの段階の**進捗 0.0〜1.0（段階をまたいで通算しない） */
+  progress: number
+  collected: number
+  samples: number
+  epoch: number
+  epochs: number
+  batch: number
+  batches: number
+  history: Array<{ epoch: number; loss: number; valLoss: number }>
+  elapsedSec: number
+  /** 気づいたこと（写っていないクラスがある、何も検出しない等）。空なら問題なし */
+  warning: string
+  paramCount: number
+  presetName: string | null
+  request: DetectorRequest | null
+  dataset: DetectorDataset | null
+  model: DetectorFileInfo
+  datasetFile: DetectorFileInfo
+  limits: DetectorLimits
+}
+
 export type ErrorCode =
   | 'MAP_LOAD_FAILED'
   | 'INVALID_MESSAGE'
@@ -424,6 +528,7 @@ export type ServerMessage =
   | ParamsMessage
   | MetricsMessage
   | NetworkMessage
+  | DetectorMessage
   | ErrorMessage
   | PongMessage
 
@@ -498,6 +603,23 @@ export interface PingMessage {
 }
 
 /**
+ * 認識器（CNN）の学習を始める（操作パネルの「モデル作成」タブ）。
+ *
+ * **実行中はシミュレーションが止まる**（物理も PPO も）。CPU と
+ * `groundtruth` の静的キャッシュを学習と取り合わないようにするためで、
+ * 完了・中断すると自動で再開する。
+ */
+export interface StartDetectorTrainingMessage {
+  type: 'start_detector_training'
+  request: DetectorRequest
+}
+
+/** 学習の中断を要求する。**すぐには止まらない**（バッチ／ステップの境界で抜ける） */
+export interface CancelDetectorTrainingMessage {
+  type: 'cancel_detector_training'
+}
+
+/**
  * 隠れ層の構成を変える。
  *
  * **重みは引き継げない。** 層の形が変わるので学習は 0 からやり直しになる。
@@ -523,6 +645,8 @@ export type ClientMessage =
   | LoadCheckpointMessage
   | ResetPolicyMessage
   | SetNetworkMessage
+  | StartDetectorTrainingMessage
+  | CancelDetectorTrainingMessage
   | PingMessage
 
 // ---------------------------------------------------------------------------

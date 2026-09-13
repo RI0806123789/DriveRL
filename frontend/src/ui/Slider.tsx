@@ -3,9 +3,13 @@
  * トラックは太く、つまみは細い縦棒（M3 Expressive のスタイル）。
  * ドラッグ中は onInput でローカル更新し、離した時（onChange 相当）にサーバーへ送る、
  * という使い方ができるよう onChange と onCommit を分けている。
+ *
+ * 掴んでいる間は値の表示を拡大して primary 色にする。
+ * つまみは細い縦棒なので指やカーソルの下に隠れやすく、いま何の値を動かしているのかが
+ * 手元から見えなくなるため（見るべき数字は離れた行の右端にある）。
  */
 
-import { useId } from 'react'
+import { useEffect, useId, useState } from 'react'
 
 export interface SliderProps {
   label: string
@@ -41,8 +45,22 @@ export function Slider({
   const pct = span > 0 ? ((value - min) / span) * 100 : 0
   const shown = format ? format(value) : String(value)
 
+  // 掴んでいる最中かどうか。:active では拾えない（つまみの外まで
+  // ドラッグしたときに外れる）ので window の pointerup で閉じる
+  const [dragging, setDragging] = useState(false)
+  useEffect(() => {
+    if (!dragging) return
+    const end = () => setDragging(false)
+    window.addEventListener('pointerup', end)
+    window.addEventListener('pointercancel', end)
+    return () => {
+      window.removeEventListener('pointerup', end)
+      window.removeEventListener('pointercancel', end)
+    }
+  }, [dragging])
+
   return (
-    <div className="m3-slider">
+    <div className="m3-slider" data-dragging={dragging ? 'true' : 'false'}>
       <div className="m3-slider-head">
         <label className="m3-slider-label" htmlFor={id}>
           {label}
@@ -60,6 +78,7 @@ export function Slider({
         value={value}
         disabled={disabled}
         style={{ ['--m3-slider-pct' as string]: `${pct}%` }}
+        onPointerDown={() => setDragging(true)}
         onChange={(e) => onChange(Number(e.target.value))}
         onPointerUp={(e) => onCommit?.(Number((e.target as HTMLInputElement).value))}
         onKeyUp={(e) => onCommit?.(Number((e.target as HTMLInputElement).value))}

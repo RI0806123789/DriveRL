@@ -16,8 +16,11 @@ import { vehicleColor } from '../scene/vehicleColors'
 import { Button } from '../ui/Button'
 import { Card } from '../ui/Card'
 import { Chip } from '../ui/Chip'
+import { Collapse } from '../ui/Collapse'
+import { startRipple } from '../ui/motion'
 import { Slider } from '../ui/Slider'
 import { Switch } from '../ui/Switch'
+import { ValueFlash } from '../ui/ValueFlash'
 import {
   CarIcon,
   ConeIcon,
@@ -28,6 +31,7 @@ import {
   TargetIcon,
   TrashIcon,
   TuneIcon,
+  WarningIcon,
 } from '../ui/Icons'
 
 /** 車両一覧の表示に使う 1 台分のスナップショット */
@@ -91,6 +95,9 @@ export function SimulationTab() {
   const panelOpen = useSimStore((s) => s.panelOpen)
 
   const paused = status.renderPaused
+  // ★ `renderPaused`（描画だけ止める）とは別物。認識器の学習中は物理も PPO も
+  //   止まっている。ここに出さないと「一時停止していないのに車が動かない」に見える
+  const suspended = status.simSuspended ?? false
 
   // 車両一覧と障害物数は 4Hz で frameBuffer から取る（20Hz で React を回さない）
   const [rows, setRows] = useState<VehicleRow[]>([])
@@ -153,6 +160,20 @@ export function SimulationTab() {
             （オンライン学習を常に継続する設計のため）。
           </span>
         </div>
+
+        <Collapse open={suspended}>
+          <div className="m3-banner m3-banner--warning">
+            <span className="m3-banner-icon">
+              <WarningIcon size={16} />
+            </span>
+            <span>
+              <span className="m3-banner-title">いまは走行も学習も止まっています</span>
+              {status.suspendReason ||
+                '認識器の学習中はシミュレーションを止めています'}
+              。「モデル作成」タブで進み具合を確認できます。完了・中断すると自動で再開します。
+            </span>
+          </div>
+        </Collapse>
       </Card>
 
       <Card title="パラメータ" icon={<TuneIcon size={16} />}>
@@ -237,7 +258,7 @@ export function SimulationTab() {
           ))}
         </div>
 
-        {interaction === 'obstacle' && (
+        <Collapse open={interaction === 'obstacle'}>
           <Slider
             label="障害物の半径"
             value={obstacleRadius}
@@ -247,7 +268,7 @@ export function SimulationTab() {
             format={(v) => `${v.toFixed(2)} m`}
             onChange={setObstacleRadius}
           />
-        )}
+        </Collapse>
 
         <hr className="m3-divider" />
         <div className="m3-row">
@@ -290,21 +311,21 @@ export function SimulationTab() {
               </div>
               <div className="m3-stat">
                 <span className="m3-stat-label">信号無視</span>
-                <span
+                <ValueFlash
                   className="m3-stat-value"
                   style={tracked.signalViolations > 0 ? { color: 'var(--m3-error)' } : undefined}
                 >
                   {tracked.signalViolations} 回
-                </span>
+                </ValueFlash>
               </div>
               <div className="m3-stat">
                 <span className="m3-stat-label">車線逸脱</span>
-                <span
+                <ValueFlash
                   className="m3-stat-value"
                   style={tracked.laneDepartures > 0 ? { color: 'var(--m3-warning)' } : undefined}
                 >
                   {tracked.laneDepartures} 回
-                </span>
+                </ValueFlash>
               </div>
             </div>
 
@@ -312,21 +333,12 @@ export function SimulationTab() {
               <span className="m3-slider-label">達成度</span>
               <span className="m3-slider-value">{(tracked.progress * 100).toFixed(0)} %</span>
             </div>
-            <div
-              style={{
-                height: 8,
-                borderRadius: 999,
-                background: 'var(--m3-surface-container-highest)',
-                overflow: 'hidden',
-              }}
-            >
+            <div className="m3-bar">
               <div
+                className="m3-bar-fill"
                 style={{
                   width: `${Math.max(0, Math.min(100, tracked.progress * 100))}%`,
-                  height: '100%',
-                  borderRadius: 999,
                   background: vehicleColor(tracked.id),
-                  transition: 'width 240ms var(--m3-ease-standard)',
                 }}
               />
             </div>
@@ -353,8 +365,10 @@ export function SimulationTab() {
               .map((r) => (
                 <div
                   key={r.id}
-                  className="m3-vehicle"
+                  className="m3-vehicle m3-ripple"
                   data-collided={r.collided ? 'true' : 'false'}
+                  data-followed={followTarget === r.id ? 'true' : 'false'}
+                  onPointerDown={startRipple}
                   onClick={() => setFollowTarget(r.id)}
                   role="button"
                   tabIndex={0}
@@ -362,11 +376,6 @@ export function SimulationTab() {
                     if (e.key === 'Enter' || e.key === ' ') setFollowTarget(r.id)
                   }}
                   title="クリックすると追跡します（3D 画面にピンが立ち、追従カメラの対象にもなります）"
-                  style={{
-                    cursor: 'pointer',
-                    outline:
-                      followTarget === r.id ? '2px solid var(--m3-primary)' : undefined,
-                  }}
                 >
                   <span
                     className="m3-vehicle-swatch"

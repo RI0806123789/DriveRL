@@ -11,6 +11,7 @@ import { bootstrapTheme } from './themeClock'
 import { create } from 'zustand'
 import type {
   ConnectionState,
+  DetectorMessage,
   ErrorMessage,
   InitMessage,
   MapMessage,
@@ -28,7 +29,7 @@ import { pushFrame, resetFrameBuffer } from './frameBuffer'
 /** メトリクス履歴のリングバッファ上限（要件: 300 点） */
 export const METRICS_CAPACITY = 300
 
-export type PanelTab = 'simulation' | 'map' | 'learning' | 'view'
+export type PanelTab = 'simulation' | 'map' | 'learning' | 'model' | 'view'
 /** 俯瞰（自由視点） / 追従（後方上空） / 運転席（一人称） */
 export type CameraMode = 'orbit' | 'follow' | 'driver'
 /** 3D 画面クリック時のふるまい（memo F-05） */
@@ -96,6 +97,7 @@ const DEFAULT_STATUS: StatusPayload = {
   presetId: null,
   renderPaused: false,
   learning: false,
+  simSuspended: false,
 }
 
 export interface SimStore {
@@ -119,6 +121,11 @@ export interface SimStore {
   latestMetrics: MetricsMessage | null
   /** ネットワークの状態（層ごとの重み・勾配・変化量）。1Hz で更新される */
   network: NetworkMessage | null
+  /**
+   * 認識器（CNN）の学習状況。接続直後に 1 通届き、以後は進捗が動いたときだけ。
+   * null は「サーバーからまだ何も届いていない」（= モック接続や古いサーバー）。
+   */
+  detector: DetectorMessage | null
   errors: ErrorEntry[]
 
   // ---- UI 状態 ----
@@ -204,6 +211,7 @@ export const useSimStore = create<SimStore>((set, get) => ({
   metrics: [],
   latestMetrics: null,
   network: null,
+  detector: null,
   errors: [],
 
   panelOpen: true,
@@ -308,6 +316,11 @@ export const useSimStore = create<SimStore>((set, get) => ({
 
       case 'network': {
         set({ network: msg })
+        break
+      }
+
+      case 'detector': {
+        set({ detector: msg as DetectorMessage })
         break
       }
 

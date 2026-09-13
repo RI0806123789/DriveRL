@@ -45,18 +45,23 @@ export function App() {
           </span>
         </div>
 
-        {!panelOpen && (
-          <div className="app-hamburger">
-            <IconButton
-              variant="surface"
-              large
-              label="操作パネルを開く（M キー）"
-              onClick={togglePanel}
-            >
-              <MenuIcon size={22} />
-            </IconButton>
-          </div>
-        )}
+        {/* 条件レンダリングにせず、data-visible で出し入れする。
+            外すと消えるときのアニメーションが一切かからず、
+            パネルが 400ms かけて畳まれている途中でボタンだけ先に現れる */}
+        <div
+          className="app-hamburger"
+          data-visible={panelOpen ? 'false' : 'true'}
+          inert={panelOpen}
+        >
+          <IconButton
+            variant="surface"
+            large
+            label="操作パネルを開く（M キー）"
+            onClick={togglePanel}
+          >
+            <MenuIcon size={22} />
+          </IconButton>
+        </div>
 
         <SimulatorView />
       </main>

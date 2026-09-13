@@ -33,6 +33,7 @@ npm run verify:signals  # 1 本だけ（他: camera / colors / vehicles / sun / 
 .venv\Scripts\python.exe -m app.map.prefetch          # OSM の事前ダウンロード（初回は数十秒/エリア）
 .venv\Scripts\python.exe train_detector.py --samples 2400 --epochs 12   # 認識器の学習
 .venv\Scripts\python.exe train_detector.py --collect-only              # 教師データ収集だけ
+# ↑ どちらも操作パネルの「モデル作成」タブから同じことができる（中身は同じ実装）
 .venv\Scripts\python.exe verify_log_std.py           # 方策分布の健全性チェック
 ```
 
@@ -78,6 +79,11 @@ world（真値）
                             ★ 教師データ兼フォールバックの二役。分けてはいけない
 ```
 
+認識器の**学習**は `percep/trainer.py` にあり、**CLI（`train_detector.py`）と
+Web UI（`runtime/detector_job.py` →「モデル作成」タブ）が同じ関数を呼ぶ**。
+収集・損失・検証を片方にだけ足すと「コマンドでは学習できるのに画面からだと違う」
+という切り分け不能な食い違いになるので、**アルゴリズムは必ず `trainer.py` へ書くこと。**
+
 **不変条件**:
 
 - **観測はカメラ由来、報酬と終了条件は真値由来。** 認識を誤ればそのまま赤信号に突っ込むが、
@@ -100,6 +106,17 @@ world（真値）
 - 1 ステップの予算は 50ms（20Hz）。**エンジンスレッドを止める処理を入れないこと。**
   過去に `_install_route()` が金沢で 1 秒止めていた実例があります（`memo/code_review.md` M-01）。
 - PPO の勾配更新は 1 ステップ 1 回ずつに分割済み（まとめると数百 ms 止まる）。
+
+認識器の学習（`runtime/detector_job.py`）は**さらに別のスレッド**で回り、その間だけ
+`engine.suspend_sim()` で**物理と PPO を止めます**（`_run_loop` が `_step_once()` を飛ばす）。
+利用者の「一時停止」（描画だけ止める）とは別物なので混ぜないこと。止める理由は 2 つ:
+
+1. 収集も学習も CPU を使い切るので、同時に回すと 50ms の予算を守れない
+2. `groundtruth._STATIC_CACHE` は `map_index` の identity 比較 1 件だけのキャッシュで、
+   別々のマップを持つ 2 つの env が交互に呼ぶと**毎回作り直しになる**
+
+再開（`resume_sim()`）は**inbox 経由**。直前に積む `reload_detector` より先に再開すると、
+古い認識器のまま 1 ステップ進んでしまうためです（止めるのは即座、再開は順序つき）。
 
 ### フロントエンドの状態管理
 

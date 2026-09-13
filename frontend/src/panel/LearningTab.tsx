@@ -18,7 +18,9 @@ import { MetricsChart } from './MetricsChart'
 import { NetworkGraph } from './NetworkGraph'
 import { Button } from '../ui/Button'
 import { Card } from '../ui/Card'
+import { Collapse } from '../ui/Collapse'
 import { Slider } from '../ui/Slider'
+import { ValueFlash } from '../ui/ValueFlash'
 import {
   BrainIcon,
   ChartIcon,
@@ -37,6 +39,9 @@ export function LearningTab() {
   const params = useSimStore((s) => s.params)
   const patchParamsLocal = useSimStore((s) => s.patchParamsLocal)
   const learning = useSimStore((s) => s.status.learning)
+  // 認識器の学習中は PPO も止まる（docs/protocol.md 2.9）。
+  // 「マップを読み込むと始まります」と出してしまうと理由が食い違う
+  const suspended = useSimStore((s) => s.status.simSuspended ?? false)
 
   const usingMock = useSimStore((s) => s.usingMock)
   const connection = useSimStore((s) => s.connection)
@@ -95,55 +100,57 @@ export function LearningTab() {
       <Card title="学習の状況" icon={<BrainIcon size={16} />}>
         {!learning && (
           <div className="m3-note">
-            マップを読み込むと学習が始まります。ここには開始後の推移が表示されます。
+            {suspended
+              ? '「モデル作成」タブで認識器を学習している間は、強化学習も止まります。完了・中断すると自動で再開します。'
+              : 'マップを読み込むと学習が始まります。ここには開始後の推移が表示されます。'}
           </div>
         )}
         <div className="m3-statgrid">
           <div className="m3-stat">
             <span className="m3-stat-label">PPO 更新回数</span>
-            <span className="m3-stat-value">{latest?.updates.toLocaleString() ?? '—'}</span>
+            <ValueFlash className="m3-stat-value">{latest?.updates.toLocaleString() ?? '—'}</ValueFlash>
           </div>
           <div className="m3-stat">
             <span className="m3-stat-label">エピソード数</span>
-            <span className="m3-stat-value">{latest?.episodes.toLocaleString() ?? '—'}</span>
+            <ValueFlash className="m3-stat-value">{latest?.episodes.toLocaleString() ?? '—'}</ValueFlash>
           </div>
           <div className="m3-stat">
             <span className="m3-stat-label">目的地到達率</span>
-            <span className="m3-stat-value m3-stat-value--accent">
+            <ValueFlash className="m3-stat-value m3-stat-value--accent">
               {latest ? `${(latest.goalRate * 100).toFixed(0)}%` : '—'}
-            </span>
+            </ValueFlash>
           </div>
           <div className="m3-stat">
             <span className="m3-stat-label">衝突率</span>
-            <span className="m3-stat-value">
+            <ValueFlash className="m3-stat-value">
               {latest ? `${(latest.collisionRate * 100).toFixed(0)}%` : '—'}
-            </span>
+            </ValueFlash>
           </div>
           <div className="m3-stat">
             <span className="m3-stat-label">ステップ/秒</span>
-            <span className="m3-stat-value">{latest?.stepsPerSec.toFixed(1) ?? '—'}</span>
+            <ValueFlash className="m3-stat-value">{latest?.stepsPerSec.toFixed(1) ?? '—'}</ValueFlash>
           </div>
           <div className="m3-stat">
             <span className="m3-stat-label">信号無視/エピソード</span>
-            <span className="m3-stat-value">
+            <ValueFlash className="m3-stat-value">
               {latest?.signalViolations.toFixed(2) ?? '—'}
-            </span>
+            </ValueFlash>
           </div>
           <div className="m3-stat">
             <span className="m3-stat-label">速度超過/エピソード</span>
-            <span className="m3-stat-value">
+            <ValueFlash className="m3-stat-value">
               {latest?.speedViolations.toFixed(2) ?? '—'}
-            </span>
+            </ValueFlash>
           </div>
           <div className="m3-stat">
             <span className="m3-stat-label">車線逸脱（平均）</span>
-            <span className="m3-stat-value">
+            <ValueFlash className="m3-stat-value">
               {latest ? `${latest.laneDeviation.toFixed(2)} m` : '—'}
-            </span>
+            </ValueFlash>
           </div>
           <div className="m3-stat">
             <span className="m3-stat-label">平均エピソード長</span>
-            <span className="m3-stat-value">{latest?.meanEpisodeLength.toFixed(0) ?? '—'}</span>
+            <ValueFlash className="m3-stat-value">{latest?.meanEpisodeLength.toFixed(0) ?? '—'}</ValueFlash>
           </div>
         </div>
         <div className="m3-note">
@@ -365,7 +372,7 @@ export function LearningTab() {
 
         <hr className="m3-divider" />
 
-        {confirmReset ? (
+        <Collapse open={confirmReset}>
           <div className="m3-confirm">
             <span className="m3-confirm-text">
               <WarningIcon size={16} /> 学習済みの重みをすべて捨てて、ゼロからやり直します。
@@ -387,7 +394,8 @@ export function LearningTab() {
               </Button>
             </div>
           </div>
-        ) : (
+        </Collapse>
+        <Collapse open={!confirmReset}>
           <Button
             variant="outlined"
             block
@@ -396,7 +404,7 @@ export function LearningTab() {
           >
             ポリシーを初期化
           </Button>
-        )}
+        </Collapse>
       </Card>
 
       <Card title="モデルの書き出し" icon={<DownloadIcon size={16} />}>
@@ -458,15 +466,15 @@ export function LearningTab() {
           初回だけ Keras の読み込みに数秒かかります。
         </div>
 
-        {exportResult && (
+        <Collapse open={exportResult !== null}>
           <div
-            className={`m3-banner ${exportResult.ok ? 'm3-banner--info' : 'm3-banner--error'}`}
+            className={`m3-banner ${exportResult?.ok ? 'm3-banner--info' : 'm3-banner--error'}`}
           >
             <span className="m3-banner-icon">
-              {exportResult.ok ? <CheckIcon size={16} /> : <WarningIcon size={16} />}
+              {exportResult?.ok ? <CheckIcon size={16} /> : <WarningIcon size={16} />}
             </span>
             <span>
-              {exportResult.ok ? (
+              {exportResult?.ok ? (
                 <>
                   <span className="m3-banner-title">書き出しました</span>
                   <span className="m3-mono">{exportResult.filename}</span>
@@ -477,12 +485,12 @@ export function LearningTab() {
               ) : (
                 <>
                   <span className="m3-banner-title">書き出しに失敗しました</span>
-                  {exportResult.error}
+                  {exportResult?.error}
                 </>
               )}
             </span>
           </div>
-        )}
+        </Collapse>
 
         {usingMock && (
           <div className="m3-banner m3-banner--warning">
