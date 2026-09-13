@@ -398,14 +398,22 @@ class _ParamSpec:
 # 範囲は docs/protocol.md 2.5 と UI のスライダー（frontend/src/panel/）に合わせてある。
 _PARAM_SPECS: dict[str, _ParamSpec] = {
     # vehicle_count の上限は config.MAX_VEHICLES。ここで config を import すると
-    # contracts が「依存を持たない中立地帯」でなくなるので、上限は apply_wire で解決する
-    "vehicle_count": _ParamSpec("vehicleCount", int, 1, None),
+    # contracts が「依存を持たない中立地帯」でなくなるので、上限は apply_wire で解決する。
+    # ★ 下限は 0（code_review R-12）。3D 画面から全車をデスポーンすると
+    #   `world.active_count` が 0 になり、engine がその値を `params` で配信する。
+    #   下限を 1 にしていたとき、**サーバーが自分の値域検証を通らない値を送る**
+    #   状態になっていた。全部消せることは実際に仕様なので、下限を実態へ合わせる
+    #   （docs/protocol.md 2.5 の `(0..maxVehicles)` と対）
+    "vehicle_count": _ParamSpec("vehicleCount", int, 0, None),
     "sim_speed": _ParamSpec("simSpeed", float, 0.25, 8.0),
     "learning_rate": _ParamSpec("learningRate", float, 1e-6, 1e-2),
     "gamma": _ParamSpec("gamma", float, 0.5, 0.9999),
     "clip_range": _ParamSpec("clipRange", float, 0.01, 0.9),
     "entropy_coef": _ParamSpec("entropyCoef", float, 0.0, 0.5),
-    # 上限は確保するバッファの大きさに直結する（2048 × 64 スロット × 56 次元 = 約 29MB）
+    # 上限は確保するバッファの大きさに直結する。
+    # 2048 ステップ × MAX_VEHICLES(8) スロット × OBS_DIM(57) 次元 × 4B ≒ 3.7MB
+    # （64 台 / 56 次元だった頃の見積もりは約 29MB で、8 倍過大だった。
+    #   code_review Q-08。いまの実サイズなら上限を上げる余地がある）
     "rollout_length": _ParamSpec("rolloutLength", int, 16, 2048),
     "max_speed": _ParamSpec("maxSpeed", float, 1.0, 40.0),
     "reward_goal": _ParamSpec("rewardGoal", float, 0.0, 1000.0),
@@ -446,10 +454,12 @@ class ParamPatchResult:
         return bool(self.rejected or self.clamped)
 
 
-def _coerce_bool(value: Any) -> bool | None:
+def coerce_bool(value: Any) -> bool | None:
     """真偽値へ変換する。解釈できなければ None。
 
     `bool("false") == True` なので、文字列は必ず語で判定する。
+    ★ WebSocket から来た真偽値は**必ずこれを通すこと**（code_review R-09）。
+      `bool(message.get(...))` だと `{"paused": "false"}` が一時停止になる。
     """
     if isinstance(value, bool):
         return value
@@ -534,7 +544,7 @@ class SimParams:
             current = getattr(self, snake)
 
             if spec.kind is bool:
-                coerced: Any = _coerce_bool(value)
+                coerced: Any = coerce_bool(value)
                 if coerced is None:
                     result.rejected.append(wire_key)
                     continue
@@ -780,6 +790,13 @@ class StepResult:
     rewards: np.ndarray      # shape (MAX_VEHICLES,), float32
     dones: np.ndarray        # shape (MAX_VEHICLES,), bool。エピソード終了フラグ
     active: np.ndarray       # shape (MAX_VEHICLES,), bool。ステップ時点で有効だったか
+
+    #: shape (MAX_VEHICLES,), bool。`dones` のうち**打ち切り**（時間切れ）だったもの。
+    #: ★ 到達・衝突・道路外は本物の終端だが、`MAX_EPISODE_STEPS` による時間切れは
+    #:   truncation であって世界の終わりではない。ここを `dones` と混ぜると
+    #:   GAE がブートストラップを切り、価値目標が `r + γV(s')` から `γV(s')` ぶん
+    #:   ずれる（code_review L-08）。
+    truncated: np.ndarray | None = None
     episodes: list[EpisodeResult] = field(default_factory=list)
 
 

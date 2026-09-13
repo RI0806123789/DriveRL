@@ -105,7 +105,12 @@ export function DetectionOverlay() {
           // LaneDetectionOverlay（3D）に置き換えた。両方出すと画面が
           // うるさくなるうえ、矩形は認識のずれを表現できず誤解を招く。
           .filter((det) => det.cls !== DET_LANE)
-          .map((det, i) => <DetectionBox key={i} det={det} aspect={aspect} />)}
+          // キーに配列の添字を使わない（code_review Q-12）。並びは信頼度順なので
+          // 順序が入れ替わると別の検出へ DOM が使い回される。いまは DetectionBox が
+          // 状態を持たないので実害は無いが、遷移を足した途端に破綻する書き方。
+          .map((det, i) => (
+            <DetectionBox key={`${det.cls}-${i}`} det={det} aspect={aspect} />
+          ))}
     </div>
   )
 }
@@ -114,6 +119,11 @@ function DetectionBox({ det, aspect }: { det: Detection; aspect: number }) {
   // 擬似カメラ（水平 68 度・4:3 固定）と three のカメラ（垂直 68 度・可変比）は
   // 画角の定義が違う。正規化座標をそのまま使うと縦に 1.27 倍ずれる
   const { left, top, width, height } = projectBox(det.box, aspect)
+  // ★ 視野の外へ出た検出は描かない（code_review Q-12）。`projectBox` は 0〜1 に
+  //   丸めるので、はみ出すと left と right が同じ値になり **幅 0 の枠とラベルだけが
+  //   画面端に貼り付く**。キャンバスの縦横比が 1 を割ったとき（パネルを開いた
+  //   縦長のウィンドウなど）に起きる。
+  if (width <= 0 || height <= 0) return null
   const color = detectionColor(det)
   const label = detectionLabel(det)
   const flip = top < LABEL_FLIP_THRESHOLD

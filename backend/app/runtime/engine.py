@@ -164,12 +164,25 @@ class SimulationEngine:
         実行してからこのメソッドに渡す。エンジンスレッドはブロックしない。
         """
         # 依頼を出してから実際に取り込むまでの間、フレーム配信を止める。
-        # ここで止めないと、クライアントが新しい map を受け取った直後に
-        # **古いマップ上の座標のフレーム**が数フレーム届き、一瞬とんでもない
-        # 位置に車が描かれる（tick も巻き戻る）。
+        # ★ 本当に守りたい窓は「クライアントが新しい map を受け取ってから
+        #   エンジンが取り込むまで」で、そこは map の**配信を始める前**に
+        #   `pause_frames()` を呼ばないと守れない（code_review R-02）。
+        #   ここだけで止めていたときは、18.5MB の map を送っている最中に
+        #   配信ループが**古いマップのフレームを map の後ろへ追記**していた。
+        #   呼び出し側（main.py）が先に止めている前提だが、単体で呼ばれても
+        #   壊れないようここでも立てておく。
+        self.pause_frames()
+        self._inbox.put(("set_map", (map_index, preset_id, preset_name)))
+
+    def pause_frames(self) -> None:
+        """フレーム配信を止める。マップを差し替える前に呼ぶこと（R-02）。"""
         with self._lock:
             self._map_pending = True
-        self._inbox.put(("set_map", (map_index, preset_id, preset_name)))
+
+    def resume_frames(self) -> None:
+        """`pause_frames()` を取り消す。マップ差し替えを中断したときに呼ぶ。"""
+        with self._lock:
+            self._map_pending = False
 
     def set_loading(self, preset_id: str, preset_name: str) -> None:
         with self._lock:
@@ -312,6 +325,33 @@ class SimulationEngine:
     # ------------------------------------------------------------------
 
     def _run(self) -> None:
+        """エンジンスレッド本体。
+
+        ★ 全体を try/except で囲むこと（code_review R-04）。以前は冒頭の
+          `import torch` / `set_num_threads()` / `_ensure_trainer()` がループの外・
+          try の外にあり、ここで落ちるとスレッドが**静かに終了**していた。
+          外から見ると `/api/health` は ok、map も届くのに `set_map` が永遠に
+          取り込まれず `_map_pending` が True のまま、つまり
+          「サーバーは生きているのに何も動かない」形になり、原因はコンソールの
+          スレッド例外トレースにしか出ない。
+        """
+        try:
+            self._run_loop()
+        except Exception:
+            logger.exception("シミュレーションスレッドが異常終了しました")
+            with self._lock:
+                self._state = "error"
+                self._message = (
+                    "シミュレーションスレッドが異常終了しました。"
+                    "サーバーを再起動してください"
+                )
+                # 降ろしておかないと、フロントはフレームを待ち続けて画面が固まる
+                self._map_pending = False
+            self._notify(
+                "シミュレーションスレッドが異常終了しました。サーバーを再起動してください"
+            )
+
+    def _run_loop(self) -> None:
         # torch のインポートは数秒かかる。asyncio の起動を待たせないよう、
         # このスレッドの中で初めて読み込む。
         import torch
@@ -507,6 +547,9 @@ class SimulationEngine:
                 preset_id=preset_id,
                 preset_name=preset_name,
                 metrics=metrics,
+                # ★ 観測の正規化に使う max_speed は実行時パラメータなので、
+                #   受け取った側が入力を再現できるよう同梱する（code_review L-04）
+                params=self.snapshot_params(),
             )
             logger.info(
                 "モデルを書き出しました: %s（%.0f KB, %.0f ms）",
@@ -560,6 +603,7 @@ class SimulationEngine:
                     preset_name=preset_name,
                     metrics=metrics,
                     label="before-import",
+                    params=self.snapshot_params(),
                 )
             except ExportError:
                 logger.exception("読み込み前のバックアップに失敗しました（読み込みは続行します）")
@@ -679,9 +723,25 @@ class SimulationEngine:
         from app.sim.env import SimulationEnv
 
         params = self.snapshot_params()
+        # ★ ローカルへ組み立ててから最後にまとめて差し替える（code_review R-03）。
+        #   以前は `self._env` へ直接代入していたので、`SimulationEnv` の生成が
+        #   失敗すると**フロントは新マップ・エンジンは旧マップ**のまま配信が再開し、
+        #   「銀座を選んだ画面に金沢の道路が描かれ、車が道の無いところを走る」
+        #   状態になった。失敗したら env を落として error に倒し、
+        #   `take_frame()` が旧マップのフレームを返さないようにする。
+        try:
+            env = SimulationEnv(map_index, params, seed=0)
+            env.reset_all()
+        except Exception:
+            logger.exception("環境の構築に失敗しました: %s", preset_id)
+            self._env = None
+            with self._lock:
+                self._state = "error"
+                self._message = f"{preset_name} の環境構築に失敗しました"
+                self._latest_frame = None
+            raise  # `_drain_inbox` の except が通知と `_map_pending` の解除を行う
+        self._env = env
         self._map_index = map_index
-        self._env = SimulationEnv(map_index, params, seed=0)
-        self._env.reset_all()
 
         # 信号は観測にも報酬にも使うので環境が持つ。ここではログに出すだけ。
         logger.info("%s", self._env.world.signals.describe())
@@ -751,6 +811,9 @@ class SimulationEngine:
             rewards=result.rewards,
             dones=result.dones,
             active=result.active,
+            # 時間切れは「世界の終わり」ではないので、GAE のブートストラップを
+            # 切らせない（code_review L-08）
+            truncated=result.truncated,
         )
 
         stats = trainer.maybe_update(result.obs, result.active)

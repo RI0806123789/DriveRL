@@ -40,11 +40,15 @@ import numpy as np
 
 from app import config
 from app.percep.types import (
+    CLASS_QUOTA,
     DEFAULT_CAMERA,
+    LANE_LOOKAHEAD_M,
+    LANE_POLYLINE_POINTS,
     CameraSpec,
     DetClass,
     Detection,
     PerceptionResult,
+    pack_by_class_quota,
 )
 
 if TYPE_CHECKING:  # 実行時に import しない（sim -> percep の循環を避けるため）
@@ -94,32 +98,21 @@ FACING_TOLERANCE = math.radians(75.0)
 #: 認識器に**原理的に学習できない目標**を与えることになる。
 MIN_BOX_PX = 1.5
 
-#: 車線として前方何メートルまでを 1 つの検出にまとめるか [m]
-LANE_LOOKAHEAD_M = 25.0
+# ★ `LANE_LOOKAHEAD_M` と `LANE_POLYLINE_POINTS` は `percep/types.py` にある
+#   （code_review Q-10）。認識器（`detector.py`）が同じ値を別に持っていて
+#   「揃えること」というコメントだけで担保されていたのを 1 か所へまとめた。
+#   ずれると「認識器の車線だけ長さや点数が違う」という形で出るが、
+#   型でもビルドでも捕まらない。
 #: 車線の見た目の半幅 [m]（車線幅 3.2m 相当）
 LANE_HALF_WIDTH_M = 1.6
 #: 車線をサンプルする間隔 [m]
 LANE_SAMPLE_M = 2.5
-#: 路面へ重ねて描くために送る中心線の点数。
-#: 計算は LANE_SAMPLE_M 刻み（25m なら 11 点）で行い、送るときにここまで間引く。
-#: **20Hz で全車両ぶん流すので、増やすと配信量にそのまま効く。**
-LANE_POLYLINE_POINTS = 6
 
 #: 遮蔽判定のサンプル間隔 [m]。建物の裏の信号を「見えている」ことにしないため。
 OCCLUSION_STEP_M = 2.0
 #: 遮蔽判定の最大サンプル数（遠方でも打ち切る）
 OCCLUSION_MAX_SAMPLES = 64
 
-#: クラスごとに残す上限。`config.PERCEP_MAX_DETECTIONS`（12）へ詰めるとき、
-#: 観測化で必要な内訳（車線 1 / 信号 1 / 標識 1 / 車両 3 / 障害物 3）が
-#: 必ず生き残るようにするための枠。合計はちょうど 12。
-CLASS_QUOTA: dict[DetClass, int] = {
-    DetClass.LANE: 1,
-    DetClass.TRAFFIC_LIGHT: 2,
-    DetClass.SPEED_SIGN: 1,
-    DetClass.VEHICLE: 4,
-    DetClass.OBSTACLE: 4,
-}
 
 #: 走行可能領域を測る向き（heading からの相対角 [rad]）。
 #: config.OBS_FREESPACE_DIM 本を前方 ±90 度に等分する。
@@ -283,6 +276,15 @@ class _StaticScene:
 #: (map_index, _StaticScene) の 1 件キャッシュ。マップは同時に 1 つしか
 #: 読まれないので 1 件で足りる。タプルの差し替えは CPython では不可分なので、
 #: 別スレッドから読まれても owner と scene がちぐはぐになることはない。
+#:
+#: ★ **これは「1 プロセスに `SimulationEnv` は 1 つ」という運用の前提に乗った
+#:   設計で、コードはその制約を強制していない**（code_review P-06）。
+#:   当たり外れは `map_index` の identity 比較だけで決まるので、テストや
+#:   `train_detector.py` の中で複数の `map_index` を同時に扱うと、片方の env が
+#:   別の env のキャッシュを黙って再利用しうる。**複数マップを行き来する
+#:   コードを書くときは切り替えのたびに `clear_static_cache()` を呼ぶこと。**
+#:   恒久的に複数マップを同時に扱うなら、キャッシュを `World` か
+#:   `SimulationEnv` のインスタンスへ紐づける設計に変えること。
 _STATIC_CACHE: tuple[object, _StaticScene] | None = None
 
 
@@ -631,6 +633,15 @@ def _detect_lane(
 
     offsets = np.arange(0.0, LANE_LOOKAHEAD_M + 1e-6, LANE_SAMPLE_M, dtype=np.float64)
     targets = arc + offsets
+    # ★ 経路の総延長を超えるサンプルは捨てる（code_review P-04）。
+    #   `np.interp` は外挿せず終端の値でクランプするので、目的地の直前
+    #   （残り 25m 未満）ではサンプル後半が同じ 1 点へ収束し、そこから取る
+    #   接線 `np.gradient` がほぼ 0 になる。`norm` の下駄で例外にはならないが、
+    #   車線の左右方向 `lx, ly` が不安定になって帯の向きと終端がぶれる。
+    usable = int(np.count_nonzero(targets <= cum[-1]))
+    if usable < 2:
+        return None  # 目的地に着く寸前。車線としてたどれる長さが残っていない
+    targets = targets[:usable]
     cx = np.interp(targets, cum, route[:, 0])
     cy = np.interp(targets, cum, route[:, 1])
     if cx.size < 2:
@@ -738,32 +749,12 @@ def detect_ground_truth(
         items.sort(key=lambda pair: pair[0])  # 近い順
         per_class[cls] = [det for _, det in items[: CLASS_QUOTA[cls]]]
 
-    # 優先度つきラウンドロビンで詰める（上限で切っても内訳が欠けないように）
-    order = [
-        DetClass.LANE,
-        DetClass.TRAFFIC_LIGHT,
-        DetClass.SPEED_SIGN,
-        DetClass.VEHICLE,
-        DetClass.OBSTACLE,
-    ]
-    limit = int(config.PERCEP_MAX_DETECTIONS)
-    cursor = {c: 0 for c in order}
-    detections: list[Detection] = []
-    while len(detections) < limit:
-        added = False
-        for cls in order:
-            i = cursor[cls]
-            items = per_class[cls]
-            if i < len(items):
-                detections.append(items[i])
-                cursor[cls] = i + 1
-                added = True
-                if len(detections) >= limit:
-                    break
-        if not added:
-            break
-
-    result.detections = detections
+    # クラス枠つきの優先度ラウンドロビンで詰める（上限で切っても内訳が欠けない）。
+    # ★ 認識器（`detector.decode_detections`）も**同じ関数**を呼ぶ。
+    #   片方だけ直すと同じ食い違いがまた生まれる（code_review Q-01）。
+    result.detections = pack_by_class_quota(
+        per_class, int(config.PERCEP_MAX_DETECTIONS)
+    )
     return result
 
 

@@ -85,12 +85,23 @@ def _looks_like_torchscript(path: Path) -> bool:
 
     ユーザーの手元には `.pt` と `.torchscript.pt` の 2 つが並んでいるので、
     取り違えは十分起こりうる。「読めません」で終わらせず、どちらを選ぶべきか伝えたい。
+
+    ★ **`torch.jit.load()` を呼ばない**（code_review L-05）。SECURITY.md と README は
+      「受け取ったファイルは**必ず** `weights_only=True` で解析する」と宣言している
+      のに、ここだけがユーザー提供ファイルを C++ のデシリアライザへ渡していた。
+      案内文を親切にするためだけの呼び出しで、宣言に例外を作るには見合わない。
+      `_looks_like_keras()` と同じく zip の namelist だけで判定できる:
+      本物の TorchScript は `code/` 配下と `constants.pkl` を持ち、
+      `torch.save` のチェックポイントはどちらも持たない（実測で確認）。
     """
     try:
-        torch.jit.load(str(path), map_location="cpu")
-        return True
+        with zipfile.ZipFile(path) as archive:
+            names = archive.namelist()
     except Exception:
-        return False
+        return False  # zip ですらない（旧 pickle 形式の .pt など）
+    return any(n.endswith("constants.pkl") for n in names) and any(
+        "/code/" in n for n in names
+    )
 
 
 def inspect_checkpoint(
@@ -167,7 +178,10 @@ def inspect_checkpoint(
         obs_dim = int(payload["obs_dim"])
         action_dim = int(payload["action_dim"])
         hidden_sizes = [int(h) for h in payload["hidden_sizes"]]
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, OverflowError) as exc:
+        # ★ `OverflowError` を忘れないこと（code_review L-07）。
+        #   `int(float("inf"))` が投げるのは ValueError ではなくこちらで、
+        #   捕まえ損ねるとユーザーへの案内ではなく素の例外になる
         raise CheckpointImportError("チェックポイントのモデル定義が壊れています") from exc
 
     # --- このアプリのネットワークと形が一致するか ---

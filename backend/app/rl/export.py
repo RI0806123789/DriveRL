@@ -97,8 +97,18 @@ class InferencePolicy(nn.Module):
         self.mu_head = copy.deepcopy(policy.mu_head)
         self.value_trunk = copy.deepcopy(policy.value_trunk)
         self.value_head = copy.deepcopy(policy.value_head)
-        # 学習時と同じクランプを掛けた値を定数として持たせる
-        log_std = torch.clamp(policy.log_std.detach().clone(), -5.0, 1.0)
+        # 学習時と同じクランプを掛けた値を定数として持たせる。
+        # ★ 可動域は必ず `config` から引くこと（code_review L-02）。
+        #   ここに -5.0 / 1.0 を直書きしていたとき、上限の 1.0 は
+        #   CLAUDE.md が「log_std = 1.0013 / std = 2.72 で 8,925 更新ぶん固着した」と
+        #   記録している**旧値そのもの**だった。std 2.72 は行動範囲 [-1, 1] の
+        #   全幅 2 より大きく、受け取った側が README のとおり
+        #   Normal(action, exp(logStd)) からサンプリングすると**実質ランダム**になる。
+        log_std = torch.clamp(
+            policy.log_std.detach().clone(),
+            float(config.PPO_LOG_STD_MIN),
+            float(config.PPO_LOG_STD_MAX),
+        )
         self.register_buffer("log_std", log_std)
 
         # 推論専用なので勾配追跡を外す。付けたままだと、受け取った側が
@@ -214,8 +224,16 @@ def build_metadata(
     preset_id: str | None,
     preset_name: str | None,
     metrics: dict[str, Any] | None,
+    params: Any | None = None,
 ) -> dict[str, Any]:
-    """書き出しに同梱するメタデータを組み立てる。"""
+    """書き出しに同梱するメタデータを組み立てる。
+
+    `params` は書き出し時点の `SimParams`。**観測の正規化に使った `max_speed` は
+    定数ではなく実行時パラメータ**（`set_params` で 1.0〜40.0 に変更できる）なので、
+    ここへ入れないと受け取った側は観測の 3 要素（自車速度比・規制速度比・超過量）を
+    再現できない（code_review L-04）。省略時は既定値を書く。
+    """
+    max_speed = float(getattr(params, "max_speed", config.MAX_SPEED))
     return {
         "metadataVersion": METADATA_VERSION,
         "application": "DriveRL",
@@ -266,7 +284,22 @@ def build_metadata(
         "policy": {
             # 探索用のノイズ。決定論的な行動が欲しいだけなら使わなくてよい。
             # 学習時と同じ確率的な行動を再現するときに Normal(action, exp(log_std)) とする。
-            "logStd": [float(v) for v in trainer.policy.log_std.detach().cpu().numpy()],
+            # ★ TorchScript に埋める buffer と**同じクランプ**を掛ける（L-02）。
+            #   生値のまま書くと、1 つの書き出しの中で「埋め込みバッファ」
+            #   「メタデータ JSON」「学習時に実際に使われる値」の 3 つが食い違う。
+            "logStd": [
+                float(
+                    min(
+                        max(float(v), float(config.PPO_LOG_STD_MIN)),
+                        float(config.PPO_LOG_STD_MAX),
+                    )
+                )
+                for v in trainer.policy.log_std.detach().cpu().numpy()
+            ],
+            "logStdRange": [
+                float(config.PPO_LOG_STD_MIN),
+                float(config.PPO_LOG_STD_MAX),
+            ],
         },
         "vehicle": {
             "length": config.VEHICLE_LENGTH,
@@ -276,6 +309,14 @@ def build_metadata(
             "maxAccel": config.MAX_ACCEL,
             "maxDecel": config.MAX_DECEL,
             "dt": config.DT,
+            # ★ 観測の正規化に使う最高速度。**実行時に変えられる値**なので、
+            #   受け取った側は推測できない（code_review L-04）
+            "maxSpeed": max_speed,
+            # ★ 舵角は `maxSteer` だけでは再現できない。変化率の上限と
+            #   曲率速度制限（steer_max = atan(a_lat * L / v^2)）がセットで
+            #   初めて同じ車両になる（CLAUDE.md「セットでなければ意味がない」）
+            "steerRate": config.STEER_RATE,
+            "maxLateralAccel": config.MAX_LATERAL_ACCEL,
         },
         "training": {
             "updates": int(trainer.updates),
@@ -479,6 +520,7 @@ def export_model(
     preset_name: str | None = None,
     metrics: dict[str, Any] | None = None,
     label: str | None = None,
+    params: Any | None = None,
 ) -> ExportResult:
     """モデルを書き出してファイルの情報を返す。
 
@@ -503,6 +545,7 @@ def export_model(
         preset_id=preset_id,
         preset_name=preset_name,
         metrics=metrics,
+        params=params,
     )
 
     try:

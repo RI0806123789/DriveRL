@@ -32,10 +32,13 @@ import numpy as np
 from app import config
 from app.percep.types import (
     DEFAULT_CAMERA,
+    LANE_LOOKAHEAD_M,
+    LANE_POLYLINE_POINTS,
     CameraSpec,
     DetClass,
     Detection,
     PerceptionResult,
+    pack_by_class_quota,
 )
 
 logger = logging.getLogger("autoware_sim")
@@ -292,13 +295,12 @@ def encode_freespace(distances: np.ndarray) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 
-#: 路面へ重ねて描く中心線の点数（`groundtruth.LANE_POLYLINE_POINTS` と揃える）
-LANE_POLYLINE_POINTS = 6
-#: 描く長さの上限 [m]（`groundtruth.LANE_LOOKAHEAD_M` と揃える）。
-#: ★ 直線近似なので、長く伸ばすほどカーブで実際の車線から離れる。
-#:   認識器が距離を誤ったときに線が画面の奥まで突き抜けるのも防ぐ
-#:   （未学習のモデルで 57m まで伸びた実例がある）。
-LANE_MAX_LENGTH_M = 25.0
+# ★ 車線の点数と長さの上限は `percep/types.py` にある（code_review Q-10）。
+#   以前は `groundtruth.py` と同じ値をここにも書き、どちらのコメントも
+#   「揃えること」と言うだけで、揃っていることを確かめる仕組みが無かった。
+#: 線として描く下限の長さ [m]。これを割ったら「車線の長さが認識できていない」
+#: とみなして点列を返さない（1 か所に潰れた線を描いても意味が無いため）。
+LANE_MIN_DRAW_M = 0.1
 
 
 def _lane_polyline(
@@ -324,7 +326,14 @@ def _lane_polyline(
         -math.atan2((cx - 0.5) * spec.width, spec.focal_px) if math.isfinite(cx) else 0.0
     )
     length = float(det.distance) if det.distance and math.isfinite(det.distance) else 0.0
-    length = min(max(length, 5.0), LANE_MAX_LENGTH_M)
+    # ★ クランプするのは**上限だけ**（code_review P-05）。以前は下限 5.0m も
+    #   掛けていたが、CNN が「1m 先までしか車線を認識できていない」と出しても
+    #   線は必ず 5m 伸びるので、「ずれていればそのままずれて見える」という
+    #   このオーバーレイの狙いを一部覆い隠していた。上限のほうは未学習の
+    #   モデルが 57m まで伸ばした実例への対策なので残す。
+    length = min(length, LANE_LOOKAHEAD_M)
+    if length <= LANE_MIN_DRAW_M:
+        return []
 
     # 車線中心は自車から見て横偏差のぶん反対側にある（lateral は左が正）
     y0 = -float(lateral)
@@ -365,9 +374,13 @@ def decode_detections(
         if rows.size == 0:
             out.append(PerceptionResult(slot=int(slot)))
             continue
-        # 信頼度の降順（`PerceptionResult` の約束）
-        order = np.argsort(-obj[rows, cols], kind="stable")[:max_detections]
-        detections: list[Detection] = []
+        # 信頼度の降順（`PerceptionResult` の約束）。
+        # ★ ここで `[:max_detections]` と一括で切ってはいけない（code_review Q-01）。
+        #   発火したセルが車両で埋まると信号・標識・車線が 1 件も残らず、
+        #   観測が「信号は無い」になる一方で罰だけが真値から入る。
+        #   クラス枠つきの詰め込み（`pack_by_class_quota`）は真値パスと共通。
+        order = np.argsort(-obj[rows, cols], kind="stable")
+        per_class: dict[DetClass, list[Detection]] = {c: [] for c in DetClass}
         for k in order:
             row, col = int(rows[k]), int(cols[k])
             values = cell[row, col]
@@ -394,8 +407,13 @@ def decode_detections(
                 det.lateral = float(values[OFF_LATERAL]) * LATERAL_SCALE
                 # 路面へ重ねて描くための中心線。矩形だけでは認識のずれが見えない
                 det.lane_points = _lane_polyline(det, spec)
-            detections.append(det)
-        out.append(PerceptionResult(slot=int(slot), detections=detections))
+            per_class[cls].append(det)
+        out.append(
+            PerceptionResult(
+                slot=int(slot),
+                detections=pack_by_class_quota(per_class, max_detections),
+            )
+        )
     return out
 
 

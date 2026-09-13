@@ -29,6 +29,9 @@ class RolloutBuffer:
         self.values = np.zeros(shape, dtype=np.float32)
         self.rewards = np.zeros(shape, dtype=np.float32)
         self.dones = np.zeros(shape, dtype=bool)
+        # `dones` のうち打ち切り（時間切れ）だったもの。GAE の連鎖は切るが
+        # ブートストラップは切らない（code_review L-08）
+        self.truncated = np.zeros(shape, dtype=bool)
         self.active = np.zeros(shape, dtype=bool)
         self.advantages = np.zeros(shape, dtype=np.float32)
         self.returns = np.zeros(shape, dtype=np.float32)
@@ -59,6 +62,7 @@ class RolloutBuffer:
         rewards: np.ndarray,
         dones: np.ndarray,
         active: np.ndarray,
+        truncated: np.ndarray | None = None,
     ) -> None:
         """1 ステップ分を追加する。満杯なら何もしない（実行ループを止めないため）。"""
         if self.full:
@@ -71,6 +75,11 @@ class RolloutBuffer:
         self.values[i] = np.asarray(values, dtype=np.float32).reshape(n)
         self.rewards[i] = np.asarray(rewards, dtype=np.float32).reshape(n)
         self.dones[i] = np.asarray(dones, dtype=bool).reshape(n)
+        self.truncated[i] = (
+            np.zeros(n, dtype=bool)
+            if truncated is None
+            else np.asarray(truncated, dtype=bool).reshape(n)
+        )
         self.active[i] = np.asarray(active, dtype=bool).reshape(n)
         self.ptr = i + 1
 
@@ -87,6 +96,21 @@ class RolloutBuffer:
 
         dones=True の位置でブートストラップを切り、active=False の位置で
         アドバンテージの連鎖も切る。
+
+        ★ **打ち切り（`truncated`）はブートストラップを切らない**（code_review L-08）。
+          到達・衝突・道路外は本物の終端なので `V(s') = 0` でよいが、
+          `MAX_EPISODE_STEPS` による時間切れは truncation で、そこから先も
+          世界は続いている。切ると価値目標が `γV(s')` ぶん（走行中の V は
+          おおむね 6〜70 のオーダー）まるごとずれ、そのサンプルの advantage が
+          大きく負へ振れてバッチ全体の正規化統計まで引きずる。
+
+          ただし `env.step()` は同じステップの中で respawn するので、ここで
+          ブートストラップに使う `next_values` は**打ち切られた状態の価値ではなく
+          再スポーン直後の状態の価値**になる。厳密には終端観測の価値が要るが、
+          0 で切るより偏りは小さいのでこの近似を採る。
+          正確にやるなら `env` が打ち切りスロットの respawn 前の観測を返し、
+          その価値を別に評価する必要がある（1 更新あたり高々 1 サンプルなので
+          そこまでの複雑さに見合わないと判断した）。
         """
         size = self.ptr
         if size == 0:
@@ -102,9 +126,14 @@ class RolloutBuffer:
         next_active = np.asarray(last_active, dtype=bool).reshape(n)
 
         for t in range(size - 1, -1, -1):
-            # 次状態が有効で、かつエピソードが終わっていなければブートストラップする
+            # GAE の連鎖は、エピソードが終わった位置で必ず切る（打ち切りも含む。
+            # 次の要素は respawn 後の別のエピソードなので繋げてはいけない）
             non_terminal = ((~self.dones[t]) & next_active).astype(np.float32)
-            delta = self.rewards[t] + gamma * next_values * non_terminal - self.values[t]
+            # ブートストラップは「本物の終端」でだけ切る
+            bootstrap = (
+                ((~self.dones[t]) | self.truncated[t]) & next_active
+            ).astype(np.float32)
+            delta = self.rewards[t] + gamma * next_values * bootstrap - self.values[t]
             adv = delta + gamma * lam * non_terminal * adv
             adv = np.where(self.active[t], adv, np.float32(0.0)).astype(np.float32)
             self.advantages[t] = adv

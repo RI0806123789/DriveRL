@@ -35,9 +35,26 @@ DESTINATION_TRIALS = 24
 PROJECT_WINDOW_BACK = 8
 PROJECT_WINDOW_FWD = 48
 
+# --- 衝突判定の近似 ---
+#: 車体を近似する楕円の半長軸 [m]（前後方向）。車長 4.4m の 0.9 倍で 3.96m。
+#: 車両同士・障害物の判定はこの楕円で行う。
+#: ★ **等方の円にしないこと**（code_review W-02 / W-04）。中心間距離 3.96m の
+#:   円で判定していたとき、`lane_offset_left()` が作る車線中心の間隔
+#:   （幅 6.5m の双方向 2 車線路で 3.25m、最小幅 5.0m の道路では 2.50m）より
+#:   判定径のほうが広く、**それぞれ正しい車線の中央を走っているだけの対向車
+#:   どうしが衝突扱い**になっていた（銀座の双方向路 44 本中 26 本が該当）。
+#:   方策には避けようのない -100 が入り、`collisionRate` も実態より高く出る。
+#:   逆に車幅を代表半径にすると前後が甘くなり、パイロンが車体に 1.3m
+#:   めり込んでから当たる。車体は 4.4m × 1.8m なので向きを持たせて近似する。
+VEHICLE_HIT_SEMI_LONG_M = config.VEHICLE_LENGTH * 0.9
+#: 車体を近似する楕円の半短軸 [m]（左右方向）。車幅 1.8m の 1.1 倍で 1.98m。
+#: 車線間隔の下限 2.50m を下回るので、正しく車線を走っている限り当たらない。
+VEHICLE_HIT_SEMI_LAT_M = config.VEHICLE_WIDTH * 1.1
+
 # --- スポーン ---
 #: スポーン時に既存車両と空けたい距離 [m] の 2 乗。
-#: 車両同士の衝突しきい値は中心間 VEHICLE_LENGTH*0.9 なので、その 1.5 倍を取る。
+#: 車両同士の衝突しきい値は最も広い前後方向でも中心間 VEHICLE_LENGTH*0.9 なので、
+#: その 1.5 倍を取れば向きによらず必ず外れる。
 #: これが無いと同じノードから同時に出た車が即座に衝突扱いになり、
 #: 方策に避けようのない罰（-100）が入る。
 SPAWN_CLEARANCE_M2 = (config.VEHICLE_LENGTH * 1.5) ** 2
@@ -57,6 +74,29 @@ SIGNAL_LOOKAHEAD_COUNT = 3
 #: code_review B-22）。ここは別名。
 LANE_DEPARTURE_M = config.LANE_DEPARTURE_M
 LANE_RETURN_M = config.LANE_RETURN_M
+
+
+def _in_body_ellipse(
+    dx: np.ndarray,
+    dy: np.ndarray,
+    cos_h: np.ndarray,
+    sin_h: np.ndarray,
+    semi_long: float | np.ndarray,
+    semi_lat: float | np.ndarray,
+) -> np.ndarray:
+    """相対位置 (dx, dy) が、車体の向きに沿った楕円の内側かを返す。
+
+    `check_collisions()` の車両同士・障害物がどちらもこれを使う。
+    **3 種類の近似（建物は厳密な矩形／車両は等方円／障害物は過小な円）が
+    別々の向きにずれていた**のをまとめたもの（code_review W-02 / W-04）。
+    判定を変えるときはここ 1 か所で済むようにしてある。
+
+    dx, dy はブロードキャスト可能な形なら何でもよい（(N, M) の距離行列でも可）。
+    cos_h / sin_h は**判定する車体側**の向き。
+    """
+    long_ = dx * cos_h + dy * sin_h        # 前後方向（前が正）
+    lat = -dx * sin_h + dy * cos_h         # 左右方向（左が正）
+    return (long_ / semi_long) ** 2 + (lat / semi_lat) ** 2 < 1.0
 
 
 @dataclass
@@ -94,6 +134,11 @@ class SlotState:
     sign_limits: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.float32))
     # 直前のステップで越えていた信号の本数（越えた瞬間を検出するため）
     signals_passed: int = 0
+    # スポーン地点の直上にある信号を「通過済み」とする下駄（code_review W-03）。
+    # `signal_violations()` の巻き戻しでもここより下がらない。別フィールドに
+    # しないと、スポーン直後は arc≈0 で `passed` が 0 になるため 1 ステップ目に
+    # 必ず 0 へ戻され、下駄が一度も効かなかった
+    signals_floor: int = 0
     # 黄色で「安全に停止できない」と判断して進入を許した信号の添字。
     # 赤に変わってから停止線を越えても違反に数えない（施行令 2 条ただし書き）
     committed_signal: int = -1
@@ -276,8 +321,9 @@ class World:
     def next_signal(self, slot: int) -> tuple[float, int]:
         """そのスロットの前方にある直近の信号を (停止線までの距離 [m], 灯色) で返す。
 
-        前方に信号が無ければ (無限大, 赤) ではなく (inf, RED) を返さず、
-        呼び出し側が「信号なし」を区別できるよう距離 inf を返す。
+        前方に信号が無ければ距離 `inf` を返す。灯色には `RED` を入れるが
+        **その値に意味は無い**ので、呼び出し側は必ず距離が有限かどうかで
+        「信号があるか」を判定すること。
         """
         state = self.slots[slot]
         if state.signal_arcs.size == 0:
@@ -318,17 +364,14 @@ class World:
     def next_signals(self) -> tuple[np.ndarray, np.ndarray]:
         """全スロットの前方直近の信号を (停止線までの距離 [m], 灯色) の配列で返す。
 
-        観測にも信号順守の制約にも使うので、1 ステップに 1 回まとめて求める。
         前方に信号が無いスロットの距離は inf。
+
+        ★ `nth_signals(0)` と**完全に同じ値**を返す（距離・灯色とも
+          `np.array_equal` で確認済み）。以前は `signal_speed_limits()` が
+          先読みループで `nth_signals(0)` を計算した直後にこれも呼んでおり、
+          同じ計算を 1 ステップに 2 回していた（code_review W-05）。
         """
-        n = config.MAX_VEHICLES
-        distance = np.full(n, np.inf, dtype=np.float64)
-        phase = np.full(n, RED, dtype=np.int8)
-        for slot in range(n):
-            d, p = self.next_signal(slot)
-            distance[slot] = d
-            phase[slot] = p
-        return distance, phase
+        return self.nth_signals(0)
 
     @staticmethod
     def _build_speed_profile(route: np.ndarray, cum: np.ndarray) -> np.ndarray:
@@ -392,11 +435,17 @@ class World:
 
         標識が引けなかった経路のスロットは `inf`（規制なし）。
 
-        ★ `next_signals()` と同じく、**1 ステップに複数回呼ぶのが正しい。**
-          `env.step()` の前半（加速度制約のため／射影前の位置）、
-          `speed_violations()`（射影後・respawn 前の位置）、
-          `_compute_observations()`（respawn 後の位置）で見ている状態が違う。
+        ★ **1 ステップに 2 回呼ぶのが正しい。**
+          `env.step()` の前半（加速度制約のため／射影前の位置）と
+          `speed_violations()`（射影後・respawn 前の位置）で見ている状態が違う。
           中身は searchsorted 1 回なのでまとめる利得は無い。
+          描画のために `snapshot()` が FRAME_HZ で 1 回呼ぶ。
+
+          （以前ここには「`_compute_observations()` でも呼ぶので 3 回」と
+          書いてあったが、画像認識ベースへの移行で規制速度の観測は
+          カメラ検出（`OBS_SIGN_DIM`）へ移り、`percep/encoder.py` はこの関数を
+          呼んでいない。まとめてはいけない根拠が古いまま残っていた。
+          code_review W-05）
         """
         out = np.full(config.MAX_VEHICLES, np.inf, dtype=np.float64)
         arc = self.arc
@@ -474,14 +523,15 @@ class World:
     def signal_speed_limits(self) -> np.ndarray:
         """信号に従うための速度上限を返す（道路交通法施行令 2 条）。
 
-        黄色で「停止位置に近接していて安全に停止できない」と判断して通した信号は、
-        赤に変わってから停止線を越えても違反ではない。ここでその判断を記録しておく。
-
         **直近 1 基だけでなく前方 `SIGNAL_LOOKAHEAD_COUNT` 基を見る。**
         全交差点に信号を置くと連続する信号の間隔が中央 46m・下位 5% で 8m まで詰まり、
         最高速から止まるのに要る 22m を 22.5% の区間が下回る。直近 1 基しか見ないと、
         1 基目を通過した瞬間に 8m 先の赤が現れて物理的に止まれず、赤信号無視になる。
         実際の運転者も数本先の信号を見て速度を決めているので、この方が現実にも近い。
+
+        ★ 黄色の「止まれないので進む」判定はここには無い。
+          `update_yellow_commitment()` が持っており、`obey_signals` の設定に
+          よらず毎ステップ呼ばれる（code_review W-01 / W-06）。
         """
         n = config.MAX_VEHICLES
         speed = self.fleet.speed
@@ -497,21 +547,52 @@ class World:
                 limit,
                 signal_speed_limit(distance_k, phase_k, speed, brake, config.DT),
             )
+        return limit
 
-        # 黄色の「止まれないので進む」判定は直近 1 基だけで行う（施行令 2 条ただし書き）
-        distance, phase = self.next_signals()
+    def update_yellow_commitment(self) -> None:
+        """黄色で「安全に停止できない」と判断して通した信号を記録する。
 
-        for slot in range(config.MAX_VEHICLES):
-            if phase[slot] != YELLOW or np.isfinite(limit[slot]):
+        施行令 2 条ただし書きの場面（停止位置に近接していて安全に停止できない）は
+        **合法に進行できる**ので、赤に変わってから停止線を越えても違反に数えない。
+
+        ★ 判定に使うのは**直近 1 基だけ**（code_review W-01）。以前は
+          `signal_speed_limits()` の中で、前方 3 基ぶんを `np.minimum` で
+          畳んだ後の上限を見て免除を決めていた。2 基目・3 基目のどれかが赤なら
+          上限は有限になるので、**直近が「止まりようのない黄色」でも免除が付かず**、
+          赤に変わった後の通過が信号無視として罰されていた。銀座 8 台の
+          12,000 ステップで、該当 220 ステップのうち 162（73.6%）を取り逃していた。
+
+        ★ `obey_signals` の設定によらず毎ステップ呼ぶこと（code_review W-06）。
+          以前は `signal_speed_limits()` の内側にあったため、
+          `obey_signals=False`（罰だけ与えて守るかどうかは学習に任せる設定）では
+          免除が一度も付かず、**法律の側まで厳しくなって A/B 比較の対照条件として
+          成立していなかった**。
+        """
+        distance, phase = self.nth_signals(0)
+        speed = self.fleet.speed
+        brake = abs(config.MAX_DECEL)
+        near_limit = signal_speed_limit(distance, phase, speed, brake, config.DT)
+
+        for slot in np.flatnonzero(self.fleet.active):
+            if phase[slot] != YELLOW or np.isfinite(near_limit[slot]):
                 continue
             # 黄色なのに制限が付かない＝止まれないので進んでよい、と判断した
             state = self.slots[slot]
             if state.signal_arcs.size == 0:
                 continue
-            idx = int(np.searchsorted(state.signal_arcs, float(self.arc[slot]), side="left"))
+            # ★ 添字の求め方は `signal_violations()` の通過判定と必ず揃える。
+            #   以前は side="left" で許容量を引かずに求めていたため、弧長が
+            #   (信号位置, 信号位置 + SIGNAL_STOP_TOLERANCE_M) の窓にいる間は
+            #   **次の**信号を指し、免除が 1 基ずれた
+            idx = int(
+                np.searchsorted(
+                    state.signal_arcs,
+                    float(self.arc[slot]) - config.SIGNAL_STOP_TOLERANCE_M,
+                    side="right",
+                )
+            )
             if idx < state.signal_arcs.size:
                 state.committed_signal = idx
-        return limit
 
     def signal_violations(self) -> np.ndarray:
         """このステップで赤信号のまま停止線を越えたスロットを True で返す。
@@ -521,7 +602,13 @@ class World:
         """
         out = np.zeros(config.MAX_VEHICLES, dtype=bool)
         speed = self.fleet.speed
-        for slot in range(config.MAX_VEHICLES):
+        # ★ アクティブなスロットだけを回す（code_review W-07）。
+        #   `speed_violations()` / `update_lane_departures()` と同じ規律。
+        #   戻り値は env 側で `& active_before` されるが、`state.violations` /
+        #   `state.signals_passed` への**副作用はマスクされない**ので、
+        #   全スロットを回すと将来 `deactivate()` が arc を触った瞬間に
+        #   「走っていない車の信号無視」が計上される
+        for slot in np.flatnonzero(self.fleet.active):
             state = self.slots[slot]
             if state.signal_arcs.size == 0:
                 continue
@@ -554,8 +641,10 @@ class World:
                         state.violations += 1
                 state.signals_passed = passed
             elif passed < state.signals_passed:
-                # 後退した場合は数え直す
-                state.signals_passed = passed
+                # 後退した場合は数え直す。ただしスポーン時の下駄より下げない
+                # （下げると出発地点直上の信号を 1 ステップ目に「越えた」ことに
+                #   されてしまう。code_review W-03）
+                state.signals_passed = max(passed, state.signals_floor)
         return out
 
     @staticmethod
@@ -613,9 +702,15 @@ class World:
             state.signal_ids = np.zeros(0, dtype=np.int32)
         # 出発地点のすぐ上にある信号は、走る前から「越えた」ことになってしまうので
         # 最初から通過済みとして扱う（スポーン直後の誤検出を防ぐ）。
-        state.signals_passed = int(
+        # ★ 下駄は `signals_floor` にも控える。`signal_violations()` は毎ステップ
+        #   `arc - SIGNAL_STOP_TOLERANCE_M` から通過本数を求め直すので、
+        #   スポーン直後（arc≈0）は必ず 0 になり、控えが無いとこの値が
+        #   1 ステップ目に巻き戻されて**一度も効かなかった**（code_review W-03。
+        #   銀座で 300 経路中 211 本が出発 3m 以内に信号を持ち、全件で巻き戻った）
+        state.signals_floor = int(
             np.searchsorted(state.signal_arcs, SPAWN_SIGNAL_SKIP_M, side="right")
         )
+        state.signals_passed = state.signals_floor
         # この経路に適用される規制速度の区切りを求めておく（毎ステップ探すと重い）
         try:
             limits = self.map_index.speed_limits_on_route(
@@ -834,11 +929,18 @@ class World:
         return delta
 
     def lookahead_points(self, offsets: np.ndarray) -> np.ndarray:
-        """各スロットの現在弧長位置から offsets [m] 先の経路点。shape (N, P, 2)。"""
+        """各スロットの現在弧長位置から offsets [m] 先の経路点。shape (N, P, 2)。
+
+        ★ 計算するのは**アクティブなスロットだけ**（code_review W-08）。
+          shape を MAX_VEHICLES に固定する必要があるのは学習側へ渡す観測だけで、
+          計算量まで合わせる理由は無い（CLAUDE.md の B-14 の規律）。
+          非アクティブスロットは 0 のまま返るが、観測側は
+          `lookahead_points(...)[sel]` とアクティブぶんしか読まない。
+        """
         offsets = np.asarray(offsets, dtype=np.float32)
         n = config.MAX_VEHICLES
         out = np.zeros((n, offsets.shape[0], 2), dtype=np.float32)
-        for slot in range(n):
+        for slot in np.flatnonzero(self.fleet.active):
             state = self.slots[slot]
             route = state.route
             if route.shape[0] < 2:
@@ -892,29 +994,45 @@ class World:
         # 高倍速では 1 ステップの予算が 6.25ms（8 倍）しかないので、ここは必ずバッチで。
         hit |= self.map_index.collides_with_buildings(self.fleet.corners(), active)
 
-        # --- 2. 車両同士（中心間距離による簡易判定・上三角のみ） ---
+        # --- 2. 車両同士（車体の向きに沿った楕円・上三角のみ） ---
         if idx.size >= 2:
-            px = self.fleet.x[idx]
-            py = self.fleet.y[idx]
+            px = self.fleet.x[idx].astype(np.float64)
+            py = self.fleet.y[idx].astype(np.float64)
+            cos_h = np.cos(self.fleet.heading[idx].astype(np.float64))
+            sin_h = np.sin(self.fleet.heading[idx].astype(np.float64))
             dx = px[None, :] - px[:, None]
             dy = py[None, :] - py[:, None]
-            dist2 = dx * dx + dy * dy
-            threshold = np.float32((config.VEHICLE_LENGTH * 0.9) ** 2)
-            close = np.triu(dist2 < threshold, k=1)
+            inside = _in_body_ellipse(
+                dx,
+                dy,
+                cos_h[:, None],
+                sin_h[:, None],
+                VEHICLE_HIT_SEMI_LONG_M,
+                VEHICLE_HIT_SEMI_LAT_M,
+            )
+            # 楕円は車体の向きに紐づくので、i から見た判定と j から見た判定は
+            # 一致しない（斜めに並んだ 2 台で顕著）。どちらかで当たっていれば接触。
+            close = np.triu(inside | inside.T, k=1)
             if close.any():
                 rows, cols = np.nonzero(close)
                 hit[idx[rows]] = True
                 hit[idx[cols]] = True
 
-        # --- 3. 障害物 ---
+        # --- 3. 障害物（車体の楕円 + パイロン半径） ---
         if self._obstacle_xy.shape[0] > 0:
-            px = self.fleet.x[idx][:, None]
-            py = self.fleet.y[idx][:, None]
-            ox = self._obstacle_xy[None, :, 0]
-            oy = self._obstacle_xy[None, :, 1]
-            radius = np.float32(config.VEHICLE_WIDTH * 0.5) + self._obstacle_r[None, :]
-            dist2 = (px - ox) ** 2 + (py - oy) ** 2
-            hit[idx] |= (dist2 < radius * radius).any(axis=1)
+            px = self.fleet.x[idx].astype(np.float64)[:, None]
+            py = self.fleet.y[idx].astype(np.float64)[:, None]
+            cos_h = np.cos(self.fleet.heading[idx].astype(np.float64))[:, None]
+            sin_h = np.sin(self.fleet.heading[idx].astype(np.float64))[:, None]
+            radius = self._obstacle_r[None, :].astype(np.float64)
+            hit[idx] |= _in_body_ellipse(
+                self._obstacle_xy[None, :, 0] - px,
+                self._obstacle_xy[None, :, 1] - py,
+                cos_h,
+                sin_h,
+                np.float64(config.VEHICLE_LENGTH * 0.5) + radius,
+                np.float64(config.VEHICLE_WIDTH * 0.5) + radius,
+            ).any(axis=1)
 
         return hit
 

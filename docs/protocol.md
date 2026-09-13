@@ -65,9 +65,9 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
     }
   ],
   "config": {
-    "maxVehicles": 64,      // 事前確保するエージェントスロット数
+    "maxVehicles": 8,       // 事前確保するエージェントスロット数
     "simHz": 20,            // 物理・学習ステップの周波数
-    "obsDim": 56,
+    "obsDim": 57,
     "actionDim": 2
   },
   "params": { /* 2.5 の SimParams と同じ形。現在値 */ },
@@ -165,7 +165,7 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
 ```jsonc
 {
   "type": "frame",
-  "tick": 1234,               // 起動からの通算ステップ数
+  "tick": 1234,               // マップ読込からの通算ステップ数（切り替えると 0 に戻る）
   "simTime": 61.7,            // シミュレーション内経過秒
   "vehicles": [
     {
@@ -232,7 +232,13 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
   オブジェクトのキーは文字列でなければならないため）
 - 非アクティブな車両はキーに含まれない。1 台もアクティブな車両がいない、または
   認識パイプラインが結果を返せなかったフレームでは `detections` 自体が省略される
-- 配列内は信頼度（`conf`）の降順
+- 配列内はクラスごとの枠を守った優先度つきラウンドロビン順
+  （車線 → 信号 → 標識 → 車両 → 障害物、各クラス内は信頼度の降順）。
+  `config.PERCEP_MAX_DETECTIONS`（12 件）で切り詰めても内訳が欠けないようにするため
+- **全スロット分を送るが、通常は追従中の 1 台分しか使われない。**
+  バックエンドは追従対象（フロント専用の概念）を知らないため、
+  絞るには追従対象を伝えるメッセージが要る。代表的な 1 台 8 件で 639B、
+  8 台で 5,153B/frame ＝ 20Hz なら 100.6KB/s のうち 12.5KB/s しか読まれていない
 - 座標は擬似カメラの正規化画像座標。**擬似カメラはフロントの運転席カメラと同じ
   内部パラメータ**（視野角 68 度、前方オフセット 0.35m、右オフセット 0.36m、
   視点高さ 1.22m）で描いているため、`box` の値に画面の幅・高さを掛けるだけで
@@ -281,12 +287,12 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
 {
   "type": "params",
   "params": {
-    "vehicleCount": 4,        // アクティブにする車両数 (1..maxVehicles)
+    "vehicleCount": 4,        // アクティブにする車両数 (0..maxVehicles)
     "simSpeed": 1.0,          // 実時間に対する倍率 (0.25..8.0)
     "learningRate": 3e-4,
     "gamma": 0.99,
     "clipRange": 0.2,
-    "entropyCoef": 0.01,
+    "entropyCoef": 0.001,     // 0.01 は強すぎて方策が潰れる（log_std が上限へ張り付く）
     "rolloutLength": 256,
     "maxSpeed": 13.9,         // m/s
     "rewardGoal": 100.0,
@@ -348,19 +354,19 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
 {
   "type": "network",
   "updates": 1234,
-  "obsDim": 56,
+  "obsDim": 57,
   "actionDim": 2,
   "hiddenSizes": [128, 128],
   "layers": [
     {
       "name": "policy_trunk.0",   // パラメータ名から `.weight` を除いたもの
       "role": "policy",           // "policy" | "value"
-      "inDim": 56,
+      "inDim": 57,
       "outDim": 128,
       "weightAbsMean": 0.0421,    // |w| の平均。学習が進むと動く
       "weightStd": 0.0688,
       "gradNorm": 0.0135,         // 直近の更新で流れた勾配。0 なら学習していない
-      "deltaNorm": 0.0009         // ★ 前回この情報を作ってからの重みの変化量
+      "deltaNorm": 0.0009         // ★ 直前の 1 更新で重みが動いた量
     }
   ],
   "logStd": [-0.4988, -0.5105],   // 探索ノイズの対数標準偏差
@@ -370,8 +376,11 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
 }
 ```
 
-`deltaNorm` は**前回このメッセージを作ってからの差**なので、1Hz なら
-「直前の 1 秒で重みがどれだけ動いたか」になる。**0 でなければ学習は進んでいる。**
+`deltaNorm` は**直前の 1 更新**で重みが動いた量。スナップショットの間隔ではなく
+**更新ごとに確定する**（PPO の更新はロールアウトが溜まるたび＝実測 2〜3 秒に 1 回
+しか起きないので、**更新が無い間は同じ値が続くのが正常**）。
+1Hz の差分で出すと「動いていない秒」が多発し、画面が「学習が止まっている」と
+誤表示するため、意図してこの定義にしてある。**0 でなければ学習は進んでいる。**
 
 **このスナップショットはシミュレーションスレッドのステップ境界で作る。**
 書き出しと同じ理由で、asyncio 側から `state_dict()` を取ると
@@ -475,17 +484,22 @@ WebSocket に載せないものはここに置く。バイナリの受け渡し�
 TorchScript の入出力：
 
 ```
-forward(obs: float32[B, 56]) -> (action: float32[B, 2], value: float32[B])
+forward(obs: float32[B, 57]) -> (action: float32[B, 2], value: float32[B])
 ```
 
 `action` は方策分布の平均を `[-1, 1]` にクリップした決定論的な行動。
 学習時と同じ確率的な行動が欲しい場合は、同梱の buffer `log_std` を使って
 `Normal(action, exp(log_std))` からサンプリングする。
+`log_std` は学習時と同じ可動域（`PPO_LOG_STD_MIN`〜`MAX` = -5.0〜0.0）へ
+丸めた値が入る。メタデータの `policy.logStd` も同じ値で、`policy.logStdRange` に
+可動域そのものが入っている。
+
+**`value` の shape は形式によって違う**（TorchScript は `[B]`、Keras は `[B, 1]`）。
 
 Keras 版の入出力：
 
 ```
-model(obs: float32[B, 56]) -> [action: float32[B, 2], value: float32[B, 1]]
+model(obs: float32[B, 57]) -> [action: float32[B, 2], value: float32[B, 1]]
 ```
 
 `keras.saving.load_model()` で読める。**標準の Dense 層だけで構成しているので
@@ -512,7 +526,7 @@ TorchScript や Keras 形式を渡した場合は、その旨を説明する `40
   "sizeBytes": 578601,
   "checkpoint": {
     "updates": 585,
-    "obsDim": 56,
+    "obsDim": 57,
     "actionDim": 2,
     "hiddenSizes": [128, 128],
     "hasOptimizer": true,          // false だと学習の立ち上がりが鈍る

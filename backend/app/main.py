@@ -28,7 +28,7 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from app import config
 from app.contracts import InterventionEvent
-from app.contracts import validate_hidden_sizes
+from app.contracts import coerce_bool, validate_hidden_sizes
 from app.runtime.engine import SimulationEngine
 
 logging.basicConfig(
@@ -87,6 +87,11 @@ def _safe_upload_name(name: str | None) -> str:
 # 接続管理
 # ---------------------------------------------------------------------------
 
+#: 1 接続への送信をここで打ち切る [秒]（code_review R-05）。
+#: フレームは 20Hz、金沢の map は 18.5MB。ローカル接続で 5 秒かかるのは
+#: 「クライアントが読んでいない」以外に考えにくいので、切って他を守る。
+_SEND_TIMEOUT_SEC = 5.0
+
 
 class ConnectionManager:
     """接続中の WebSocket をまとめて扱う。
@@ -112,6 +117,18 @@ class ConnectionManager:
         return len(self._connections)
 
     async def broadcast(self, payload: dict[str, Any]) -> None:
+        """全接続へ 1 通送る。**読み取りの遅い接続では時間切れで切断する。**
+
+        ★ タイムアウトを外さないこと（code_review R-05）。素の
+          `await ws.send_text(...)` には上限が無いので、受信を止めた
+          クライアントが 1 本いると TCP の送信ウィンドウが埋まって
+          `drain()` が無期限に待つ。すると配信ループ全体が止まり、
+          **正常なクライアントにも何も届かなくなる**（学習は裏で進むので
+          画面だけ凍る）。`handle_load_map` もここを await するのでマップ読込も
+          止まり、詰まっている間は例外が出ないので掃除もされない。
+          CLAUDE.md が勧める検証手順（`websockets` で /ws に繋ぐ）で
+          `recv()` を回さないスクリプトを繋ぎっぱなしにすると数秒で再現する。
+        """
         if not self._connections:
             return
         text = orjson.dumps(payload).decode("utf-8")
@@ -120,13 +137,25 @@ class ConnectionManager:
         dead: list[WebSocket] = []
         for ws in targets:
             try:
-                await ws.send_text(text)
+                await asyncio.wait_for(ws.send_text(text), timeout=_SEND_TIMEOUT_SEC)
+            except TimeoutError:
+                logger.warning(
+                    "WebSocket への送信が %.1f 秒で完了しませんでした。"
+                    "読み取りが滞っている接続として切断します",
+                    _SEND_TIMEOUT_SEC,
+                )
+                dead.append(ws)
             except Exception:
                 dead.append(ws)
         if dead:
             async with self._lock:
                 for ws in dead:
                     self._connections.discard(ws)
+            for ws in dead:
+                try:
+                    await ws.close(code=1011)
+                except Exception:
+                    pass  # 既に切れている接続。閉じられなくても掃除は済んでいる
 
 
 manager = ConnectionManager()
@@ -269,7 +298,20 @@ async def handle_load_map(preset_id: str) -> None:
             elapsed,
         )
 
-        _current_map_wire = data.to_wire()
+        # ★ ワイヤ変換もイベントループから追い出す（code_review R-01）。
+        #   全ノード・全エッジ・全建物の点に round() を回す純 Python ループで、
+        #   金沢（ノード 19,493 / 建物 35,607）で実測 781.7ms。この間フレーム配信・
+        #   metrics・ping/pong・他クライアントの HTTP がすべて止まる。
+        #   銀座は 6.9ms なので、400m プリセットしか触っていないと気づけない。
+        wire = await asyncio.to_thread(data.to_wire)
+
+        # ★ フレーム配信は map を**送り始める前**に止める（code_review R-02）。
+        #   `engine.set_map()` の中で止めていたときは、18.5MB の map を送っている
+        #   最中に配信ループが**古いマップのフレームを map の後ろへ追記**していた。
+        #   止めるのは broadcast を始める前でなければ意味が無い（この broadcast 自体が
+        #   await なので、その間に配信ループが走る）。
+        engine.pause_frames()
+        _current_map_wire = wire
         await manager.broadcast({"type": "map", **_current_map_wire})
         engine.set_map(index, preset.id, preset.name)
 
@@ -330,7 +372,20 @@ async def handle_client_message(websocket: WebSocket, message: dict[str, Any]) -
         return
 
     if kind == "set_render_paused":
-        paused = bool(message.get("paused", False))
+        # ★ `bool()` に任せないこと（code_review R-09）。`bool("false")` は True に
+        #   なるので、文字列 `"false"` が**一時停止**として通っていた。
+        #   必須項目の欠落は protocol.md 2.8 どおり INVALID_MESSAGE で返す。
+        paused = coerce_bool(message.get("paused"))
+        if paused is None:
+            await send_json(
+                websocket,
+                {
+                    "type": "error",
+                    "code": "INVALID_MESSAGE",
+                    "message": "paused には真偽値を指定してください",
+                },
+            )
+            return
         engine.set_render_paused(paused)
         payload = {"type": "status", **engine.status_payload()}
         payload["message"] = (
@@ -572,7 +627,10 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     logger.info("WebSocket 接続を受け付けました（接続数 %d）", manager.count)
 
     try:
-        from app.map import list_presets
+        # ★ `app.map` ではなく `app.map.presets` から引く（code_review R-08）。
+        #   パッケージ側も遅延化したので実害は消えているが、ここは
+        #   「プリセット一覧しか要らない」ことを import で明示しておく
+        from app.map.presets import list_presets
 
         presets = [p.to_wire() for p in list_presets()]
     except Exception:

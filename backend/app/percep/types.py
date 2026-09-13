@@ -21,11 +21,16 @@ from typing import Any
 
 __all__ = [
     "CameraSpec",
+    "CLASS_QUOTA",
+    "CLASS_PRIORITY",
     "DEFAULT_CAMERA",
     "DetClass",
     "Detection",
+    "LANE_LOOKAHEAD_M",
+    "LANE_POLYLINE_POINTS",
     "PerceptionResult",
     "SIGNAL_PHASE_NAMES",
+    "pack_by_class_quota",
 ]
 
 
@@ -145,7 +150,22 @@ class Detection:
     # --- クラスごとの属性（該当しないクラスでは None）---
     phase: int | None = None          # 信号: 0=青 / 1=黄 / 2=赤
     speed_limit: float | None = None  # 標識: 規制速度 [m/s]
-    distance: float | None = None     # 推定距離 [m]
+
+    #: 推定距離 [m]。**クラスによって測っているものが違う**ので、
+    #: 「対象までの距離」として一律に扱わないこと（code_review Q-07）:
+    #:
+    #:   - 信号         : **停止線までの水平距離**（灯器までの距離ではない。
+    #:                    観測が要求するのが停止線までの距離だから）
+    #:   - 車線         : **認識できた車線の前方距離**（＝線の長さ。
+    #:                    `detector._lane_polyline()` はこれを長さとして読む）
+    #:   - 標識・車両・障害物: 対象そのものまでの距離
+    #:
+    #: `encoder._distance()` はこの 3 種を区別せず距離として扱い `near`〜`far` へ
+    #: クランプする。いま車線がそこを通る経路は無いが、`_pick()` や freespace の
+    #: 対象に車線を足すと**線の長さが静かに距離として使われる**。足すときは
+    #: 先に `lane_length` のような別フィールドへ分けること。
+    distance: float | None = None
+
     lateral: float | None = None      # 車線: 車線中心からの横方向偏差 [m]
 
     #: 車線: 認識した車線中心線（**自車座標系** 前方 +x / 左 +y [m]）。
@@ -221,14 +241,91 @@ class PerceptionResult:
     detections: list[Detection] = field(default_factory=list)
 
     def by_class(self, cls: DetClass) -> list[Detection]:
-        return [d for d in self.detections if d.cls is cls]
+        # ★ `is` ではなく `==` で比べる（code_review Q-09）。DetClass は IntEnum
+        #   なので `2 is DetClass.VEHICLE` は False になり、`cls` に素の int が
+        #   入ってくると**静かに空を返す**。同じ契約型の中で 2 つの比較規則が
+        #   同居しないよう `encoder._iter_class()` の側へ揃えてある。
+        return [d for d in self.detections if d.cls == cls]
 
     def best(self, cls: DetClass) -> Detection | None:
         """そのクラスで最も信頼度の高いもの。無ければ None。"""
         for det in self.detections:
-            if det.cls is cls:
+            if det.cls == cls:
                 return det
         return None
 
     def to_wire(self) -> list[dict[str, Any]]:
         return [d.to_wire() for d in self.detections]
+
+
+# ---------------------------------------------------------------------------
+# 検出の切り詰め方（真値と認識器で共通）
+# ---------------------------------------------------------------------------
+
+#: 車線として前方何メートルまでを 1 つの検出として扱うか [m]。
+#: 真値（`groundtruth`）はここまで経路をたどって帯を作り、
+#: 認識器（`detector`）は描く中心線の長さの上限に使う。
+#: ★ 認識器の車線は直線近似なので、長く伸ばすほどカーブで実際の車線から離れる。
+#:   未学習のモデルが 57m まで伸ばした実例があるので上限として効かせている。
+LANE_LOOKAHEAD_M = 25.0
+
+#: 路面へ重ねて描くために送る車線中心線の点数。
+#: **20Hz で全車両ぶん流すので、増やすと配信量にそのまま効く。**
+LANE_POLYLINE_POINTS = 6
+
+#: クラスごとに残す上限。`config.PERCEP_MAX_DETECTIONS`（12）へ詰めるとき、
+#: 観測化で必要な内訳（車線 1 / 信号 1 / 標識 1 / 車両 3 / 障害物 3）が
+#: 必ず生き残るようにするための枠。合計はちょうど 12。
+CLASS_QUOTA: dict[DetClass, int] = {
+    DetClass.LANE: 1,
+    DetClass.TRAFFIC_LIGHT: 2,
+    DetClass.SPEED_SIGN: 1,
+    DetClass.VEHICLE: 4,
+    DetClass.OBSTACLE: 4,
+}
+
+#: 枠で詰めるときの優先順位（ラウンドロビンで先に置く順）。
+CLASS_PRIORITY: tuple[DetClass, ...] = (
+    DetClass.LANE,
+    DetClass.TRAFFIC_LIGHT,
+    DetClass.SPEED_SIGN,
+    DetClass.VEHICLE,
+    DetClass.OBSTACLE,
+)
+
+
+def pack_by_class_quota(
+    per_class: dict[DetClass, list[Detection]], limit: int
+) -> list[Detection]:
+    """クラス枠つきの優先度ラウンドロビンで `limit` 件へ詰める。
+
+    ★ **真値（`groundtruth`）と認識器（`detector`）の両方がこれを呼ぶこと**
+      （code_review Q-01）。片方だけ「信頼度の上位から一括で 12 件」にすると、
+      発火したセルが車両で埋まったときに信号・標識・車線が 1 件も残らず、
+      `encoder` が「見えなかった」既定値で埋めるため
+      **目の前に赤信号があっても観測は「信号は無い」**になる。
+      報酬と終了判定は world の真値なので、そのとき**罰だけが入る**。
+      実測では未学習のモデルで 16.4% の画像から信号が丸ごと消えた。
+      画面のボックスも同じ検出から描くので、症状は「成績が伸びない」という
+      形でしか出ない。`encode_targets` / `decode_detections` を対で扱うのと
+      同じ理由で、詰め方は 1 か所にまとめてある。
+
+    各クラスは `CLASS_QUOTA` の件数まで。渡す時点で**各クラス内は残したい順**
+    （真値なら近い順、認識器なら信頼度の降順）に並べておくこと。
+    """
+    cursor: dict[DetClass, int] = {cls: 0 for cls in CLASS_PRIORITY}
+    picked: list[Detection] = []
+    while len(picked) < limit:
+        added = False
+        for cls in CLASS_PRIORITY:
+            items = per_class.get(cls) or []
+            i = cursor[cls]
+            if i < min(len(items), CLASS_QUOTA.get(cls, 0)):
+                picked.append(items[i])
+                cursor[cls] = i + 1
+                added = True
+                if len(picked) >= limit:
+                    break
+        if not added:
+            break
+    return picked

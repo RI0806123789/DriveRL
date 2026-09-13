@@ -78,6 +78,12 @@ export function detectionColor(det: Detection): string {
       return '#a479e8'
     case DET_VEHICLE:
       return '#4f9dff'
+    // ★ この分岐へは実データが来ない（code_review P-07）。`DetectionOverlay` は
+    //   車線を `.filter((det) => det.cls !== DET_LANE)` で常に外してから呼び、
+    //   車線は `LaneDetectionOverlay` が `palette.laneOverlay` で別に描くため。
+    //   **二重定義に見えて片方を消してしまう事故を防ぐために残してある**
+    //   （`detectionLabel()` 側は他の用途から車線も引けるべきなので、
+    //     色だけ欠けているほうが読み手を迷わせる）。
     case DET_LANE:
       return '#26c6da'
     default:

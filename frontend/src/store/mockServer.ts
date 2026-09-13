@@ -22,6 +22,7 @@
 
 import type {
   ClientMessage,
+  Detection,
   FrameMessage,
   MapBuilding,
   MapEdge,
@@ -40,6 +41,8 @@ import type {
   VehicleState,
 } from '../types/protocol'
 import {
+  DET_LANE,
+  DET_TRAFFIC_LIGHT,
   PROTOCOL_VERSION,
   SIGNAL_GREEN,
   SIGNAL_RED,
@@ -129,13 +132,18 @@ const MOCK_PRESETS: MapPreset[] = [
   },
 ]
 
-// 実バックエンドの config.py と揃える（MAX_VEHICLES = 64 / OBS_DIM = 56）。
-// ここを小さいままにすると、64 台での描画負荷・色の見分け・Chip 列といった
-// 「いま一番確認したいもの」がモックで再現できなくなる。
+// 実バックエンドの config.py と揃える。
+// ★ **ここに数字の由来をコメントで書かないこと**（code_review Q-04）。
+//   以前は「MAX_VEHICLES = 64 / OBS_DIM = 56 と揃える」と書いてあったが、
+//   画像認識ベースへの移行で実装が 8 台 / 57 次元になった後も残り、
+//   **コメントが明示的に嘘をついている**状態になっていた。
+//   モックに繋ぐと車両スライダーの上限が 64、車両チップが 64 個、
+//   ネットワーク図の入力層が 56 ノードになり、
+//   **本物では絶対に起こらない構成を相手に UI を確認する**ことになる。
 const MOCK_CONFIG: SimConfig = {
-  maxVehicles: 64,
+  maxVehicles: 8,
   simHz: SIM_HZ,
-  obsDim: 56,
+  obsDim: 57,
   actionDim: 2,
 }
 
@@ -145,7 +153,11 @@ const DEFAULT_PARAMS: SimParams = {
   learningRate: 3e-4,
   gamma: 0.99,
   clipRange: 0.2,
-  entropyCoef: 0.01,
+  // ★ バックエンドの既定と同じ 0.001（contracts.py）。0.01 は CLAUDE.md の
+  //   「試して駄目だったこと」に「log_std を上限まで押し上げて方策が
+  //   ランダムに潰れた」と実測が残っている値そのもの（code_review Q-04）。
+  //   モックは学習しないので害は出ないが、パネルの初期表示がその値になる。
+  entropyCoef: 0.001,
   rolloutLength: 256,
   maxSpeed: 13.9,
   rewardGoal: 100,
@@ -929,7 +941,50 @@ class MockServer {
     // 信号のあるマップなら現示も載せる。これが無いと TrafficSignals も
     // RoadMarkings の停止線・横断歩道もモックでは一切動かない（code_review F-13）
     if (this.map?.signals?.length) frame.signals = this.computePhases()
+    const detections = this.buildDetections()
+    if (detections) frame.detections = detections
     this.send(frame)
+  }
+
+  /**
+   * 認識結果のダミー。**運転席カメラのボックスと路面の車線オーバーレイを
+   * モックでも確認できるようにするため**（code_review Q-05）。
+   *
+   * これが無いと `DetectionOverlay` と `LaneDetectionOverlay` はモック接続中
+   * 必ず何も描かず、`frame.detections` が省略されたときと同じ「静かに空」に
+   * なるので、**「まだ実装されていない」のか「モックが送っていない」のか
+   * 画面から区別できない**。
+   *
+   * 中身は本物の認識結果ではなく固定の 2 件（信号 1 つ・車線 1 本）。
+   * 車線は自車座標系の点列なので、そのまま路面へ重なる。
+   */
+  private buildDetections(): Record<string, Detection[]> | null {
+    const phases = this.map?.signals?.length ? this.computePhases() : null
+    const out: Record<string, Detection[]> = {}
+    for (const v of this.vehicles) {
+      if (!v.active) continue
+      // 車線はゆっくり左右へ振る。「ずれていればずれて見える」ことも確認できる
+      const lateral = Math.sin(this.simTime * 0.4 + v.id) * 0.6
+      const lane: Detection = {
+        cls: DET_LANE,
+        box: [0.2, 0.55, 0.8, 0.95],
+        conf: 0.9,
+        distance: 25,
+        lateral,
+        lanePoints: [0, 5, 10, 15, 20, 25].map(
+          (fx) => [fx, -lateral] as [number, number],
+        ),
+      }
+      const light: Detection = {
+        cls: DET_TRAFFIC_LIGHT,
+        box: [0.44, 0.3, 0.56, 0.4],
+        conf: 0.8,
+        phase: phases ? phases[v.id % phases.length] : SIGNAL_GREEN,
+        distance: 30,
+      }
+      out[String(v.id)] = [lane, light]
+    }
+    return Object.keys(out).length ? out : null
   }
 
   // ---- 受信 ----
