@@ -391,7 +391,13 @@ def _build_keras_model(trainer: Any):
     action = keras.layers.Dense(
         action_dim, activation="hard_tanh", name="action"
     )(trunk(inputs, "policy"))
-    value = keras.layers.Dense(1, activation=None, name="value")(trunk(inputs, "value"))
+    value_dense = keras.layers.Dense(1, activation=None, name="value")(trunk(inputs, "value"))
+    # ★ TorchScript 版（InferencePolicy.forward、上の squeeze(-1)）は value を
+    #   (B,) で返すのに、Keras の Dense(1) は素の出力が (B, 1)。揃えないと
+    #   3 形式のうち Keras だけ shape が違う成果物になる（code_review L-09）。
+    #   重みを積む Dense 層の名前は "value" のまま保ち、その上に無名の
+    #   Reshape を重ねて出力だけ (B,) に落とす。
+    value = keras.layers.Reshape((), name="value_squeezed")(value_dense)
 
     model = keras.Model(
         inputs=inputs, outputs=[action, value], name="autoware_sim_policy"

@@ -676,16 +676,17 @@ curl.exe -OJ http://127.0.0.1:8000/api/export/keras
 ```python
 import json, zipfile
 import keras   # 環境変数 KERAS_BACKEND=torch で TensorFlow 無しでも動く
+import numpy as np
 
 model = keras.saving.load_model("autoware-sim_ginza_upd427_20260905-211557.keras")
-action, value = model.predict(obs)          # obs: (B, 57) float32
-# ★ value の shape は Keras 版だけ (B, 1)（TorchScript 版は (B,)）。
-#   行動 action は両形式とも (B, 2) で、値も float32 の丸め誤差の範囲で一致する
 
 # メタデータは .keras（zip）の中に同梱してある
 with zipfile.ZipFile("autoware-sim_ginza_upd427_20260905-211557.keras") as z:
     meta = json.loads(z.read("autoware_sim_metadata.json"))
 print(meta["observation"]["layout"])        # 57 次元の内訳
+
+obs = np.zeros((1, meta["model"]["obsDim"]), dtype="float32")   # (B, 57) float32
+action, value = model.predict(obs)          # action: (B, 2), value: (B,)（TorchScript 版と同じ shape）
 print(meta["policy"]["logStd"])             # 探索ノイズを再現したいとき用
 ```
 
