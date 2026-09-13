@@ -10,6 +10,7 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { App } from './App'
 import { startConnection } from './store/connection'
+import { setupServiceWorker } from './store/pwa'
 
 import './styles/tokens.css'
 import './styles/global.css'
@@ -20,6 +21,8 @@ if (!container) {
 }
 
 startConnection()
+// PWA（インストールと全画面起動）。本番ビルドのときだけ登録される
+setupServiceWorker()
 
 createRoot(container).render(
   <StrictMode>

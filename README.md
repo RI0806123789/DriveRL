@@ -60,10 +60,14 @@ DriveRL/
 │   │       └── detector_job.py     認識器の学習ジョブ（「モデル作成」タブから回す）
 │   └── data/                       キャッシュ・チェックポイント（git 管理外）
 ├── frontend/                       TypeScript / CSS（React + Three.js）
-│   ├── scripts/                    ブラウザ不要の幾何検証
+│   ├── scripts/                    ブラウザ不要の幾何検証と、PWA アイコンの生成
+│   ├── public/                     そのまま dist/ へ配られるもの（PWA 一式）
+│   │   ├── manifest.webmanifest    インストール時の名前・色・全画面指定
+│   │   ├── sw.js                   Service Worker（手書き。ライブラリを足さない）
+│   │   └── icon-*.png              アイコン（make-icons.ts が生成。手で描かない）
 │   └── src/
 │       ├── types/protocol.ts       WebSocket メッセージの型
-│       ├── store/                  zustand ストア・WebSocket・モデル入出力
+│       ├── store/                  zustand ストア・WebSocket・モデル入出力・PWA 登録
 │       ├── scene/                  Three.js の描画（道路・標示・信号・車両・カメラ）
 │       │   ├── palette.ts          3D の色。昼と夜の 2 組を持つ
 │       │   └── sunTimes.ts         日の出・日の入り（外部 API を使わない）
@@ -91,6 +95,7 @@ DriveRL/
 | **介入** | 走行中にクリックで障害物設置・車両追加。置いたパイロンはクリックで 1 個ずつ撤去。学習は止まらない |
 | **モデルの入出力** | 学習済みモデルの書き出し（.pt / TorchScript / .keras）と、読み込みによる学習再開 |
 | **認識器の学習** | **画面の「モデル作成」タブから CNN を学習できます。** 教師データの収集から保存・載せ替えまで、コマンドを叩かずに完結します |
+| **PWA** | ブラウザからインストールして**全画面のアプリとして起動**できます（アドレスバーもタブも出ません）|
 
 ### プリセットの規模
 
@@ -237,6 +242,41 @@ cd backend;  .venv\Scripts\python.exe run.py     # 1 つ目
 cd frontend; npm run dev                          # 2 つ目
 ```
 </details>
+
+---
+
+## アプリとしてインストールする（PWA）
+
+ブラウザのタブではなく、**独立した全画面のウィンドウ**で動かせます。
+`run.ps1 -Build`（または `-Dev` 以外）で起動して <http://127.0.0.1:8000> を開き、
+
+- **Chrome / Edge**: アドレスバー右端のインストールアイコン、または
+  「⋮」メニュー →「アプリとしてインストール」（「キャスト、保存、共有」の中にある場合もあります）
+
+を選ぶとインストールされます。以降はスタートメニューやタスクバーから起動できます。
+
+| | |
+|---|---|
+| 表示モード | `fullscreen`（全画面）。対応していない環境では `standalone` → `minimal-ui` の順に落ちます |
+| 起動 URL | `/`（バックエンドが 127.0.0.1:8000 で動いている必要があります）|
+| アイコン | 192 / 512 px と Android 用の maskable。`npm run icons` で作り直せます |
+
+> **Windows のデスクトップ版 Chrome は `fullscreen` を standalone 相当（枠なしウィンドウ）で
+> 開くことがあります。** その場合は **F11** で全画面になります。Android / Chrome OS では
+> 指定どおり全画面で起動します。
+
+**オフラインでは動きません。** 走行も学習もバックエンド（FastAPI + PPO スレッド）の中で
+起きていて、画面は WebSocket で受け取ったものを描いているだけだからです。
+インストールしておくと**画面の枠（HTML と JS/CSS）だけ**はキャッシュから即座に開き、
+バックエンドが起動していなければ「バックエンドに接続していません」と表示されます。
+`backend/run.py` を起動すれば**リロードせずに自動で再接続**します。
+
+- **キャッシュするのは画面の枠だけです。** `/api/`（モデルの書き出し・読み込み）と
+  WebSocket は Service Worker が一切触りません
+- HTML は必ずサーバーへ問い合わせます（キャッシュを先に返すと、再ビルドしたのに
+  消えた JS を指したままの画面が出るため）
+- 画面が古いまま直らないときは、`frontend/public/sw.js` の `CACHE_VERSION` を上げて
+  ビルドし直してください
 
 ---
 
@@ -802,6 +842,9 @@ Keras 3 は PyTorch をバックエンドにできるので、このプロジェ
 # フロントエンドの型チェックとビルド
 cd frontend; npm run typecheck
 cd frontend; npm run build
+
+# PWA のアイコンを作り直す（public/icon-*.png を上書きする）
+npm run icons
 
 # 3D の幾何検証（ブラウザ不要。4 本まとめて走る）
 cd frontend; npm run verify

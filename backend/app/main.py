@@ -770,8 +770,16 @@ from starlette.responses import Response as _Response  # noqa: E402
 from starlette.types import Scope as _Scope  # noqa: E402
 
 
+#: ファイル名が固定で中身だけ変わるもの。**ブラウザにキャッシュさせない。**
+#: ★ `sw.js` を入れておくこと（PWA）。Service Worker はこれ自身の中身が
+#:   変わったときにだけ更新されるので、古いものがキャッシュから返ると
+#:   **キャッシュ規則を直しても永久に効かない**。症状は「再ビルドしたのに
+#:   画面が古いまま」で、原因までたどり着けない。
+_NO_CACHE_FILES = {"sw.js", "manifest.webmanifest"}
+
+
 class _FrontendStatic(StaticFiles):
-    """index.html だけキャッシュさせない静的配信。
+    """index.html と Service Worker だけキャッシュさせない静的配信。
 
     Vite の出力は `index-<ハッシュ>.js` のようにファイル名が内容で変わるので、
     アセットは永続キャッシュして構わない。一方 index.html はファイル名が固定なので、
@@ -789,7 +797,7 @@ class _FrontendStatic(StaticFiles):
     ) -> _Response:
         response = super().file_response(full_path, stat_result, scope, status_code)
         name = _os.fspath(full_path).replace("\\", "/")
-        if name.endswith(".html"):
+        if name.endswith(".html") or name.rsplit("/", 1)[-1] in _NO_CACHE_FILES:
             response.headers["Cache-Control"] = "no-cache"
         elif "/assets/" in name:
             # 内容が変わればファイル名が変わるので、長期キャッシュして問題ない
