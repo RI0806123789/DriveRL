@@ -25,17 +25,17 @@ import { useEffect, useMemo } from 'react'
 import * as THREE from 'three'
 import type { MapEdge, MapSignal, Vec2 } from '../types/protocol'
 import { usePalette } from './usePalette'
-
-// --- 寸法（メートル） ---
-const LINE_WIDTH = 0.15 // 区画線の幅
-const DASH_ON = 5.0 // 破線の線部
-const DASH_OFF = 5.0 // 破線の空白部
-const EDGE_LINE_INSET = 0.35 // 車道外側線を路端からどれだけ内側に引くか
-const STOP_LINE_WIDTH = 0.45 // 停止線の太さ
-const CROSSWALK_LENGTH = 4.0 // 横断歩道の横断方向の長さ
-const CROSSWALK_STRIPE = 0.45 // ゼブラの帯幅
-const CROSSWALK_GAP = 0.45 // ゼブラの間隔
-const CROSSWALK_OFFSET = 1.0 // 停止線から横断歩道までの距離
+// 寸法と破線の割り付けは Node から検証できるよう純粋モジュールに置いてある
+import {
+  CROSSWALK_GAP,
+  CROSSWALK_LENGTH,
+  CROSSWALK_OFFSET,
+  CROSSWALK_STRIPE,
+  EDGE_LINE_INSET,
+  LINE_WIDTH,
+  STOP_LINE_WIDTH,
+  dashSpans,
+} from './roadMarkingGeometry'
 
 /** 標示を路面からどれだけ浮かせるか。道路メッシュ(0.02)より上に置く */
 const MARKING_Y = 0.05
@@ -153,15 +153,8 @@ function pushLineAlong(
 
   // 破線は「線部」の区間だけ 1 枚の矩形で近似する。
   // 5m 程度なら道路の曲率による誤差は 15cm 幅の線では見えない。
-  const period = DASH_ON + DASH_OFF
-  // 両端が中途半端な線で終わらないよう、余白を均等に振る
-  const count = Math.max(1, Math.floor(m.total / period))
-  const margin = (m.total - count * period + DASH_OFF) / 2
-
-  for (let k = 0; k < count; k++) {
-    const start = margin + k * period
-    const end = start + DASH_ON
-    if (start < 0 || end > m.total) continue
+  // 割り付けは `roadMarkingGeometry.dashSpans()` の 1 か所だけ（S-03）。
+  for (const { start, end } of dashSpans(m.total)) {
     const a = sampleAt(m, start)
     const b = sampleAt(m, end)
     const mx = (a.x + b.x) / 2
@@ -293,12 +286,7 @@ export function RoadMarkings({ edges, signals }: RoadMarkingsProps) {
   return <mesh geometry={geometry} material={material} receiveShadow />
 }
 
-/** 参考用: この実装が使っている寸法（パネルの説明に出す） */
-export const MARKING_SPEC = {
-  lineWidth: LINE_WIDTH,
-  dashOn: DASH_ON,
-  dashOff: DASH_OFF,
-  stopLineWidth: STOP_LINE_WIDTH,
-  crosswalkLength: CROSSWALK_LENGTH,
-  crosswalkStripe: CROSSWALK_STRIPE,
-} as const
+// ★ `MARKING_SPEC`（寸法の再掲）は削除した（code_review S-04）。
+//   「パネルの説明に出す」と書いてあったが参照は 0 件で、同じ値を 2 か所へ
+//   書く二重定義でもあった。出す必要が生じたら `roadMarkingGeometry.ts` の
+//   定数を直接 import すること。

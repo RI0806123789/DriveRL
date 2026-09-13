@@ -56,7 +56,8 @@ class MapLoadError(RuntimeError):
 #: JSON キャッシュのスキーマ版。正規化ロジックを変えたら必ず上げること。
 #: 版が違うキャッシュは読まずに再取得する。
 #: 5: 最高速度標識（signs）を追加
-CACHE_VERSION = 5
+#: 6: 標識の生成を隣ノード単位にした（相互エッジ対による重複の解消。code_review M-02）
+CACHE_VERSION = 6
 
 
 # ---------------------------------------------------------------------------
@@ -598,7 +599,7 @@ def _build_signals(
 
 #: True なら**規制速度が変わる進入口だけ**に標識を置く（既定）。
 #: False にするとすべての有向エッジの始点に置く（交差点を出るたびに再掲される運用）。
-#: 銀座では前者 157 基前後 / 後者 337 基。変えたら CACHE_VERSION を上げること。
+#: 銀座では前者 136 基 / 後者 293 基。変えたら CACHE_VERSION を上げること。
 SIGNS_ONLY_WHERE_LIMIT_CHANGES = True
 
 #: 規制速度が「変わった」とみなす差 [m/s]。OSM の maxspeed は 5km/h 刻みなので、
@@ -650,32 +651,46 @@ def _build_speed_signs(edges: Sequence[MapEdge]) -> list[MapSign]:
     `MapSignal` と同じ約束で「その標識が規制する側の進行方向」を持ち、
     標示板は運転者に正対するよう `heading + pi` を向く。
     """
-    # ノードへ入ってくる有向エッジ（到着ノード -> [(エッジ, 規制速度)]）
-    arriving: dict[int, list[tuple[int, float]]] = {}
-    # ノードから出ていく有向エッジ（出発ノード -> [(エッジ, 進行方向の点列)]）
-    leaving: dict[int, list[tuple[MapEdge, list[tuple[float, float]]]]] = {}
+    # ★ どちらも**隣ノード単位**で持つ（エッジ単位にしないこと。code_review M-02）。
+    #   OSMnx の `graph_from_point()` は対面通行路を (u,v) と (v,u) の
+    #   **相互エッジ対**として返すので、エッジ単位で登録すると同じ道路が
+    #   2 つの別物として数えられる。`_build_signals()` が `approaches` を
+    #   隣ノードで持って往復を潰しているのと同じ理由・同じ作法。
+    #   エッジ単位だと次の 2 つが同時に壊れていた:
+    #     1. 同じ場所・同じ向きの標識が 2 基立つ（金沢で 27,583 基中 13,250 基）
+    #     2. 下の「U ターンを比較対象にしない」がエッジ id 基準なので、
+    #        相互エッジ対では片割れが残り、行き止まりで必ず「手前と同じ速度」に
+    #        なって標識が立たなくなる（金沢の行き止まり 1,393 か所中 5 か所しか
+    #        立っていなかった。docstring の約束と逆）
+    # ノードへ入ってくる道路（到着ノード -> {隣ノード: 規制速度}）
+    arriving: dict[int, dict[int, float]] = {}
+    # ノードから出ていく道路（出発ノード -> {隣ノード: (エッジ, 進行方向の点列)}）
+    leaving: dict[int, dict[int, tuple[MapEdge, list[tuple[float, float]]]]] = {}
 
     for e in edges:
         if e.u == e.v or len(e.polyline) < 2:
             continue  # 自己ループは進入口を持たない
         forward = [(float(px), float(py)) for px, py in e.polyline]
-        arriving.setdefault(e.v, []).append((e.id, e.speed_limit))
-        leaving.setdefault(e.u, []).append((e, forward))
+        arriving.setdefault(e.v, {}).setdefault(e.u, e.speed_limit)
+        leaving.setdefault(e.u, {}).setdefault(e.v, (e, forward))
         if not e.oneway:
-            arriving.setdefault(e.u, []).append((e.id, e.speed_limit))
-            leaving.setdefault(e.v, []).append((e, list(reversed(forward))))
+            arriving.setdefault(e.u, {}).setdefault(e.v, e.speed_limit)
+            leaving.setdefault(e.v, {}).setdefault(e.u, (e, list(reversed(forward))))
 
     signs: list[MapSign] = []
     for node_id in sorted(leaving):
-        for edge, points in sorted(leaving[node_id], key=lambda item: item[0].id):
+        for neighbour in sorted(leaving[node_id]):
+            edge, points = leaving[node_id][neighbour]
             if SIGNS_ONLY_WHERE_LIMIT_CHANGES:
-                # 同じエッジの逆走（U ターン）は比較対象にしない。
+                # 同じ道路の逆走（U ターン）は比較対象にしない。
                 # これを含めると、行き止まりから出るときに必ず「同じ速度」に
                 # なってしまい、経路の出発点に標識が 1 基も立たなくなる。
+                # ★ 除外は**隣ノード**で行う。相互エッジ対では同じ道路が
+                #   2 つの id を持つので、id で除くと必ず片割れが残る。
                 incoming = [
                     limit
-                    for other_id, limit in arriving.get(node_id, [])
-                    if other_id != edge.id
+                    for other, limit in arriving.get(node_id, {}).items()
+                    if other != neighbour
                 ]
                 if incoming and all(
                     abs(limit - edge.speed_limit) < SIGN_LIMIT_EPSILON_MPS

@@ -44,6 +44,13 @@ export function Obstacles({ castShadow }: ObstaclesProps) {
   const lastVersion = useRef(-1)
   const dummy = useMemo(() => new THREE.Object3D(), [])
 
+  // ★ **配色はマテリアルを作り直す理由にしない**（code_review S-01）。
+  //   R3F は <instancedMesh args={[...]}> を要素ごとに比較し、違っていれば
+  //   InstancedMesh ごと作り直す。作り直された直後は count={0} なのに、
+  //   下の useFrame は `obstacleVersion` が変わらない限り早期 return するので
+  //   行列も個数も書き直されない。結果、**日の出・日の入りで配色が切り替わると
+  //   パイロンが画面から消え、マップを読み直すか障害物を足す／消すまで戻らない**。
+  //   配色は autoTheme が自動で切り替えるので、利用者は何もしていないのに消える。
   const coneMaterial = useMemo(
     () =>
       new THREE.MeshStandardMaterial({
@@ -52,7 +59,7 @@ export function Obstacles({ castShadow }: ObstaclesProps) {
         metalness: 0.05,
         emissive: new THREE.Color(palette.obstacleCone).multiplyScalar(0.12),
       }),
-    [palette.obstacleCone],
+    [], // ここで使う palette は初期色だけ。以降は下の useEffect が書き換える
   )
   const baseMaterial = useMemo(
     () =>
@@ -61,8 +68,16 @@ export function Obstacles({ castShadow }: ObstaclesProps) {
         roughness: 0.9,
         metalness: 0,
       }),
-    [palette.obstacleBase],
+    [], // 同上
   )
+
+  // 配色が変わったら色だけ書き換える。自己発光はパイロンの色から作る
+  // （夜に暗い地面へ沈まないようにするための下駄。倍率は生成時と揃える）
+  useEffect(() => {
+    coneMaterial.color.set(palette.obstacleCone)
+    coneMaterial.emissive.set(palette.obstacleCone).multiplyScalar(0.12)
+    baseMaterial.color.set(palette.obstacleBase)
+  }, [coneMaterial, baseMaterial, palette.obstacleCone, palette.obstacleBase])
 
   useEffect(() => {
     return () => {
@@ -71,10 +86,12 @@ export function Obstacles({ castShadow }: ObstaclesProps) {
     }
   }, [coneMaterial, baseMaterial])
 
-  // マップ切替などでバッファが空になったら、次回必ず作り直させる
+  // マップ切替などでバッファが空になったら、次回必ず作り直させる。
+  // ★ deps には `args` に渡しているものを入れる（S-01）。マテリアルを作り直せば
+  //   InstancedMesh も作り直されるので、そのときは行列を書き直す必要がある。
   useEffect(() => {
     lastVersion.current = -1
-  }, [])
+  }, [coneMaterial, baseMaterial])
 
   /**
    * パイロンをクリックしたらその 1 個だけ消す。

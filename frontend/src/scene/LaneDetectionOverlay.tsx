@@ -31,7 +31,7 @@ import * as THREE from 'three'
 import { frameBuffer } from '../store/frameBuffer'
 import { useSimStore } from '../store/simStore'
 import { computeAlpha, createPose, sampleVehicle } from './interpolation'
-import { buildRibbon } from './routeArrowGeometry'
+import { buildRibbon, writeRibbonPositions, type Point2 } from './routeArrowGeometry'
 import { usePalette } from './usePalette'
 import { DET_LANE, type Detection } from '../types/protocol'
 
@@ -54,6 +54,45 @@ function findLaneDetection(dets: Detection[] | undefined): Detection | null {
   return null
 }
 
+/** 使い回しているジオメトリと、それが対応している点数 */
+interface RibbonSlot {
+  geom: THREE.BufferGeometry | null
+  /** `geom` を作ったときの点数。これが変わったときだけ作り直す */
+  points: number
+}
+
+/**
+ * 帯のジオメトリを点列に合わせる。**点数が同じなら作り直さず頂点だけ書き換える。**
+ *
+ * 車線の点列は毎フレーム変わるが、点数は `LANE_POLYLINE_POINTS`（既定 6）で
+ * 固定なので、頂点数も添字も変わらない。それでも `BufferGeometry` ごと
+ * 捨てて作り直すと、車線が見えているあいだ毎秒 40 個の GPU バッファを
+ * 生成・破棄し続けることになる（code_review S-02）。
+ * 認識器を差し替えて点数が変わった場合だけ作り直す。
+ */
+function syncRibbon(slot: RibbonSlot, points: Point2[] | null, width: number): boolean {
+  if (!points || points.length < 2) {
+    slot.geom?.dispose()
+    slot.geom = null
+    slot.points = 0
+    return false
+  }
+
+  if (slot.geom && slot.points === points.length) {
+    const attr = slot.geom.getAttribute('position') as THREE.BufferAttribute
+    writeRibbonPositions(attr.array as Float32Array, points, width, LANE_Y)
+    attr.needsUpdate = true
+    // 頂点が動くと境界球が古くなり、フラスタムカリングで消えることがある
+    slot.geom.computeBoundingSphere()
+    return true
+  }
+
+  slot.geom?.dispose()
+  slot.geom = buildRibbon(points, width, LANE_Y)
+  slot.points = slot.geom ? points.length : 0
+  return slot.geom !== null
+}
+
 export function LaneDetectionOverlay() {
   const palette = usePalette()
 
@@ -66,9 +105,10 @@ export function LaneDetectionOverlay() {
   const lastFollowTarget = useRef(-1)
   const hasLane = useRef(false)
   /** 自前で作ったジオメトリだけを持つ（EMPTY_GEOMETRY は共有物なので破棄しない） */
-  const built = useRef<{ ribbon: THREE.BufferGeometry | null; center: THREE.BufferGeometry | null }>(
-    { ribbon: null, center: null },
-  )
+  const built = useRef<{ ribbon: RibbonSlot; center: RibbonSlot }>({
+    ribbon: { geom: null, points: 0 },
+    center: { geom: null, points: 0 },
+  })
 
   // 色は palette.ts の 1 か所だけに書く約束（CLAUDE.md）。白線と昼夜どちらでも
   // 見分けが付く色を usePalette() 経由で読む。帯は半透明、中心線は不透明寄り。
@@ -114,8 +154,8 @@ export function LaneDetectionOverlay() {
   useEffect(() => {
     const b = built
     return () => {
-      b.current.ribbon?.dispose()
-      b.current.center?.dispose()
+      b.current.ribbon.geom?.dispose()
+      b.current.center.geom?.dispose()
     }
   }, [])
 
@@ -147,15 +187,18 @@ export function LaneDetectionOverlay() {
       const laneDet = findLaneDetection(dets)
       const points = laneDet?.lanePoints ?? null
 
-      built.current.ribbon?.dispose()
-      built.current.center?.dispose()
-      const ribbon = points ? buildRibbon(points, LANE_WIDTH, LANE_Y) : null
-      const center = points ? buildRibbon(points, CENTERLINE_WIDTH, LANE_Y) : null
-      built.current = { ribbon, center }
-      hasLane.current = ribbon !== null
+      // 点数が同じなら頂点を書き換えるだけ（S-02）。作り直すのは点数が変わったときだけ
+      const ok = syncRibbon(built.current.ribbon, points, LANE_WIDTH)
+      syncRibbon(built.current.center, points, CENTERLINE_WIDTH)
+      hasLane.current = ok
 
-      if (ribbonMesh.current) ribbonMesh.current.geometry = ribbon ?? EMPTY_GEOMETRY
-      if (centerMesh.current) centerMesh.current.geometry = center ?? EMPTY_GEOMETRY
+      // mesh に差すのは参照が変わったときだけでよいが、比較のほうが高くつかないので毎回入れる
+      if (ribbonMesh.current) {
+        ribbonMesh.current.geometry = built.current.ribbon.geom ?? EMPTY_GEOMETRY
+      }
+      if (centerMesh.current) {
+        centerMesh.current.geometry = built.current.center.geom ?? EMPTY_GEOMETRY
+      }
     }
 
     if (!hasLane.current) {
