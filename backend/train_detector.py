@@ -3,6 +3,12 @@
     cd backend
     .venv\\Scripts\\python.exe train_detector.py --samples 2400 --epochs 12
 
+★ **中身は `app/percep/trainer.py` にある。ここはその CLI の皮でしかない。**
+  同じ処理を Web アプリの操作パネル「モデル作成」タブからも走らせるため、
+  収集・損失・学習・検証の実装は両方から呼べる場所へ移してある。
+  **アルゴリズムを直すときは `app/percep/trainer.py` を直すこと。**
+  ここに書き足すと、画面から回したときにだけ効かない変更になる。
+
 流れ:
 
     1. マップを読み込んで `SimulationEnv` を走らせる
@@ -12,320 +18,48 @@
 
 学習が終わると、次回サーバーを起動したときに `SimulationEnv` が自動で
 このモデルを読み込み、**観測が真値フォールバックから実際の CNN の出力へ切り替わる**
-（`app/sim/env.py` の `_ensure_percep()`）。
+（`app/sim/env.py` の `_ensure_percep()`）。画面から回した場合は、その場で
+載せ替えるので再起動は要らない（`runtime/detector_job.py`）。
 
 ★ 教師データは `percep/groundtruth.py` が world の真値から作る。これは
   認識器が未学習のときのフォールバックと**同じ関数**で、だからこそ
   「まず走らせる → 教師データを集める → 学習する → 差し替える」という
   順序で立ち上げられる。
 
-★ **学習を回している間はサーバーを止めておくこと。** どちらも CPU を使い切るので、
-  同時に動かすと学習ループのステップ時間が跳ね上がる。
+★ **CLI から学習を回している間はサーバーを止めておくこと。** どちらも CPU を
+  使い切るので、同時に動かすと学習ループのステップ時間が跳ね上がる。
+  「モデル作成」タブから回す場合は、サーバー側が自分でシミュレーションを
+  止めてから始めるので気にしなくてよい。
 """
 
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 import time
 from pathlib import Path
 
-# `import keras` より前に置かないと効かない（app/rl/export.py と同じ作法）
-os.environ.setdefault("KERAS_BACKEND", "torch")
-
 import numpy as np
 
 from app import config
-from app.contracts import SimParams
 from app.map import build_map_index, get_preset, list_presets, load_map
-from app.percep import detector as det
-from app.percep.camera import PseudoCamera
-from app.percep.groundtruth import detect_ground_truth_batch, freespace_ground_truth
-from app.percep.types import DEFAULT_CAMERA, CameraSpec
-from app.sim.env import SimulationEnv
+from app.percep import trainer
+from app.percep.trainer import DATASET_FILE
 
-DATASET_FILE = "detector_dataset.npz"
+__all__ = ["DATASET_FILE", "main"]
 
 
-# ---------------------------------------------------------------------------
-# 収集の下ごしらえ
-#
-# ★ **放っておくと車両と障害物の教師が 1 件も集まらない。**
-#   8 台が銀座（道路総延長 19km）へ散ると互いに一度も視界に入らず、
-#   障害物は誰も置かないので実測でどちらも 0 件だった。
-#   教師に無いクラスは当然検出できるようにならないが、症状は
-#   「走らせてみたら前の車を認識しない」という形でしか出ない。
-# ---------------------------------------------------------------------------
+def _print_collect_progress(collected: int, samples: int, elapsed: float) -> None:
+    print(f"  {collected} 枚 / {samples}  ({elapsed:.0f}s)", end="\r")
 
 
-def _cluster_vehicles(env: SimulationEnv, rng: np.random.Generator) -> None:
-    """車両を互いの視界に入る距離へ寄せ集める。"""
-    slots = np.flatnonzero(env.world.fleet.active)
-    if slots.size < 2:
-        return
-    anchor = int(slots[0])
-    ax = float(env.world.fleet.x[anchor])
-    ay = float(env.world.fleet.y[anchor])
-    for raw in slots[1:]:
-        slot = int(raw)
-        # ★ `env.world` を直接触らない（code_review Q-11）。スロットを起こす経路は
-        #   必ず `SimulationEnv` を通す約束で、そこでエピソード統計が落ちる
-        for _ in range(8):
-            radius = float(rng.uniform(8.0, 45.0))
-            theta = float(rng.uniform(0.0, 2.0 * np.pi))
-            at = (ax + radius * np.cos(theta), ay + radius * np.sin(theta))
-            if env.relocate_vehicle(slot, at=at):
-                break
-        else:
-            env.relocate_vehicle(slot)  # 近くに道が無ければ通常のスポーンで妥協する
-
-
-def _scatter_obstacles(env: SimulationEnv, rng: np.random.Generator) -> None:
-    """各車両の前方にパイロンを置く。置かないと OBSTACLE の教師が 0 件になる。"""
-    env.world.clear_obstacles()
-    for raw in np.flatnonzero(env.world.fleet.active):
-        slot = int(raw)
-        x = float(env.world.fleet.x[slot])
-        y = float(env.world.fleet.y[slot])
-        heading = float(env.world.fleet.heading[slot])
-        ahead = float(rng.uniform(6.0, 28.0))
-        side = float(rng.uniform(-3.5, 3.5))
-        env.world.add_obstacle(
-            x + np.cos(heading) * ahead - np.sin(heading) * side,
-            y + np.sin(heading) * ahead + np.cos(heading) * side,
-            float(config.OBSTACLE_RADIUS),
-        )
-
-
-# ---------------------------------------------------------------------------
-# 1. データ収集
-# ---------------------------------------------------------------------------
-
-
-def collect(
-    preset_id: str,
-    samples: int,
-    *,
-    spec: CameraSpec = DEFAULT_CAMERA,
-    seed: int = 0,
-    reset_every: int = 400,
-) -> dict[str, np.ndarray]:
-    """走らせながら画像と正解を集める。
-
-    ★ **行動をランダムにする。** 学習済みの方策で走ると、通った場所の画だけが
-      集まって偏る（信号の手前で止まっている画ばかりになる）。認識器には
-      「車線から外れた画」「標識を斜めから見た画」も要る。
-
-    `reset_every` ごとに全車を再スポーンして、同じ交差点に張り付くのを防ぐ。
-    """
-    print(f"[収集] マップ {preset_id} を読み込みます")
-    index = build_map_index(load_map(get_preset(preset_id)))
-
-    params = SimParams()
-    params.vehicle_count = config.MAX_VEHICLES
-    # ★ 観測を作らせない（code_review Q-02）。ここは画像も真値も自前で作るので、
-    #   env にもう一度同じことをさせると擬似カメラ描画が二重になり、
-    #   `detector.keras` が既にあると**捨てるためだけの CNN 推論**まで毎ステップ
-    #   走る（実測で収集時間がおおむね倍になる）。`env.step()` の戻り値は
-    #   使っていないので、観測が無くても収集結果は何も変わらない
-    env = SimulationEnv(index, params, seed=seed, compute_observations=False)
-    camera = PseudoCamera(index, spec)
-    rng = np.random.default_rng(seed)
-
-    images: list[np.ndarray] = []
-    targets: list[np.ndarray] = []
-    frees: list[np.ndarray] = []
-
-    # 走り出す前に寄せ集めてパイロンを置く（そうしないと車両・障害物が写らない）
-    _cluster_vehicles(env, rng)
-    _scatter_obstacles(env, rng)
-
-    started = time.perf_counter()
-    step = 0
-    collected = 0  # 1 回の render で車両台数ぶん貯まるので、リスト長では数えない
-    while collected < samples:
-        slots = np.flatnonzero(env.world.fleet.active)
-        if slots.size:
-            frame = camera.render(env.world, slots)
-            results = detect_ground_truth_batch(env.world, slots, spec)
-            target = det.encode_targets(results, spec)
-            free = np.stack(
-                [
-                    freespace_ground_truth(
-                        env.world, int(s), spec, float(config.OBS_FREESPACE_MAX_DISTANCE)
-                    )
-                    for s in slots
-                ]
-            )
-            images.append(frame)
-            targets.append(target)
-            frees.append(det.encode_freespace(free))
-            collected += int(frame.shape[0])
-
-        # 一様ランダムだとほとんど直進しないので、加速側に寄せて前へ進ませる
-        action = np.zeros((config.MAX_VEHICLES, config.ACTION_DIM), dtype=np.float32)
-        action[:, 0] = rng.uniform(-0.2, 1.0, size=config.MAX_VEHICLES)
-        action[:, 1] = rng.uniform(-0.6, 0.6, size=config.MAX_VEHICLES)
-        env.step(action)
-        step += 1
-        # 走っているうちに散っていくので、定期的に寄せ直してパイロンも置き直す
-        if reset_every > 0 and step % reset_every == 0:
-            env.reset_all()
-            _cluster_vehicles(env, rng)
-        if step % 40 == 0:
-            _scatter_obstacles(env, rng)
-
-        if step % 20 == 0:
-            print(
-                f"  {collected} 枚 / {samples}  ({time.perf_counter() - started:.0f}s)",
-                end="\r",
-            )
-
-    x = np.concatenate(images, axis=0)[:samples]
-    y_det = np.concatenate(targets, axis=0)[:samples]
-    y_free = np.concatenate(frees, axis=0)[:samples]
-    print(f"\n[収集] 完了: {x.shape[0]} 枚 ({time.perf_counter() - started:.0f}s)")
-
-    # 何が写っているかを出す。**ここが偏っていると学習しても検出できない。**
-    obj = y_det[..., det.OFF_OBJ]
-    print(f"  物体のあるセル: {float(obj.mean()) * 100:.2f}%（1 枚あたり {obj.sum() / len(x):.1f} 個）")
-    cls_hist = y_det[..., det.OFF_CLS : det.OFF_CLS + det.NUM_CLASSES].sum(axis=(0, 1, 2))
-    from app.percep.types import DetClass
-
-    print("  クラス内訳:", {DetClass(i).name: int(v) for i, v in enumerate(cls_hist)})
-    return {"images": x, "detections": y_det, "freespace": y_free}
-
-
-# ---------------------------------------------------------------------------
-# 2. 損失
-# ---------------------------------------------------------------------------
-
-
-def _make_detection_loss(keras, pos_weight: float = 20.0):
-    """検出ヘッドの損失（物体のあるセルだけ中身を見る）。
-
-    ★ 物体があるセルは全体の数 % しかない。素の binary crossentropy だと
-      **「どのセルにも何も無い」と答えるのが最適解**になり、学習は進んだのに
-      何も検出しないモデルができあがる。正例に重みを掛けて釣り合わせる。
-    """
-    ops = keras.ops
-    off_obj, off_box, off_cls = det.OFF_OBJ, det.OFF_BOX, det.OFF_CLS
-    off_phase, off_speed = det.OFF_PHASE, det.OFF_SPEED
-    off_dist, off_lat = det.OFF_DIST, det.OFF_LATERAL
-    n_cls, n_phase, n_speed = det.NUM_CLASSES, det.NUM_PHASES, det.NUM_SPEED_BINS
-
-    def masked_ce(y_true, y_pred, off: int, size: int, mask):
-        t = y_true[..., off : off + size]
-        p = ops.clip(y_pred[..., off : off + size], 1e-7, 1.0)
-        return -ops.sum(t * ops.log(p), axis=-1, keepdims=True) * mask
-
-    def loss(y_true, y_pred):
-        mask = y_true[..., off_obj : off_obj + 1]  # (B, R, C, 1)
-
-        obj_t = y_true[..., off_obj : off_obj + 1]
-        obj_p = ops.clip(y_pred[..., off_obj : off_obj + 1], 1e-7, 1.0 - 1e-7)
-        obj_loss = -(
-            obj_t * ops.log(obj_p) * pos_weight + (1.0 - obj_t) * ops.log(1.0 - obj_p)
-        )
-
-        box_loss = ops.sum(
-            ops.square(y_true[..., off_box : off_box + 4] - y_pred[..., off_box : off_box + 4]),
-            axis=-1,
-            keepdims=True,
-        ) * mask
-
-        cls_loss = masked_ce(y_true, y_pred, off_cls, n_cls, mask)
-        # 灯色と規制速度は該当クラスのセルでしか教師が立たない（他は全 0）。
-        # 全 0 なら CE は 0 になるので、ここで別扱いする必要はない。
-        phase_loss = masked_ce(y_true, y_pred, off_phase, n_phase, mask)
-        speed_loss = masked_ce(y_true, y_pred, off_speed, n_speed, mask)
-
-        dist_loss = ops.square(
-            y_true[..., off_dist : off_dist + 1] - y_pred[..., off_dist : off_dist + 1]
-        ) * mask
-        lat_loss = ops.square(
-            y_true[..., off_lat : off_lat + 1] - y_pred[..., off_lat : off_lat + 1]
-        ) * mask
-
-        total = (
-            obj_loss
-            + 5.0 * box_loss
-            + cls_loss
-            + phase_loss
-            + speed_loss
-            + 2.0 * dist_loss
-            + lat_loss
-        )
-        return ops.mean(total)
-
-    return loss
-
-
-# ---------------------------------------------------------------------------
-# 3. 学習
-# ---------------------------------------------------------------------------
-
-
-def train(
-    data: dict[str, np.ndarray],
-    *,
-    epochs: int,
-    batch_size: int,
-    spec: CameraSpec = DEFAULT_CAMERA,
-    out_path: Path,
-    width: float = 1.0,
-) -> None:
-    keras = det._import_keras()
-
-    model = det.build_detector(spec, width=width)
-    print(f"[学習] パラメータ数 {model.count_params():,}")
-    model.compile(
-        optimizer=keras.optimizers.Adam(1e-3),
-        loss={
-            det.DET_OUTPUT_NAME: _make_detection_loss(keras),
-            det.FREESPACE_OUTPUT_NAME: "mse",
-        },
-        loss_weights={det.DET_OUTPUT_NAME: 1.0, det.FREESPACE_OUTPUT_NAME: 10.0},
+def _print_summary(summary: trainer.DatasetSummary) -> None:
+    """何が写っているかを出す。**ここが偏っていると学習しても検出できない。**"""
+    print(
+        f"  物体のあるセル: {summary.object_cell_ratio * 100:.2f}%"
+        f"（1 枚あたり {summary.objects_per_image:.1f} 個）"
     )
-
-    x = data["images"].astype(np.float32)
-    y = {
-        det.DET_OUTPUT_NAME: data["detections"].astype(np.float32),
-        det.FREESPACE_OUTPUT_NAME: data["freespace"].astype(np.float32),
-    }
-    model.fit(
-        x,
-        y,
-        epochs=int(epochs),
-        batch_size=int(batch_size),
-        validation_split=0.1,
-        shuffle=True,
-        verbose=2,
-    )
-
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    model.save(out_path)
-    print(f"[学習] 保存しました: {out_path}")
-
-    # 実際に読み直せるか確かめる。`Detector.load()` は形も検証するので、
-    # ここが通れば次回のサーバー起動でそのまま使われる。
-    loaded = det.Detector.load(out_path, spec)
-    if loaded is None:
-        print("！ 保存したモデルを Detector.load() が受け付けませんでした")
-        return
-    sample = data["images"][: min(4, len(data["images"]))]
-    results = loaded.detect(sample, list(range(len(sample))))
-    counts = [len(r.detections) for r in results]
-    print(f"[確認] 読み直して推論できました。検出数 {counts}")
-    if not any(counts):
-        print(
-            "！ 何も検出しませんでした。エポック数かサンプル数を増やすか、"
-            "収集時のクラス内訳が偏っていないか確認してください"
-        )
-
-
-# ---------------------------------------------------------------------------
+    print("  クラス内訳:", summary.class_counts)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -362,7 +96,18 @@ def main(argv: list[str] | None = None) -> int:
         with np.load(dataset_path) as npz:
             data = {k: npz[k] for k in npz.files}
     else:
-        data = collect(args.preset, int(args.samples))
+        print(f"[収集] マップ {args.preset} を読み込みます")
+        index = build_map_index(load_map(get_preset(args.preset)))
+        started = time.perf_counter()
+        data = trainer.collect_dataset(
+            index, int(args.samples), on_progress=_print_collect_progress
+        )
+        print(
+            f"\n[収集] 完了: {data['images'].shape[0]} 枚"
+            f"（{time.perf_counter() - started:.0f}s）"
+        )
+        _print_summary(trainer.summarize_dataset(data))
+
         dataset_path.parent.mkdir(parents=True, exist_ok=True)
         np.savez_compressed(dataset_path, **data)
         size_mb = dataset_path.stat().st_size / 1024 / 1024
@@ -371,13 +116,18 @@ def main(argv: list[str] | None = None) -> int:
     if args.collect_only:
         return 0
 
-    train(
+    result = trainer.fit_detector(
         data,
-        epochs=args.epochs,
-        batch_size=args.batch_size,
+        epochs=int(args.epochs),
+        batch_size=int(args.batch_size),
         out_path=Path(args.out),
         width=float(args.width),
+        log=lambda message: print(f"[学習] {message}"),
     )
+    if result.verify_counts:
+        print(f"[確認] 読み直して推論できました。検出数 {result.verify_counts}")
+    if result.warning:
+        print(f"！ {result.warning}")
     return 0
 
 

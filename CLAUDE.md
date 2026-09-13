@@ -28,11 +28,13 @@ npm run typecheck       # tsc --noEmit
 npm run build           # typecheck + vite build
 npm run verify          # 幾何検証 7 本をまとめて実行（ブラウザ不要）
 npm run verify:signals  # 1 本だけ（他: camera / colors / vehicles / sun / detections / speedsigns）
+npm run icons           # PWA アイコンを再生成（public/icon-*.png。手で描かない）
 
 # バックエンド（backend/ から。`python -m app.x` なら PYTHONPATH は不要）
 .venv\Scripts\python.exe -m app.map.prefetch          # OSM の事前ダウンロード（初回は数十秒/エリア）
 .venv\Scripts\python.exe train_detector.py --samples 2400 --epochs 12   # 認識器の学習
 .venv\Scripts\python.exe train_detector.py --collect-only              # 教師データ収集だけ
+# ↑ どちらも操作パネルの「モデル作成」タブから同じことができる（中身は同じ実装）
 .venv\Scripts\python.exe verify_log_std.py           # 方策分布の健全性チェック
 ```
 
@@ -78,6 +80,11 @@ world（真値）
                             ★ 教師データ兼フォールバックの二役。分けてはいけない
 ```
 
+認識器の**学習**は `percep/trainer.py` にあり、**CLI（`train_detector.py`）と
+Web UI（`runtime/detector_job.py` →「モデル作成」タブ）が同じ関数を呼ぶ**。
+収集・損失・検証を片方にだけ足すと「コマンドでは学習できるのに画面からだと違う」
+という切り分け不能な食い違いになるので、**アルゴリズムは必ず `trainer.py` へ書くこと。**
+
 **不変条件**:
 
 - **観測はカメラ由来、報酬と終了条件は真値由来。** 認識を誤ればそのまま赤信号に突っ込むが、
@@ -101,6 +108,17 @@ world（真値）
   過去に `_install_route()` が金沢で 1 秒止めていた実例があります（`memo/code_review.md` M-01）。
 - PPO の勾配更新は 1 ステップ 1 回ずつに分割済み（まとめると数百 ms 止まる）。
 
+認識器の学習（`runtime/detector_job.py`）は**さらに別のスレッド**で回り、その間だけ
+`engine.suspend_sim()` で**物理と PPO を止めます**（`_run_loop` が `_step_once()` を飛ばす）。
+利用者の「一時停止」（描画だけ止める）とは別物なので混ぜないこと。止める理由は 2 つ:
+
+1. 収集も学習も CPU を使い切るので、同時に回すと 50ms の予算を守れない
+2. `groundtruth._STATIC_CACHE` は `map_index` の identity 比較 1 件だけのキャッシュで、
+   別々のマップを持つ 2 つの env が交互に呼ぶと**毎回作り直しになる**
+
+再開（`resume_sim()`）は**inbox 経由**。直前に積む `reload_detector` より先に再開すると、
+古い認識器のまま 1 ステップ進んでしまうためです（止めるのは即座、再開は順序つき）。
+
 ### フロントエンドの状態管理
 
 **20Hz の `frame` は zustand に入れません。** `frontend/src/store/frameBuffer.ts` の
@@ -109,6 +127,28 @@ zustand に入れると毎秒 20 回ツリーが再レンダリングされて 3
 React の再レンダリングは「マップ変更」「パラメータ変更」「メトリクス更新(1Hz)」「UI 操作」だけ。
 
 サーバー 20Hz / ブラウザ 60fps なので、フロント側でフレーム間を補間します。
+
+### PWA（`frontend/public/`）
+
+インストールして全画面で使えるようにしてある。**ライブラリは足していない**
+（`vite-plugin-pwa` も workbox も無し）。`manifest.webmanifest` と `sw.js` は手書きで、
+アイコンは `scripts/make-icons.ts` がファビコンと同じ図形を数式で描いて PNG にする。
+
+`sw.js` の不変条件（破ると気づけない形で壊れる）:
+
+- **`/api/` と GET 以外には触らない。** モデルの書き出しは数十 MB、読み込みは
+  アップロード。挟むだけで進捗が壊れ、キャッシュすれば古い重みを配る
+- **HTML はネットワーク優先。** `index.html` は名前が固定で中身（参照する
+  `index-<ハッシュ>.js`）が毎ビルド変わる。キャッシュを先に返すと
+  **消えた JS を指したままの画面**が出る。`app/main.py` の `_FrontendStatic` が
+  同じ理由で `no-cache` を付けており、その対策を SW 側で台無しにしないこと
+- **`CACHE_VERSION` は中身を変えたら上げる**（`map/loader.py` と同じ約束）
+- `sw.js` 自身と `manifest.webmanifest` はサーバーが `no-cache` で返す
+  （`_NO_CACHE_FILES`）。ここをキャッシュさせると**キャッシュ規則を直しても
+  永久に効かない**
+
+登録は `store/pwa.ts` が**本番ビルドでのみ**行う。開発中（Vite）は登録せず、
+前回の登録が残っていれば剥がす（SW が HMR を殺すため）。
 
 ### 3D 描画で壊しやすいところ
 

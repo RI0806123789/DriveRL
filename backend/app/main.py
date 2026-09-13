@@ -200,6 +200,11 @@ async def broadcast_loop() -> None:
                 if network is not None:
                     await manager.broadcast({"type": "network", **network})
 
+                # 認識器の学習（「モデル作成」タブ）の進捗。
+                # **変わったときだけ**送る。収集中は 20 ステップごとに動くので、
+                # 毎周期送ると何も走っていないときまで 1Hz で流れてしまう
+                await broadcast_detector_if_changed()
+
             # エンジン側でパラメータが動いたとき（手動スポーンで台数が増えた等）は
             # そのまま配信する。送らないと UI の「車両数」が実態とずれたままになり、
             # 次に利用者がスライダーを触った瞬間に足した車両が消える
@@ -219,6 +224,36 @@ async def broadcast_loop() -> None:
         except Exception:
             logger.exception("配信ループで例外が発生しました")
             await asyncio.sleep(0.5)
+
+
+# ---------------------------------------------------------------------------
+# 認識器の学習（「モデル作成」タブ）
+# ---------------------------------------------------------------------------
+
+#: 最後に配信した `detector` の中身。**版番号ではなくペイロードそのものを比べる。**
+#: ★ ジョブの版番号だけを見ると、ジョブが動いていないときの変化を取りこぼす。
+#:   実際、`model.inUse`（観測が CNN 由来か）はマップを読み込んだ瞬間に変わるが、
+#:   そのときジョブは何もしていないので版番号は動かない。**学習済みの認識器で
+#:   走っているのに画面は「真値フォールバック」と言い続ける**という形で出た。
+_last_detector_payload: dict[str, Any] | None = None
+
+
+async def broadcast_detector(force: bool = False) -> None:
+    """`detector` メッセージを全接続へ送る（中身が変わったときだけ）。
+
+    `force` は「押した直後の反応」を返すためのもので、押した本人が
+    1Hz の配信周期ぶん待たされないようにする。
+    """
+    global _last_detector_payload
+    payload = engine.detector_job.snapshot()
+    if not force and payload == _last_detector_payload:
+        return
+    _last_detector_payload = payload
+    await manager.broadcast({"type": "detector", **payload})
+
+
+async def broadcast_detector_if_changed() -> None:
+    await broadcast_detector(force=False)
 
 
 # ---------------------------------------------------------------------------
@@ -397,6 +432,35 @@ async def handle_client_message(websocket: WebSocket, message: dict[str, Any]) -
     if kind in _EVENT_KINDS:
         payload = {k: v for k, v in message.items() if k != "type"}
         engine.submit_event(InterventionEvent(kind=kind, payload=payload))
+        return
+
+    if kind == "start_detector_training":
+        from app.runtime.detector_job import parse_request
+
+        request, why = parse_request(message.get("request"))
+        if request is None:
+            await send_json(
+                websocket,
+                {"type": "error", "code": "INVALID_MESSAGE", "message": why},
+            )
+            return
+        problem = engine.detector_job.start(request)
+        if problem:
+            # 「実行中」「教師データが無い」は利用者の操作に対する説明なので、
+            # protocol.md 2.8 の方針どおり error ではなく status で返す
+            await manager.broadcast(
+                {"type": "status", **engine.status_payload(), "message": problem}
+            )
+        await broadcast_detector(force=True)
+        return
+
+    if kind == "cancel_detector_training":
+        problem = engine.detector_job.cancel()
+        if problem:
+            await manager.broadcast(
+                {"type": "status", **engine.status_payload(), "message": problem}
+            )
+        await broadcast_detector(force=True)
         return
 
     if kind == "set_network":
@@ -655,6 +719,13 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
             },
         )
 
+        # 認識器の状態（学習中かどうか、いま使っているモデル）も最初に送る。
+        # これが無いと、学習中にページをリロードしただけで
+        # 「モデル作成」タブが空になり、進行中のジョブが見えなくなる
+        await send_json(
+            websocket, {"type": "detector", **engine.detector_job.snapshot()}
+        )
+
         # 接続時点で既にマップが読み込まれていれば、それも送って画面を復元させる。
         # （ページをリロードしただけで 3D が空になるのを防ぐ）
         if _current_map_wire is not None:
@@ -699,8 +770,16 @@ from starlette.responses import Response as _Response  # noqa: E402
 from starlette.types import Scope as _Scope  # noqa: E402
 
 
+#: ファイル名が固定で中身だけ変わるもの。**ブラウザにキャッシュさせない。**
+#: ★ `sw.js` を入れておくこと（PWA）。Service Worker はこれ自身の中身が
+#:   変わったときにだけ更新されるので、古いものがキャッシュから返ると
+#:   **キャッシュ規則を直しても永久に効かない**。症状は「再ビルドしたのに
+#:   画面が古いまま」で、原因までたどり着けない。
+_NO_CACHE_FILES = {"sw.js", "manifest.webmanifest"}
+
+
 class _FrontendStatic(StaticFiles):
-    """index.html だけキャッシュさせない静的配信。
+    """index.html と Service Worker だけキャッシュさせない静的配信。
 
     Vite の出力は `index-<ハッシュ>.js` のようにファイル名が内容で変わるので、
     アセットは永続キャッシュして構わない。一方 index.html はファイル名が固定なので、
@@ -718,7 +797,7 @@ class _FrontendStatic(StaticFiles):
     ) -> _Response:
         response = super().file_response(full_path, stat_result, scope, status_code)
         name = _os.fspath(full_path).replace("\\", "/")
-        if name.endswith(".html"):
+        if name.endswith(".html") or name.rsplit("/", 1)[-1] in _NO_CACHE_FILES:
             response.headers["Cache-Control"] = "no-cache"
         elif "/assets/" in name:
             # 内容が変わればファイル名が変わるので、長期キャッシュして問題ない

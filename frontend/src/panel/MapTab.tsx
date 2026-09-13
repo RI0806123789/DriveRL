@@ -9,6 +9,9 @@
 import { send } from '../store/connection'
 import { markMapLoading, useSimStore } from '../store/simStore'
 import { Card } from '../ui/Card'
+import { Collapse } from '../ui/Collapse'
+import { startRipple } from '../ui/motion'
+import { ValueFlash } from '../ui/ValueFlash'
 import { InfoIcon, MapIcon, WarningIcon } from '../ui/Icons'
 
 export function MapTab() {
@@ -44,9 +47,11 @@ export function MapTab() {
               <button
                 key={p.id}
                 type="button"
-                className="m3-preset"
+                className="m3-preset m3-ripple"
                 data-selected={activePresetId === p.id ? 'true' : 'false'}
+                data-loading={loading && activePresetId === p.id ? 'true' : 'false'}
                 disabled={loading || connection !== 'open'}
+                onPointerDown={startRipple}
                 onClick={() => handleSelect(p.id)}
               >
                 <span className="m3-preset-name">{p.name}</span>
@@ -59,8 +64,8 @@ export function MapTab() {
           )}
         </div>
 
-        {loading && (
-          <>
+        <Collapse open={loading}>
+          <div className="m3-col">
             <div className="m3-progress" />
             <div className="m3-banner m3-banner--info">
               <span className="m3-banner-icon">
@@ -72,10 +77,10 @@ export function MapTab() {
                 初回は 10〜60 秒かかります。二度目以降はディスクキャッシュから即座に読み込まれます。
               </span>
             </div>
-          </>
-        )}
+          </div>
+        </Collapse>
 
-        {status.state === 'error' && (
+        <Collapse open={status.state === 'error'}>
           <div className="m3-banner m3-banner--error">
             <span className="m3-banner-icon">
               <WarningIcon size={16} />
@@ -85,7 +90,7 @@ export function MapTab() {
               {status.message ?? 'Overpass API が混雑している可能性があります。少し待って再試行してください。'}
             </span>
           </div>
-        )}
+        </Collapse>
       </Card>
 
       {map && (
@@ -93,29 +98,29 @@ export function MapTab() {
           <div className="m3-statgrid">
             <div className="m3-stat">
               <span className="m3-stat-label">エリア</span>
-              <span className="m3-stat-value" style={{ fontSize: 13 }}>
+              <ValueFlash style={{ fontSize: 13 }} className="m3-stat-value">
                 {map.name}
-              </span>
+              </ValueFlash>
             </div>
             <div className="m3-stat">
               <span className="m3-stat-label">交差点ノード</span>
-              <span className="m3-stat-value">{map.nodes.length.toLocaleString()}</span>
+              <ValueFlash className="m3-stat-value">{map.nodes.length.toLocaleString()}</ValueFlash>
             </div>
             <div className="m3-stat">
               <span className="m3-stat-label">道路セグメント</span>
-              <span className="m3-stat-value">{map.edges.length.toLocaleString()}</span>
+              <ValueFlash className="m3-stat-value">{map.edges.length.toLocaleString()}</ValueFlash>
             </div>
             <div className="m3-stat">
               <span className="m3-stat-label">建物</span>
-              <span className="m3-stat-value">{map.buildings.length.toLocaleString()}</span>
+              <ValueFlash className="m3-stat-value">{map.buildings.length.toLocaleString()}</ValueFlash>
             </div>
             <div className="m3-stat">
               <span className="m3-stat-label">東西の広さ</span>
-              <span className="m3-stat-value">{Math.round(map.bounds.maxX - map.bounds.minX)} m</span>
+              <ValueFlash className="m3-stat-value">{Math.round(map.bounds.maxX - map.bounds.minX)} m</ValueFlash>
             </div>
             <div className="m3-stat">
               <span className="m3-stat-label">南北の広さ</span>
-              <span className="m3-stat-value">{Math.round(map.bounds.maxY - map.bounds.minY)} m</span>
+              <ValueFlash className="m3-stat-value">{Math.round(map.bounds.maxY - map.bounds.minY)} m</ValueFlash>
             </div>
           </div>
           <div className="m3-note">

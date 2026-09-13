@@ -279,10 +279,22 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
   "mapLoaded": true,
   "presetId": "ginza",
   "renderPaused": false,      // 「一時停止」は描画のみ。学習は継続している
-  "learning": true,
+  "learning": true,           // state=="running" かつ simSuspended でないとき
+  "simSuspended": false,      // ★ 物理と PPO ごと止まっている（認識器の学習中）
+  "suspendReason": "",        // simSuspended が true のときの理由
   "message": "マップを読み込みました"
 }
 ```
+
+`renderPaused` と `simSuspended` は**別物**である。
+
+| | 止まるもの | 誰が立てるか |
+|---|---|---|
+| `renderPaused` | 画面の描画（フレーム配信）だけ。**学習は続く** | 利用者の「一時停止」 |
+| `simSuspended` | 物理と PPO。フレームも止まる（画面と通信は生きている） | 認識器の学習（2.9） |
+
+`simSuspended` の間も WebSocket のコマンド・モデルの書き出し・進捗配信は動く。
+完了・中断すると**サーバー側が自動で降ろす**ので、利用者が再開させる操作は無い。
 
 ### 2.5 `params` — パラメータ変更が反映されたときに送信
 
@@ -413,6 +425,67 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
 接続やプロトコルの異常ではないため。フロントは `status.message` を
 そのまま画面に出せばよい。
 
+### 2.9 `detector` — 認識器（CNN）の学習状況
+
+操作パネルの「モデル作成」タブ向け。**接続直後に 1 通**送られ、以後は
+**中身が変わったときだけ**（最大 1Hz）送られる。学習中にページをリロードしても、
+進行中のジョブがそのまま画面に戻る。
+
+```jsonc
+{
+  "type": "detector",
+  "state": "collecting",   // idle|preparing|collecting|training|saving|done|error|cancelled
+  "running": true,         // 学習スレッドが走っているか
+  "message": "教師データを集めています（1200 / 2400 枚）",
+  "progress": 0.5,         // ★ **いまの段階の**進捗。段階をまたいで通算しない
+  "collected": 1200,
+  "samples": 2400,
+  "epoch": 0,
+  "epochs": 12,
+  "batch": 0,
+  "batches": 0,
+  "history": [             // エポックごとの損失（完了したエポックだけ）
+    { "epoch": 1, "loss": 2.41, "valLoss": 2.88 }
+  ],
+  "elapsedSec": 31.4,
+  "warning": "",           // 写っていないクラスがある等。空なら問題なし
+  "paramCount": 152992,
+  "presetName": "東京・銀座",
+  "request": {             // 受け付けた依頼のエコー
+    "mode": "full", "presetId": "ginza",
+    "samples": 2400, "epochs": 12, "batchSize": 32, "width": 1.0
+  },
+  "dataset": {             // 集めた教師データの内訳。集めていなければ null
+    "samples": 2400,
+    "objectCellRatio": 0.107,
+    "objectsPerImage": 5.1,
+    "classCounts": { "TRAFFIC_LIGHT": 2700, "SPEED_SIGN": 600,
+                     "VEHICLE": 1800, "OBSTACLE": 4800, "LANE": 2400 }
+  },
+  "model": {               // data/detector/detector.keras
+    "exists": true, "filename": "detector.keras", "sizeBytes": 1965573,
+    "modifiedAt": "2026-09-14 01:38:34",
+    "inUse": true          // ★ いま観測が CNN 由来か（false なら真値フォールバック）
+  },
+  "datasetFile": { "exists": true, "sizeBytes": 2513909, "modifiedAt": "..." },
+  "limits": {              // サーバーが受け付ける値域。UI のスライダーはこれに合わせる
+    "samplesMin": 200, "samplesMax": 4800,
+    "epochsMin": 1, "epochsMax": 60,
+    "batchMin": 8, "batchMax": 128,
+    "widthMin": 0.25, "widthMax": 2.0
+  }
+}
+```
+
+**`classCounts` で件数 0 のクラスは、学習しても検出できるようにならない。**
+症状は「走らせてみたら前の車を認識しない」という形でしか出ないので、
+サーバーは `warning` にも入れて返す。
+
+`model.inUse` は**ファイルがあるか**ではなく**いま実際に使っているか**である。
+マップを読み込んだ瞬間（`SimulationEnv` が認識器を読むとき）や、学習完了後の
+載せ替えで変わる。**ジョブが動いていなくても変わりうる**ので、配信側は
+ジョブの進捗ではなくこのメッセージ全体の中身を比べて送っている。
+
 ---
 
 ## 3. クライアント → サーバー
@@ -431,6 +504,10 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
 { "type": "load_checkpoint" }
 { "type": "reset_policy" }                                    // 重みを初期化して学習をやり直す
 { "type": "set_network", "hiddenSizes": [128, 128, 128] }     // 隠れ層の構成を変える
+{ "type": "start_detector_training",                          // 認識器（CNN）を学習する
+  "request": { "mode": "full", "presetId": "ginza",
+               "samples": 2400, "epochs": 12, "batchSize": 32, "width": 1.0 } }
+{ "type": "cancel_detector_training" }                        // 中断（すぐには止まらない）
 { "type": "ping" }                                            // → {"type":"pong","t":<server epoch ms>}
 ```
 
@@ -440,6 +517,29 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
 適用はエンジンスレッドのステップ境界で行う（学習器を作り直すため、
 asyncio 側から触ると更新中の重みを壊す）。
 入力（`obsDim`）と出力（`actionDim`）は変わらない。
+
+`start_detector_training` は擬似カメラ画像から信号・標識・車線・車両・障害物を
+検出する CNN を学習する（CLI の `backend/train_detector.py` と**同じ実装**を呼ぶ）。
+
+| `mode` | 何をするか | CLI での相当 |
+|---|---|---|
+| `full` | 教師データを集めてから学習する | 引数なし |
+| `collect` | 集めて保存するだけ | `--collect-only` |
+| `train` | 保存済みの教師データで学習する | `--train-only` |
+
+- `presetId` を省略（または `null`）にすると、**いま読み込んでいるマップ**を使う。
+  読み込み済みのものと同じなら地図を読み直さない（`groundtruth` の静的キャッシュを
+  走行側と取り合わないためでもある）。
+- 値域（2.9 の `limits`）を外れた値は**丸めずに** `INVALID_MESSAGE` で弾く。
+  `set_params` と違い、押した瞬間に数十分動き出す操作なので、
+  指定と違う値で走り出すほうが危ないため。
+- **実行中は `status.simSuspended` が true になり、物理と PPO が止まる。**
+  完了・中断でサーバーが自動的に降ろす。
+- 二重起動・教師データ不足は `error` ではなく `status.message` で返す
+  （利用者の操作に対する説明であって、プロトコルの異常ではないため）。
+- `cancel_detector_training` を送っても**すぐには止まらない**。いま処理中の
+  バッチ（またはステップ）の切れ目まで進んでから終わる。
+  **中断したモデルは保存しない**ので、それまでの認識器はそのまま残る。
 
 不正なメッセージには `error` (`INVALID_MESSAGE`) を返し、接続は維持する。
 

@@ -33,6 +33,7 @@ from app.contracts import (
     SimParams,
     validate_hidden_sizes,
 )
+from app.runtime.detector_job import DetectorTrainingJob
 
 if TYPE_CHECKING:  # 型チェック時のみ。実行時は下の遅延インポートを使う
     from pathlib import Path
@@ -99,12 +100,24 @@ class SimulationEngine:
         self._preset_id: str | None = None
         self._preset_name: str | None = None
         self._render_paused: bool = False
+        # ★ `render_paused`（描画だけ止める）とは別物。**物理と PPO ごと止める。**
+        #   認識器の学習（`detector_job`）が CPU と `groundtruth._STATIC_CACHE` を
+        #   使い切るあいだだけ立てる。利用者の「一時停止」では絶対に立てないこと
+        #   （memo 5章「学習は止めない」が崩れる）
+        self._sim_suspended: bool = False
+        self._suspend_reason: str = ""
+        # いま観測が CNN 由来か（False なら真値フォールバック）。
+        # `_install_map` と認識器の載せ替えで更新する
+        self._detector_active: bool = False
         self._latest_frame: FrameSnapshot | None = None
         self._frame_seq: int = 0           # 配信側が「新しいフレームか」を判定するための番号
         self._want_full_frame: bool = True  # 次のフレームに全スロットの経路を載せるか
         # フレームを最後に作った実時刻。物理の刻みとは切り離して FRAME_HZ で作る
         self._last_frame_at: float = 0.0
         self._map_pending: bool = False     # マップ差し替えの依頼を出してから取り込むまで
+        # 取り込み済みの `MapIndex`。**別スレッド（認識器の学習ジョブ）から読む**ので
+        # エンジンスレッド専用の `_map_index` とは別にロック下で持つ
+        self._shared_map_index: MapIndex | None = None
         self._metrics = MetricsSnapshot()
         # ネットワークの可視化用スナップショット（層ごとの重み・勾配・変化量）。
         # **必ずエンジンスレッドのステップ境界で作る。** asyncio 側から
@@ -114,6 +127,10 @@ class SimulationEngine:
         # エンジン側の都合でパラメータが変わったか（手動スポーン等で台数が動いたとき）。
         # 立てたままにすると配信のたびに送ってしまうので take_params_update() で降ろす
         self._params_dirty: bool = False
+
+        # 認識器の学習ジョブ（「モデル作成」タブ）。専用スレッドで走り、
+        # ここへは `EngineHooks`（下の public メソッド群）経由でしか触らない
+        self.detector_job = DetectorTrainingJob(self)
 
         # --- エンジンスレッドだけが触る状態 ---
         self._map_index: MapIndex | None = None
@@ -146,6 +163,9 @@ class SimulationEngine:
         logger.info("シミュレーションスレッドを起動しました")
 
     def stop(self, timeout: float = 5.0) -> None:
+        # 認識器の学習が走っていたら先に止める。放っておくと daemon スレッドとして
+        # 道連れに落ちるが、**教師データの保存中だと壊れたファイルが残る**
+        self.detector_job.stop(timeout=timeout)
         self._stop_event.set()
         thread = self._thread
         if thread is not None:
@@ -238,6 +258,56 @@ class SimulationEngine:
         """
         self._inbox.put(("set_network", list(sizes)))
 
+    # ------------------------------------------------------------------
+    # 認識器の学習ジョブ（`detector_job.EngineHooks` の実装）
+    # ------------------------------------------------------------------
+
+    def current_map(self) -> tuple[MapIndex | None, str | None, str | None]:
+        """いま取り込んでいる (マップ, プリセット ID, 表示名)。
+
+        ★ 学習ジョブはここで受け取った `MapIndex` を**そのまま**使う。
+          同じエリアを読み直すと `groundtruth._STATIC_CACHE` が
+          エンジン側の `map_index` から外れ、両者で取り合いになる。
+        """
+        with self._lock:
+            return self._shared_map_index, self._preset_id, self._preset_name
+
+    def suspend_sim(self, reason: str) -> None:
+        """物理と PPO を止める（配信・コマンド処理・書き出しは動いたまま）。
+
+        ★ **利用者の「一時停止」とは別物。** あちらは描画だけを止めて学習は
+          続ける（memo 5章）。こちらは認識器の学習が CPU と
+          `groundtruth._STATIC_CACHE` を使い切るあいだの避難で、
+          `detector_job` 以外から呼ばないこと。
+        """
+        with self._lock:
+            self._sim_suspended = True
+            self._suspend_reason = reason
+        logger.info("シミュレーションを一時停止します: %s", reason)
+
+    def resume_sim(self) -> None:
+        """止めていた物理と PPO を再開する。
+
+        ★ **止めるのは即座に、再開は inbox 経由**という非対称にしてある。
+          学習が終わった直後に積む `reload_detector` より先に再開してしまうと、
+          **古い認識器のまま 1 ステップだけ進む**（inbox は次の周回で読まれるため）。
+          FIFO の inbox に載せれば「載せ替えてから再開」の順序が保証される。
+        """
+        self._inbox.put(("resume_sim", None))
+
+    def reload_detector(self) -> None:
+        """学習し直した認識器を実行中の環境へ載せ替える（ステップ境界で行う）。"""
+        self._inbox.put(("reload_detector", None))
+
+    def notify(self, message: str) -> None:
+        """`status.message` として 1 行流す（ジョブスレッドからも呼ばれる）。"""
+        self._notify(message)
+
+    def detector_in_use(self) -> bool:
+        """いま観測が CNN 由来か（False なら真値フォールバック）。"""
+        with self._lock:
+            return self._detector_active
+
     def request_export(self, kind: str) -> ExportTicket:
         """モデルの書き出しを依頼する。呼び出し側は `ticket.done` を待つこと。
 
@@ -283,7 +353,11 @@ class SimulationEngine:
                 "mapLoaded": self._latest_frame is not None or self._state == "running",
                 "presetId": self._preset_id,
                 "renderPaused": self._render_paused,
-                "learning": self._state == "running",
+                # ★ 認識器の学習中は本当に学習が止まっている。ここを True のまま
+                #   にすると、画面は「学習中」と言い続けるのに更新回数が伸びない
+                "learning": self._state == "running" and not self._sim_suspended,
+                "simSuspended": self._sim_suspended,
+                "suspendReason": self._suspend_reason,
                 "message": self._message,
             }
 
@@ -347,6 +421,11 @@ class SimulationEngine:
                 )
                 # 降ろしておかないと、フロントはフレームを待ち続けて画面が固まる
                 self._map_pending = False
+                # 再開は inbox 経由なので、スレッドが死んでいると誰も降ろせない。
+                # 放っておくと画面には「認識器の学習中」と出たままになり、
+                # **本当の理由（スレッドの異常終了）が隠れる**
+                self._sim_suspended = False
+                self._suspend_reason = ""
             self._notify(
                 "シミュレーションスレッドが異常終了しました。サーバーを再起動してください"
             )
@@ -371,6 +450,18 @@ class SimulationEngine:
 
             if self._env is None or self._trainer is None:
                 # マップ未読込。コマンドだけ拾って待つ。
+                time.sleep(0.05)
+                next_deadline = time.perf_counter()
+                continue
+
+            with self._lock:
+                suspended = self._sim_suspended
+            if suspended:
+                # ★ 認識器の学習中（`detector_job`）。**物理と PPO だけを止める。**
+                #   コマンド（`_drain_inbox`）と配信は動いたままなので、
+                #   学習の進捗表示も中止ボタンも効く。ここで `continue` せずに
+                #   ステップを回すと、収集・学習と CPU を取り合って両方が遅くなり、
+                #   さらに `groundtruth._STATIC_CACHE` を毎ステップ作り直すことになる
                 time.sleep(0.05)
                 next_deadline = time.perf_counter()
                 continue
@@ -460,6 +551,32 @@ class SimulationEngine:
             ok = self._trainer.load(config.CHECKPOINT_PATH)
             self._notify(
                 "学習済みモデルを読み込みました" if ok else "読み込めるチェックポイントがありません"
+            )
+
+        elif kind == "resume_sim":
+            with self._lock:
+                if not self._sim_suspended:
+                    return
+                self._sim_suspended = False
+                self._suspend_reason = ""
+            logger.info("シミュレーションを再開します")
+
+        elif kind == "reload_detector":
+            # 学習し直した `detector.keras` を実行中の環境へ載せ替える。
+            # ★ ステップ境界でしか行わない。観測を作っている最中に差し替えると、
+            #   同じフレームの中で古い認識器と新しい認識器が混ざる
+            if self._env is None:
+                self._notify(
+                    "マップが読み込まれていないため、認識器の載せ替えは次回の読込時に行われます"
+                )
+                return
+            ok = self._env.reload_detector()
+            with self._lock:
+                self._detector_active = ok
+            self._notify(
+                "学習した認識器に切り替えました。観測が CNN の出力になります"
+                if ok
+                else "認識器を読み込めなかったため、真値の検出結果で走り続けます"
             )
 
         elif kind == "export":
@@ -782,9 +899,13 @@ class SimulationEngine:
             self._map_pending = False
             self._preset_id = preset_id
             self._preset_name = preset_name
+            self._shared_map_index = map_index
             self._message = f"{preset_name} を読み込みました"
             self._latest_frame = initial_frame
             self._frame_seq += 1
+            # 認識器の有無は最初の観測（`_ensure_percep`）で決まる。
+            # ここでは「まだ分からない」ではなく実際の状態を映す
+            self._detector_active = self._env.detector_active
 
         # 環境の構築には数秒かかることがある。完了した「時点」を配信側へ知らせないと
         # クライアントが loading_map のまま取り残されるので、必ず通知を積む。

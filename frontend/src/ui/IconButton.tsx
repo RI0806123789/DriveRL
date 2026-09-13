@@ -1,6 +1,7 @@
 /** アイコンだけのボタン。ハンバーガーやカメラ切替に使う */
 
-import type { ButtonHTMLAttributes, ReactNode } from 'react'
+import type { ButtonHTMLAttributes, PointerEvent, ReactNode } from 'react'
+import { startRipple } from './motion'
 
 export type IconButtonVariant = 'standard' | 'filled' | 'surface'
 
@@ -19,10 +20,12 @@ export function IconButton({
   children,
   className = '',
   type = 'button',
+  onPointerDown,
   ...rest
 }: IconButtonProps) {
   const classes = [
     'm3-iconbtn',
+    'm3-ripple',
     variant !== 'standard' ? `m3-iconbtn--${variant}` : '',
     large ? 'm3-iconbtn--lg' : '',
     className,
@@ -31,7 +34,17 @@ export function IconButton({
     .join(' ')
 
   return (
-    <button type={type} className={classes} aria-label={label} title={label} {...rest}>
+    <button
+      type={type}
+      className={classes}
+      aria-label={label}
+      title={label}
+      onPointerDown={(e: PointerEvent<HTMLButtonElement>) => {
+        startRipple(e)
+        onPointerDown?.(e)
+      }}
+      {...rest}
+    >
       {children}
     </button>
   )

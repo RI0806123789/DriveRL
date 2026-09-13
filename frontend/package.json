@@ -8,6 +8,7 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
+    "icons": "node scripts/make-icons.ts",
     "verify:signals": "node scripts/verify-signal-geometry.ts",
     "verify:speedsigns": "node scripts/verify-sign-geometry.ts",
     "verify:camera": "node scripts/verify-camera-route.ts",
