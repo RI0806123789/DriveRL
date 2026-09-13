@@ -32,6 +32,7 @@ CNN 認識器にかけ、その検出結果を `percep.encoder` が観測ベク�
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import replace
 from typing import Any, Callable
 
@@ -62,7 +63,14 @@ class SimulationEnv:
     runtime 側はこのクラスのシグネチャに依存するので、公開メソッドを変えないこと。
     """
 
-    def __init__(self, map_index: MapIndex, params: SimParams, seed: int = 0) -> None:
+    def __init__(
+        self,
+        map_index: MapIndex,
+        params: SimParams,
+        seed: int = 0,
+        *,
+        compute_observations: bool = True,
+    ) -> None:
         self.map_index = map_index
         self.params = replace(params)  # 呼び出し側の dataclass を共有しない
         self.rng = np.random.default_rng(seed)
@@ -86,6 +94,10 @@ class SimulationEnv:
         # （検出クラスに建物が無いので、検出結果からは車両と障害物しか拾えない）
         self._freespace_gt: Callable[..., np.ndarray] | None = None
         self._percep_ready = False
+        # ★ False にすると観測を作らない（擬似カメラも認識器も動かさない）。
+        #   `train_detector.py` のように画像と真値を自前で作る利用者だけが使う。
+        #   通常の学習ループで False にすると観測が 0 のままになるので触らないこと。
+        self._observations_enabled = bool(compute_observations)
         # 失敗を 1 度だけログに出すためのフラグ（B-15）。
         # ★ 認識が失敗し続けると観測のカメラ欄が「常に何も見えない」で固定される。
         #   画面上は車が走っているので、黙らせると外から絶対に気づけない。
@@ -109,6 +121,26 @@ class SimulationEnv:
     def observations(self) -> np.ndarray:
         """shape (MAX_VEHICLES, OBS_DIM) float32。"""
         return self._obs.copy()
+
+    def relocate_vehicle(self, slot: int, at: tuple[float, float] | None = None) -> bool:
+        """スロットを指定地点（省略時はランダム）で起こし直す。成否を返す。
+
+        ★ **`env.world.activate()` / `deactivate()` を外から直接呼ばないこと。**
+          スロットが起きる／寝る経路は必ず `_reset_slot_stats()` を通す、という
+          規約（CLAUDE.md / code_review B-10）を env を飛び越すと破れる。
+          `train_detector.py` の `_cluster_vehicles()` がまさに `env.world` を
+          直接触っており、規約が規約のままでコードとして強制されていなかった
+          （code_review Q-11）。統計を読まないスクリプトなので実害は無かったが、
+          同じやり方が増えると実害の出る場所で再発する。
+        """
+        slot = int(slot)
+        if not (0 <= slot < config.MAX_VEHICLES):
+            return False
+        self.world.deactivate(slot)
+        ok = self.world.activate(slot, at=at)
+        self._reset_slot_stats(slot)
+        self.params.vehicle_count = self.world.active_count
+        return ok
 
     def _reset_slot_stats(self, slot: int) -> None:
         """1 スロット分のエピソード統計を 0 に戻す。
@@ -175,6 +207,13 @@ class SimulationEnv:
         # --- 1. 時刻と信号の更新、物理更新 ---
         # 信号は観測にも報酬にも使うので、行動を反映する前に現示を進める
         self.world.advance_time(config.DT)
+
+        # 黄色の「安全に停止できないので進む」判断を記録する（施行令 2 条ただし書き）。
+        # ★ `obey_signals` の内側に入れないこと（code_review W-06）。
+        #   OFF は「速度制約を外して罰だけ与える」設定であって、**法律の側まで
+        #   厳しくする設定ではない**。内側に置いていたときは OFF にすると
+        #   免除が一度も付かず、止まりようのない黄色進入まで一律 -60 になっていた。
+        self.world.update_yellow_commitment()
 
         # 信号に従わせる（道路交通法施行令 2 条）。
         # エージェントの指令を書き換えるのではなく「赤信号に近づくとアクセルが
@@ -270,7 +309,20 @@ class SimulationEnv:
                 )
             )
             self._reset_slot_stats(slot)
-            self.world.respawn(slot)
+            if not self.world.try_respawn(slot):
+                # ★ 失敗すると `_install_route()` を通らないので `state.steps` が
+                #   MAX_EPISODE_STEPS を超えたまま残り、次のステップでまた
+                #   timeout が立つ。放っておくと**毎ステップ空のエピソードが
+                #   1 件ずつ積まれ**、直近 50 件のログが 2.5 秒で埋まって
+                #   到達率 0% / 平均エピソード長 4000 に張り付く（code_review W-09）。
+                #   走れないスロットは寝かせて、再発火だけは止める。
+                self.world.deactivate(slot)
+                self.params.vehicle_count = self.world.active_count
+                logger.warning(
+                    "スロット %d の再スポーンに失敗しました（経路を作れず）。"
+                    "このスロットを非アクティブにします",
+                    slot,
+                )
 
         # respawn でクリアされる描画用フラグを、このステップの事実で上書きする
         self.world.set_event_flags(collided, reached)
@@ -282,6 +334,9 @@ class SimulationEnv:
             rewards=rewards,
             dones=dones,
             active=active_before,
+            # ★ 打ち切り（時間切れ）は**世界の終わりではない**ので分けて渡す。
+            #   GAE のブートストラップを切ってよいのは本物の終端だけ（L-08）。
+            truncated=timeout & ~(reached | collided | offroad),
             episodes=episodes,
         )
 
@@ -304,6 +359,23 @@ class SimulationEnv:
             self.world.project_all()
             self._obs = self._compute_observations()
 
+    @staticmethod
+    def _finite(payload: dict[str, Any], key: str, default: Any = None) -> float:
+        """ペイロードから**有限な** float を取り出す。駄目なら ValueError。
+
+        ★ `set_params` は `contracts._PARAM_SPECS` で非有限値を弾くのに、
+          同じ WebSocket から入る介入イベントには検証が無かった（code_review R-06）。
+          `orjson` は JSON の `NaN` リテラルを拒否するが**文字列 `"nan"` は素通り**し、
+          `float("nan")` が NaN を作る。NaN の比較は常に False なので、そこへ置いた
+          障害物は `MAX_OBSTACLES`（64）の枠を 1 つ占有したまま**誰とも衝突せず、
+          画面にも出ないので選んで消せない**（復旧は clear_obstacles のみ）。
+        """
+        raw = payload[key] if default is None else payload.get(key, default)
+        value = float(raw)
+        if not math.isfinite(value):
+            raise ValueError(f"{key} が有限な数値ではありません: {raw!r}")
+        return value
+
     def apply_event(self, event: InterventionEvent) -> str | None:
         """ユーザー介入を適用する。失敗理由の文字列、成功なら None を返す。
 
@@ -317,14 +389,14 @@ class SimulationEnv:
                 slot = self.world.first_inactive_slot()
                 if slot is None:
                     return f"空きスロットがありません（最大 {config.MAX_VEHICLES} 台）"
-                at = (float(payload["x"]), float(payload["y"]))
+                at = (self._finite(payload, "x"), self._finite(payload, "y"))
                 if not self.world.activate(slot, at=at):
                     return "指定地点から到達可能な経路が見つかりませんでした"
                 self._reset_slot_stats(slot)
                 self.params.vehicle_count = self.world.active_count
 
             elif kind == "despawn_vehicle":
-                slot = int(payload["id"])
+                slot = int(self._finite(payload, "id"))
                 if not (0 <= slot < config.MAX_VEHICLES):
                     return f"車両 ID が範囲外です: {slot}"
                 if not self.world.fleet.active[slot]:
@@ -334,15 +406,17 @@ class SimulationEnv:
                 self.params.vehicle_count = self.world.active_count
 
             elif kind == "add_obstacle":
-                radius = float(payload.get("radius", config.OBSTACLE_RADIUS))
+                # 半径の値域は `world.add_obstacle()` が 0.1〜5.0m に丸める。
+                # ここで確認したいのは「有限であること」だけ（NaN は丸められない）
+                radius = self._finite(payload, "radius", config.OBSTACLE_RADIUS)
                 obstacle_id = self.world.add_obstacle(
-                    float(payload["x"]), float(payload["y"]), radius
+                    self._finite(payload, "x"), self._finite(payload, "y"), radius
                 )
                 if obstacle_id is None:
                     return f"障害物の数が上限に達しています（最大 {config.MAX_OBSTACLES} 個）"
 
             elif kind == "remove_obstacle":
-                if not self.world.remove_obstacle(int(payload["id"])):
+                if not self.world.remove_obstacle(int(self._finite(payload, "id"))):
                     return f"障害物 {payload.get('id')} は存在しません"
 
             elif kind == "clear_obstacles":
@@ -355,7 +429,11 @@ class SimulationEnv:
             else:
                 return f"未知の介入イベントです: {kind}"
 
-        except (KeyError, TypeError, ValueError) as exc:
+        except (KeyError, TypeError, ValueError, OverflowError) as exc:
+            # ★ `OverflowError` を忘れないこと（code_review R-06）。
+            #   `int(float("inf"))` が投げるのは ValueError ではなくこちらで、
+            #   捕まえ損ねると `_drain_inbox` まで抜けて
+            #   「コマンド event の処理に失敗しました」としか出ない通知になる。
             return f"介入イベントのペイロードが不正です: {exc}"
 
         # 介入で世界が変わったので観測を作り直す（shape は不変）
@@ -401,13 +479,14 @@ class SimulationEnv:
             return
         self._percep_ready = True
 
-        from app.percep.camera import PseudoCamera
         from app.percep.groundtruth import (
             detect_ground_truth_batch,
             freespace_ground_truth,
         )
 
-        self._camera = PseudoCamera(self.map_index, self._camera_spec)
+        # ★ 真値フォールバックは PseudoCamera に依存しない。先に入れておくと、
+        #   この後のカメラ・認識器の初期化が失敗しても観測のカメラ欄が
+        #   「常に何も見えない」で固定されずに済む。
         self._ground_truth = detect_ground_truth_batch
         self._freespace_gt = freespace_ground_truth
 
@@ -418,6 +497,25 @@ class SimulationEnv:
                 config.DETECTOR_PATH.name,
             )
             return
+
+        # ★ 擬似カメラを作るのは**認識器がある場合だけ**（code_review P-03）。
+        #   PseudoCamera は道路ラスタの焼き込みなど重い前処理を持つ一方、
+        #   実際に使われるのは CNN が画像を撮るときだけ。真値フォールバックは
+        #   PseudoCamera を一切見ないので、学習前はマップを読むたびに
+        #   「作って一度も使わない」代金を払っていた。
+        try:
+            from app.percep.camera import PseudoCamera
+
+            self._camera = PseudoCamera(self.map_index, self._camera_spec)
+        except Exception:
+            # ★ ここを守らないと失敗が SimulationEnv.__init__ まで抜けて、
+            #   マップの取り込みごと落ちる（code_review P-01 / R-03 の引き金）。
+            #   しかも `_percep_ready` は既に True なので**二度と再初期化を
+            #   試みない**。真値フォールバックだけで走れる形にして先へ進む。
+            logger.exception("擬似カメラの構築に失敗しました。真値で代用します")
+            self._camera = None
+            return
+
         try:
             from app.percep.detector import Detector
 
@@ -440,6 +538,14 @@ class SimulationEnv:
           MAX_VEHICLES に固定する必要があるのは学習側へ渡す obs だけで、
           描画と推論までそこへ合わせる理由は無い。
         """
+        if not self._observations_enabled:
+            # ★ 教師データ収集（train_detector.py）専用の逃げ道（code_review Q-02）。
+            #   あちらは画像も真値も自前で作って使うので、ここで同じことをもう一度
+            #   やると擬似カメラ描画が二重になり、認識器があれば**捨てるためだけの
+            #   CNN 推論**まで毎ステップ走る。
+            self.latest_perception = {}
+            return np.zeros((config.MAX_VEHICLES, config.OBS_DIM), dtype=np.float32)
+
         active = self.world.fleet.active
         idx = np.flatnonzero(active)
         if idx.size == 0:

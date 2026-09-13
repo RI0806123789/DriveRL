@@ -69,15 +69,16 @@ def _cluster_vehicles(env: SimulationEnv, rng: np.random.Generator) -> None:
     ay = float(env.world.fleet.y[anchor])
     for raw in slots[1:]:
         slot = int(raw)
-        env.world.deactivate(slot)
+        # ★ `env.world` を直接触らない（code_review Q-11）。スロットを起こす経路は
+        #   必ず `SimulationEnv` を通す約束で、そこでエピソード統計が落ちる
         for _ in range(8):
             radius = float(rng.uniform(8.0, 45.0))
             theta = float(rng.uniform(0.0, 2.0 * np.pi))
             at = (ax + radius * np.cos(theta), ay + radius * np.sin(theta))
-            if env.world.activate(slot, at=at):
+            if env.relocate_vehicle(slot, at=at):
                 break
         else:
-            env.world.activate(slot)  # 近くに道が無ければ通常のスポーンで妥協する
+            env.relocate_vehicle(slot)  # 近くに道が無ければ通常のスポーンで妥協する
 
 
 def _scatter_obstacles(env: SimulationEnv, rng: np.random.Generator) -> None:
@@ -123,7 +124,12 @@ def collect(
 
     params = SimParams()
     params.vehicle_count = config.MAX_VEHICLES
-    env = SimulationEnv(index, params, seed=seed)
+    # ★ 観測を作らせない（code_review Q-02）。ここは画像も真値も自前で作るので、
+    #   env にもう一度同じことをさせると擬似カメラ描画が二重になり、
+    #   `detector.keras` が既にあると**捨てるためだけの CNN 推論**まで毎ステップ
+    #   走る（実測で収集時間がおおむね倍になる）。`env.step()` の戻り値は
+    #   使っていないので、観測が無くても収集結果は何も変わらない
+    env = SimulationEnv(index, params, seed=seed, compute_observations=False)
     camera = PseudoCamera(index, spec)
     rng = np.random.default_rng(seed)
 

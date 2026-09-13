@@ -9,6 +9,7 @@ memo 5章:
 
 from __future__ import annotations
 
+import copy
 import logging
 import os
 from dataclasses import dataclass, field
@@ -70,7 +71,13 @@ def peek_hidden_sizes(path: Path) -> tuple[int, ...] | None:
         return None
     try:
         sizes = tuple(int(h) for h in payload["hidden_sizes"])
-    except (KeyError, TypeError, ValueError):
+    except Exception:
+        # ★ ここは「読めなければ None」が契約の関数なので、握る例外を絞らない
+        #   （code_review L-07）。以前は (KeyError, TypeError, ValueError) だけで、
+        #   `hidden_sizes=[inf]` の `int(float("inf"))` が投げる OverflowError を
+        #   取りこぼしていた。呼び出し元の `engine._ensure_trainer()` は
+        #   `_run()` の冒頭にあり try で囲っていないので、**壊れた
+        #   `shared_policy.pt` があると学習スレッドが起動直後に静かに死ぬ**。
         return None
     return sizes if sizes else None
 
@@ -204,11 +211,16 @@ class PPOTrainer:
         rewards: np.ndarray,
         dones: np.ndarray,
         active: np.ndarray,
+        truncated: np.ndarray | None = None,
     ) -> None:
         """1 ステップ分をバッファに積む。
 
         actions は act() が返したクリップ後の値でよい。log_prob と整合させるため、
         直近の act() で得たクリップ前のサンプルがあればそちらを優先して記録する。
+
+        `truncated` は `dones` のうち時間切れによる打ち切りだったもの
+        （`StepResult.truncated`）。渡さないと従来どおり全部が本物の終端として
+        扱われる（code_review L-08）。
         """
         raw = self._last_raw_actions
         actions_arr = np.asarray(actions, dtype=np.float32).reshape(
@@ -218,7 +230,9 @@ class PPOTrainer:
             actions_arr = raw
         self._last_raw_actions = None
 
-        self.buffer.add(obs, actions_arr, log_probs, values, rewards, dones, active)
+        self.buffer.add(
+            obs, actions_arr, log_probs, values, rewards, dones, active, truncated
+        )
 
     # ------------------------------------------------------------------
     # 更新
@@ -242,14 +256,14 @@ class PPOTrainer:
                 return None
             self._begin_update(last_obs, last_active)
             if self._pending is None:
-                # 有効サンプルがゼロだった（全スロット非アクティブ）
-                self._updates += 1
-                return {
-                    "policy_loss": 0.0,
-                    "value_loss": 0.0,
-                    "entropy": 0.0,
-                    "approx_kl": 0.0,
-                }
+                # ★ 有効サンプルがゼロ（全スロット非アクティブ）。学習は 1 回も
+                #   起きていないので `_updates` を**増やさない**（code_review L-06）。
+                #   増やしていたときは、engine がこれを「更新が 1 回完了した」と
+                #   受け取って 20 回ごとの自動保存まで走り、学習タブの「学習回数」も
+                #   増え続けた。しかも `gradNorm` / `deltaNorm` は直前の実更新の値が
+                #   残ったまま配信されるので、**していないのにしているように見える**
+                #   方向へ画面が嘘をつく。
+                return None
 
         budget = int(config.PPO_MINIBATCHES_PER_STEP)
         if budget <= 0:
@@ -597,6 +611,13 @@ class PPOTrainer:
             # モデル定義の欄が数値ですらない。壊れているとみなして拒否する
             logger.warning("チェックポイントのモデル定義が壊れています: %s", path.name)
             return False
+        # ★ 失敗したら**必ず巻き戻す**（code_review L-01）。
+        #   `policy.load_state_dict()` は形の合うテンソルを先にコピーしてから
+        #   最後に RuntimeError を投げるので、途中で落ちても重みは差し替わっている。
+        #   以前はそのまま `return False` していたため、呼び出し側が
+        #   「重みの読み込みに失敗しました」と表示している裏で
+        #   **ファイルの重みが走行中の方策へ載っている**状態になっていた。
+        before = copy.deepcopy(self.policy.state_dict())
         try:
             # 重みが入れ替わるので、古い方策で作った更新の続きは回さない
             self._drop_pending()
@@ -606,8 +627,25 @@ class PPOTrainer:
                 for group in self.optimizer.param_groups:
                     group["lr"] = self.learning_rate
         except Exception:
+            logger.exception("チェックポイントの適用に失敗しました: %s", path.name)
+            try:
+                self.policy.load_state_dict(before)
+            except Exception:
+                logger.exception("方策の巻き戻しにも失敗しました。方策を初期化します")
+                self.reset_policy()
             return False
+        finally:
+            # ★ 成否によらず収集済みロールアウトを捨てる（`_drop_pending()` と同じ扱い）。
+            #   部分的に載った重みで集めた `log_probs` を残すと、次の PPO 更新で
+            #   重要度比 exp(new - old) が**別の方策どうしの比**になり、
+            #   クリップの外へ振り切った勾配が 1 回入る。
+            self.buffer.clear()
+            self._last_raw_actions = None
+        # ★ `load_state_dict` は可動域の検査をしないので、ここで丸める
+        #   （code_review L-03）。`log_std = 1.0013` のような可動域外の値を
+        #   そのまま復元すると、clamp の逆伝播が勾配を通さず**上げることも
+        #   下げることもできない固着状態**になる。次の optimizer.step() まで
+        #   自動では戻らず、その窓で書き出すと壊れた成果物ができる。
+        self.policy.clamp_log_std()
         self._updates = int(payload.get("updates", 0))
-        self.buffer.clear()
-        self._last_raw_actions = None
         return True

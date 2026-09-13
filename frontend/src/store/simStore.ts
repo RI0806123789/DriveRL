@@ -80,10 +80,13 @@ const DEFAULT_PARAMS: SimParams = {
   obeySpeedSigns: true,
 }
 
+// init メッセージが来るまでの暫定値。実装（backend/app/config.py）と揃える。
+// ★ ずれていると、init 到着の 1 回で `Vehicles` の count が変わり、
+//   InstancedMesh が起動のたびに作り直される（code_review Q-04）。
 const DEFAULT_CONFIG: SimConfig = {
-  maxVehicles: 32,
+  maxVehicles: 8,
   simHz: 20,
-  obsDim: 56,
+  obsDim: 57,
   actionDim: 2,
 }
 

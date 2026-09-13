@@ -14,13 +14,12 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 
-# --- 生成データ（OSM キャッシュ・学習チェックポイント・認識器） ---
-backend/data/osmnx_cache/
-backend/data/map_cache/
-backend/data/checkpoints/
-backend/data/exports/
-backend/data/uploads/
-backend/data/detector/
+# --- 生成データ（OSM キャッシュ・学習チェックポイント・書き出し・認識器）---
+# ★ ディレクトリを 1 つずつ並べないこと（code_review Q-13）。以前は 5 つを列挙して
+#   おり、画像認識ベースへの移行で増えた `detector/`（.keras 1.97MB +
+#   dataset の .npz 2.59MB）だけが漏れていた。config.py が起動時に
+#   `backend/data/` 配下を全部作るので、空ディレクトリを残す必要は無い。
+backend/data/
 
 # --- Node (frontend) ---
 frontend/node_modules/

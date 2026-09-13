@@ -24,11 +24,11 @@
 
 ```
 DriveRL/
-├── backend/                        Python 約 12,000 行（30 ファイル）
+├── backend/                        Python（バックエンド一式）
 │   ├── run.py                      起動（--dev で Vite も子プロセスとして面倒を見る）
 │   ├── train_detector.py           画像認識器の学習（教師データ収集 -> 学習 -> 保存）
 │   ├── app/
-│   │   ├── config.py               定数（観測 56 次元の内訳・車両諸元・PPO 設定）
+│   │   ├── config.py               定数（観測 57 次元の内訳・車両諸元・PPO 設定）
 │   │   ├── contracts.py            パッケージ間の共有型。ここが内部の契約
 │   │   ├── main.py                 FastAPI + WebSocket。重い処理は書かない
 │   │   ├── map/
@@ -56,7 +56,7 @@ DriveRL/
 │   │   │   └── importer.py         モデルの読み込みと安全な検証
 │   │   └── runtime/engine.py       物理と学習を回す専用スレッド
 │   └── data/                       キャッシュ・チェックポイント（git 管理外）
-├── frontend/                       TypeScript / CSS 約 10,000 行（48 ファイル）
+├── frontend/                       TypeScript / CSS（React + Three.js）
 │   ├── scripts/                    ブラウザ不要の幾何検証
 │   └── src/
 │       ├── types/protocol.ts       WebSocket メッセージの型
@@ -264,11 +264,12 @@ cd frontend; npm run dev                          # 2 つ目
 | **実効 N 倍** | 実際に出ている倍速。要求の 9 割を下回ると**警告色**になる |
 
 **「実効 N 倍」は台数を増やすと必ず落ちます。** 倍速スライダーは 8 倍まで動きますが、
-64 台では計算が追いつかず 3.2 倍前後で頭打ちになります。黙って遅くなると気づけないので、
-要求値ではなく実測値を出しています。
+上限の 8 台では認識器の推論が効いて 1.6 倍前後で頭打ちになります
+（ground truth 観測だった頃は 64 台で 3.2 倍前後でした）。黙って遅くなると
+気づけないので、要求値ではなく実測値を出しています。
 
-車両は台数によらず InstancedMesh でまとめて描くので、**64 台にしてもドローコールはほとんど
-増えません**。増えるのは建物・道路・標示の側です。
+車両は台数によらず InstancedMesh でまとめて描くので、**台数を増やしてもドローコールは
+ほとんど増えません**。増えるのは建物・道路・標示の側です。
 
 ### 昼と夜
 
@@ -628,8 +629,11 @@ OSM の `highway=traffic_signals` から実際の交差点位置を取り、
 | **Keras（`.keras`）**| 同じネットワークを Keras 3 のモデルとして組み直したもの。Keras / TensorFlow 系のツールで扱う |
 
 いずれにも**観測ベクトルの構成と行動のスケール**がメタデータとして埋め込まれます。
-これが無いと、受け取った側は 56 次元の入力に何を入れればよいか分からず、
-ファイルは読めても実際には使えません。
+これが無いと、受け取った側は 57 次元の入力に何を入れればよいか分からず、
+ファイルは読めても実際には使えません。観測の正規化に使う `vehicle.maxSpeed` は
+**定数ではなく実行時に変えられるパラメータ**なので、書き出した時点の値を
+メタデータに入れてあります（`steerRate` / `maxLateralAccel` も、舵角を再現するには
+`maxSteer` だけでは足りないため同梱しています）。
 
 ### 書き出した TorchScript を使う
 
@@ -642,10 +646,10 @@ policy = torch.jit.load("autoware-sim_ginza_upd585_20260905-163218.torchscript.p
                         _extra_files=extra)
 meta = json.loads(extra["metadata.json"])
 
-print(meta["observation"]["layout"])   # 56 次元の内訳
+print(meta["observation"]["layout"])   # 57 次元の内訳
 print(meta["action"]["fields"])        # accel / steer の物理量への換算
 
-obs = torch.zeros(1, meta["model"]["obsDim"])   # (B, 56) float32
+obs = torch.zeros(1, meta["model"]["obsDim"])   # (B, 57) float32
 action, value = policy(obs)                     # action: (B, 2), value: (B,)
 
 accel_cmd, steer_cmd = action[0].tolist()
@@ -656,6 +660,8 @@ steer = steer_cmd * meta["vehicle"]["maxSteer"]         # [rad]
 
 `action` は方策分布の平均をクリップした決定論的な行動です。学習時と同じ探索を再現したい場合は、
 同梱の buffer `log_std` を使って `Normal(action, exp(log_std))` からサンプリングしてください。
+`log_std` は学習時と同じ可動域（`meta["policy"]["logStdRange"]` = -5.0〜0.0）へ
+丸めた値が入っており、メタデータの `policy.logStd` とも一致します。
 
 コマンドラインからでも取れます。
 
@@ -672,12 +678,14 @@ import json, zipfile
 import keras   # 環境変数 KERAS_BACKEND=torch で TensorFlow 無しでも動く
 
 model = keras.saving.load_model("autoware-sim_ginza_upd427_20260905-211557.keras")
-action, value = model.predict(obs)          # obs: (B, 56) float32
+action, value = model.predict(obs)          # obs: (B, 57) float32
+# ★ value の shape は Keras 版だけ (B, 1)（TorchScript 版は (B,)）。
+#   行動 action は両形式とも (B, 2) で、値も float32 の丸め誤差の範囲で一致する
 
 # メタデータは .keras（zip）の中に同梱してある
 with zipfile.ZipFile("autoware-sim_ginza_upd427_20260905-211557.keras") as z:
     meta = json.loads(z.read("autoware_sim_metadata.json"))
-print(meta["observation"]["layout"])        # 56 次元の内訳
+print(meta["observation"]["layout"])        # 57 次元の内訳
 print(meta["policy"]["logStd"])             # 探索ノイズを再現したいとき用
 ```
 
@@ -702,7 +710,7 @@ Keras 3 は PyTorch をバックエンドにできるので、このプロジェ
 - TorchScript 版と Keras 版は推論専用なので学習の再開には使えません
   （選ぶと「これは Keras 形式（.keras、推論専用）のファイルです」のように表示されます）。
 - 観測次元やネットワーク構成を変更した後のモデルは読み込めません。
-  その場合は「ファイル: 54 / このアプリ: 56」のように食い違いが表示されます。
+  その場合は「ファイル: 54 / このアプリ: 57」のように食い違いが表示されます。
 
 > **安全上の注意**: `torch.load` は通常 pickle を実行するため、出所の分からない `.pt` は
 > 任意コード実行の入口になり得ます。本アプリは受け取ったファイルを必ず
@@ -839,7 +847,7 @@ Overpass API の混雑が原因のことが多いです。`backend/data/osmnx_ca
 
 **以前書き出したモデルが読み込めない**
 観測ベクトルの次元が変わると、それ以前のモデルは読み込めません
-（「ファイル: 54 / このアプリ: 56」のように食い違いが表示されます）。これまでの変更:
+（「ファイル: 54 / このアプリ: 57」のように食い違いが表示されます）。これまでの変更:
 
 | 変更 | 観測次元 |
 |---|---|

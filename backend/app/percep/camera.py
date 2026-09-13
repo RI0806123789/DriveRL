@@ -862,7 +862,14 @@ class PseudoCamera:
         xc = np.broadcast_to(lat[..., None], zc.shape)
 
         flat_zc = zc.reshape(n, k, -1)
-        visible = (flat_zc.min(axis=2) > self._near) & (flat_zc.min(axis=2) < self._far)
+        # ★ 可視判定は「1 点でも近接平面より前なら描く」（code_review P-02）。
+        #   検出側の `groundtruth._detect_vehicles` が
+        #   `_box_from_points(require_all_in_front=False)` を使うので、そこへ揃える。
+        #   以前は 4 隅**すべて**が前方であることを要求していたため、近接平面
+        #   （0.5m）をまたぐ至近距離の他車が「学習には見えているのに画面には
+        #   描かれない」という食い違いを起こしていた。衝突直前がまさにそれ。
+        in_front = flat_zc > self._near
+        visible = in_front.any(axis=2) & (flat_zc.min(axis=2) < self._far)
         # 自車は写さない（カメラは自分の運転席にある）
         visible &= active[None, :] != slots[:, None]
         if not visible.any():
@@ -871,17 +878,26 @@ class PseudoCamera:
         safe = np.maximum(flat_zc, 1e-3)
         u = self._cx + self._focal * xc.reshape(n, k, -1) / safe
         v = self._cy - self._focal * yc.reshape(n, k, -1) / safe
-        u0 = u.min(axis=2)
-        u1 = u.max(axis=2)
-        v0 = v.min(axis=2)
-        v1 = v.max(axis=2)
-        depth = flat_zc.mean(axis=2)
+        # 近接平面より後ろの点は投影が破綻する（符号が反転して端まで飛ぶ）ので、
+        # 枠の端を決める計算からは外す。groundtruth 側も `u[front]` で同じことをする。
+        u0 = np.where(in_front, u, np.inf).min(axis=2)
+        u1 = np.where(in_front, u, -np.inf).max(axis=2)
+        v0 = np.where(in_front, v, np.inf).min(axis=2)
+        v1 = np.where(in_front, v, -np.inf).max(axis=2)
+        # 深度（描画順）も前方の点だけで平均する。背後の負値を混ぜると
+        # 至近距離の車が「遠く」に見えて描画順が入れ替わる。
+        front_count = in_front.sum(axis=2)
+        depth = np.where(in_front, flat_zc, 0.0).sum(axis=2) / np.maximum(front_count, 1)
 
         cam = np.broadcast_to(np.arange(n, dtype=np.int32)[:, None], visible.shape)[visible]
-        cxf = ((u0 + u1) * 0.5)[visible].astype(np.float32)
-        cyf = ((v0 + v1) * 0.5)[visible].astype(np.float32)
-        hw = ((u1 - u0) * 0.5)[visible].astype(np.float32)
-        hh = ((v1 - v0) * 0.5)[visible].astype(np.float32)
+        # ★ 先に `visible` で絞ってから足し引きする。見えていない組は u0=+inf /
+        #   u1=-inf のままなので、絞る前に足すと inf + (-inf) = NaN の警告が出る
+        u0v, u1v = u0[visible], u1[visible]
+        v0v, v1v = v0[visible], v1[visible]
+        cxf = ((u0v + u1v) * 0.5).astype(np.float32)
+        cyf = ((v0v + v1v) * 0.5).astype(np.float32)
+        hw = ((u1v - u0v) * 0.5).astype(np.float32)
+        hh = ((v1v - v0v) * 0.5).astype(np.float32)
         dep = depth[visible].astype(np.float32)
 
         # 車体（明色）＋上半分の窓の帯（暗色）。上下 2 色にしておくと、
@@ -1020,8 +1036,12 @@ class PseudoCamera:
         # 筐体の左右端（灯器は横型なので、横方向の見かけの幅は姿勢で変わる）
         half = _SIGNAL_HOUSING_W * 0.5
         u_l, _v_l, zc = self._project(hx + ax * half, hy + ay * half, z, ex, ey, ch, sh)
-        u_r, v_c, _zc = self._project(hx - ax * half, hy - ay * half, z, ex, ey, ch, sh)
-        visible = (zc > self._near) & (zc < self._far)
+        u_r, v_c, zc_r = self._project(hx - ax * half, hy - ay * half, z, ex, ey, ch, sh)
+        # ★ 左右**両端**が前方であることを要求する（code_review P-02）。
+        #   検出側の `groundtruth._detect_traffic_lights` は
+        #   `_box_from_points`（既定 `require_all_in_front=True`）なので、
+        #   片端だけで判定すると「描かれるのに検出されない」信号ができる。
+        visible = (zc > self._near) & (zc_r > self._near) & (zc < self._far)
         if not visible.any():
             return None
 
@@ -1135,10 +1155,11 @@ class PseudoCamera:
         u_l, v_c, zc = self._project(
             sx + ax * _SIGN_RADIUS, sy + ay * _SIGN_RADIUS, zc_center, ex, ey, ch, sh
         )
-        u_r, _v, _z = self._project(
+        u_r, _v, zc_r = self._project(
             sx - ax * _SIGN_RADIUS, sy - ay * _SIGN_RADIUS, zc_center, ex, ey, ch, sh
         )
-        visible = (zc > self._near) & (zc < self._far)
+        # ★ 信号と同じ理由で左右両端を要求する（code_review P-02）。
+        visible = (zc > self._near) & (zc_r > self._near) & (zc < self._far)
         if not visible.any():
             return None
         cam, sgn = cam[visible], sgn[visible]
