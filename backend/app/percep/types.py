@@ -19,6 +19,10 @@ from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import Any
 
+import numpy as np
+
+from app import config
+
 __all__ = [
     "CameraSpec",
     "CLASS_QUOTA",
@@ -26,10 +30,22 @@ __all__ = [
     "DEFAULT_CAMERA",
     "DetClass",
     "Detection",
+    "FACING_TOLERANCE",
     "LANE_LOOKAHEAD_M",
     "LANE_POLYLINE_POINTS",
     "PerceptionResult",
+    "SIGNAL_BEYOND_MARGIN",
+    "SIGNAL_HEAD_Z",
+    "SIGNAL_HOUSING_H",
+    "SIGNAL_HOUSING_W",
+    "SIGNAL_LAMP_PITCH",
+    "SIGNAL_LAMP_RADIUS",
+    "SIGNAL_MOUNT_HEIGHT",
     "SIGNAL_PHASE_NAMES",
+    "SIGN_BOARD_Z",
+    "SIGN_BOTTOM_HEIGHT",
+    "SIGN_RADIUS",
+    "facing_viewer",
     "pack_by_class_quota",
 ]
 
@@ -256,6 +272,107 @@ class PerceptionResult:
 
     def to_wire(self) -> list[dict[str, Any]]:
         return [d.to_wire() for d in self.detections]
+
+
+# ---------------------------------------------------------------------------
+# 信号機・標識の実寸（描く側・ラベルを付ける側・3D シーンで共通）
+# ---------------------------------------------------------------------------
+#
+# ★ **ここが唯一の出典。** `percep/camera.py`（描く）と `percep/groundtruth.py`
+#   （ラベルを付ける）が同じ値を別々に持っていて、片方だけ直す事故が起こりうる
+#   状態だった（code_review C-03）。標識に至っては camera が `config` 由来・
+#   groundtruth がハードコードで、**`config` を触ると黙ってずれる**形だった。
+#   ずれても型でもビルドでも捕まらず、「描いた板と正解の箱の大きさが違う」
+#   という形でしか症状が出ない。`LANE_LOOKAHEAD_M` を集約した Q-10 と同じ置き方。
+#
+# 値は `frontend/src/scene/signalGeometry.ts` / `signGeometry.ts` と一致させること。
+# **片方だけ変えると、画面の見た目と検出枠がずれる。**
+
+# --- 信号機（signalGeometry.ts）---
+#: 灯器下端の路面からの高さ [m]
+SIGNAL_MOUNT_HEIGHT = 5.0
+#: 灯器筐体の幅 [m]（横型 3 灯 + 縁）
+SIGNAL_HOUSING_W = 1.16
+#: 灯器筐体の高さ [m]
+SIGNAL_HOUSING_H = 0.44
+#: 灯火の間隔 [m]
+SIGNAL_LAMP_PITCH = 0.35
+#: 灯火の半径 [m]（灯火径 300mm）
+SIGNAL_LAMP_RADIUS = 0.15
+#: 筐体中心の高さ [m]
+SIGNAL_HEAD_Z = SIGNAL_MOUNT_HEIGHT + SIGNAL_HOUSING_H * 0.5
+#: 交差点中心から灯器までの余白 [m]（対面側へこれだけ進んだ位置に置く）
+SIGNAL_BEYOND_MARGIN = 2.0
+
+# --- 最高速度標識（signGeometry.ts / config.SPEED_SIGN_*）---
+#: 標示板の半径 [m]
+SIGN_RADIUS = config.SPEED_SIGN_DIAMETER * 0.5
+#: 標示板下端の高さ [m]
+SIGN_BOTTOM_HEIGHT = config.SPEED_SIGN_BOTTOM_HEIGHT
+#: 標示板中心の高さ [m]
+SIGN_BOARD_Z = SIGN_BOTTOM_HEIGHT + SIGN_RADIUS
+
+
+# ---------------------------------------------------------------------------
+# 正対判定（擬似カメラの描画と真値のラベルで共通）
+# ---------------------------------------------------------------------------
+
+#: 灯器・標示板が運転者に正対していると認める角度差 [rad]。
+#: これを超えると裏側や真横を見ていることになり、灯色も数字も読めない。
+#: **「箱は見えるが色は読めない」を検出扱いにしない**のは、
+#: `Detection.phase` が必ず埋まっている契約にするため。
+FACING_TOLERANCE = math.radians(75.0)
+
+
+def facing_viewer(
+    obj_x: Any,
+    obj_y: Any,
+    obj_heading: Any,
+    eye_x: Any,
+    eye_y: Any,
+    viewer_heading: Any,
+    tolerance: float = FACING_TOLERANCE,
+) -> np.ndarray:
+    """信号・標識が視点に正対しているかを返す（bool の ndarray）。
+
+    ★ **`percep/camera.py`（描く側）と `percep/groundtruth.py`（ラベルを付ける側）が
+      必ずこの 1 つを使うこと。** かつては前者が「位置の半空間」だけ、後者が
+      「方位差 ±75 度」だけを見ており、比べている量そのものが違っていた
+      （code_review C-01）。交差点には進入方向ごとに灯器が立つので、交差方向
+      （方位差 90 度）の灯器は**必ず描かれるのに必ずラベルが付かない**という
+      構造的な食い違いになっていた。銀座の実測で、描いた灯器の 57.4% に
+      ラベルが無く、逆に 2,700 件は画像に無いのに箱だけ付いていた。
+      画像に写っているものと教師データが食い違うと、認識器から見て
+      タスクが定義できていない状態になる（症状は「精度が上がらない」としか出ない）。
+
+    判定は 2 つの AND:
+
+    1. **方位** — 視点の進行方位が、その地物が向いている進入方位と `tolerance`
+       以内。「その信号・標識が自分に適用されるか」を決めるのはこちら。
+    2. **位置** — 視点が地物の前面側の半空間にある。通り過ぎた灯器を
+       残さないための条件で、方位だけでは落ちない。
+
+    角度差は `cos(a - b) >= cos(tolerance)` で見る（`|angle_diff| <= tolerance`
+    と同値。tolerance は 0〜pi）。atan2 を通さないぶん速い。
+
+    Args:
+        obj_x, obj_y: 地物の位置。`camera.py` の灯器中心と `groundtruth.py` の
+            `signal_head` は同じ式で置いてあるので、同じ点を渡すこと。
+        obj_heading: 地物が規制する進行方位 [rad]（`MapSignal.heading` 等）。
+            板や灯器の面はこの逆を向く。
+        eye_x, eye_y, viewer_heading: 視点の位置と進行方位。
+        tolerance: 正対と認める角度差 [rad]。
+
+    すべて numpy のブロードキャスト規則で組み合わせられる（スカラーでもよい）。
+    """
+    cos_o = np.cos(obj_heading)
+    sin_o = np.sin(obj_heading)
+    aligned = (
+        cos_o * np.cos(viewer_heading) + sin_o * np.sin(viewer_heading)
+        >= math.cos(float(tolerance))
+    )
+    ahead = (obj_x - eye_x) * cos_o + (obj_y - eye_y) * sin_o > 0.0
+    return np.asarray(aligned & ahead, dtype=bool)
 
 
 # ---------------------------------------------------------------------------

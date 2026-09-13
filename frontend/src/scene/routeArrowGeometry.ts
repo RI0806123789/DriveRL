@@ -45,6 +45,39 @@ export function directionsAlong(points: Point2[]): Point2[] {
 }
 
 /**
+ * リボンの頂点座標を既存の配列へ書き込む（`buildRibbon` の中身）。
+ *
+ * 点数が変わらないのにジオメトリごと作り直すのを避けるために切り出してある
+ * （`LaneDetectionOverlay` は 20Hz で点列だけが入れ替わる。code_review S-02）。
+ * 書き込むのは位置だけで、`out` の長さは `points.length * 6` 以上必要。
+ *
+ * ★ 帯は常に水平（y が一定）なので、点列が変わっても法線は ±Y のまま変わらない。
+ *   書き換え側で `computeVertexNormals()` を呼び直す必要はない。
+ */
+export function writeRibbonPositions(
+  out: Float32Array,
+  points: Point2[],
+  width: number = RIBBON_WIDTH,
+  y: number = RIBBON_Y,
+): void {
+  const dirs = directionsAlong(points)
+  const half = width / 2
+  for (let i = 0; i < points.length; i++) {
+    const [px, py] = points[i]
+    const [dx, dy] = dirs[i]
+    // 進行方向の左手
+    const nx = -dy * half
+    const ny = dx * half
+    out[i * 6 + 0] = px + nx
+    out[i * 6 + 1] = y
+    out[i * 6 + 2] = -(py + ny)
+    out[i * 6 + 3] = px - nx
+    out[i * 6 + 4] = y
+    out[i * 6 + 5] = -(py - ny)
+  }
+}
+
+/**
  * 経路を幅のあるリボンにする。
  *
  * 区間ごとに独立した四角形を置くとカーブの内外で隙間や食い違いが出るので、
@@ -56,23 +89,9 @@ export function buildRibbon(
   y: number = RIBBON_Y,
 ): THREE.BufferGeometry | null {
   if (points.length < 2) return null
-  const dirs = directionsAlong(points)
-  const half = width / 2
 
   const positions = new Float32Array(points.length * 2 * 3)
-  for (let i = 0; i < points.length; i++) {
-    const [px, py] = points[i]
-    const [dx, dy] = dirs[i]
-    // 進行方向の左手
-    const nx = -dy * half
-    const ny = dx * half
-    positions[i * 6 + 0] = px + nx
-    positions[i * 6 + 1] = y
-    positions[i * 6 + 2] = -(py + ny)
-    positions[i * 6 + 3] = px - nx
-    positions[i * 6 + 4] = y
-    positions[i * 6 + 5] = -(py - ny)
-  }
+  writeRibbonPositions(positions, points, width, y)
 
   const indices: number[] = []
   for (let i = 0; i < points.length - 1; i++) {

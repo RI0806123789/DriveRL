@@ -5,6 +5,7 @@
     - ノード座標の numpy 配列（最近傍ノード探索）
     - エッジ中心線の STRtree（道路へのスナップ）
     - 建物ポリゴンの STRtree（厳密な衝突判定）
+    - 信号・標識の点の STRtree（経路との突き合わせ）
     - 占有グリッド `OccupancyGrid`（建物レイヤのみ。レイキャスト用）
 
 いずれも「構築は 1 回だけ・参照は毎ステップ」という使われ方なので、
@@ -83,6 +84,21 @@ class MapIndexImpl:
             self._building_polys.append(poly)
         self._building_tree = (
             shapely.STRtree(self._building_polys) if self._building_polys else None
+        )
+
+        # --- 信号・標識の点 STRtree -------------------------------------
+        # 経路を張り直すたびに「全標識 × 全経路点」の密行列を作っていた
+        # （code_review M-01）。金沢は標識 15,719 基・経路 2,880 点あるので
+        # 1 回あたり数百 MB・1 秒近くかかり、その間エンジンスレッドが止まる。
+        # 経路の近くにあるものだけ木で引いてから距離を測る。
+        # 座標配列もここで 1 度だけ作る（呼ばれるたびに万単位の
+        # リスト内包表記を 3 本回すのも、それ自体が数十 ms かかっていた）。
+        self._signal_xy, self._signal_heading, self._signal_tree = _point_layer(
+            data.signals
+        )
+        self._sign_xy, self._sign_heading, self._sign_tree = _point_layer(data.signs)
+        self._sign_limit = np.array(
+            [sn.speed_limit for sn in data.signs], dtype=np.float64
         )
 
         # --- 占有グリッド -----------------------------------------------
@@ -305,34 +321,25 @@ class MapIndexImpl:
         そこで「経路への最短距離が近い」かつ「進入方向が経路の向きと揃っている」
         ものだけを採る。向きを見ないと、同じ交差点の別方向の信号を拾ってしまう。
         """
-        signals = self.data.signals
-        if not signals or len(points) < 2:
+        if self._signal_tree is None or len(points) < 2:
             return []
 
         pts = np.asarray(points, dtype=np.float64)
-        seg = np.diff(pts, axis=0)
-        seg_len = np.hypot(seg[:, 0], seg[:, 1])
-        cum = np.concatenate([[0.0], np.cumsum(seg_len)])
+        cum, tang = _arc_and_tangent(pts)
 
-        # 各点での進行方位（最後の点は直前の区間を使う）
-        tang = np.empty(pts.shape[0], dtype=np.float64)
-        tang[:-1] = np.arctan2(seg[:, 1], seg[:, 0])
-        tang[-1] = tang[-2] if pts.shape[0] >= 2 else 0.0
+        cand = self._near_route(self._signal_tree, pts, float(max_lateral))
+        if cand.size == 0:
+            return []
 
-        sx = np.array([sg.x for sg in signals], dtype=np.float64)
-        sy = np.array([sg.y for sg in signals], dtype=np.float64)
-        sh = np.array([sg.heading for sg in signals], dtype=np.float64)
-
-        # 各信号に最も近い経路上の点
-        d2 = (pts[None, :, 0] - sx[:, None]) ** 2 + (pts[None, :, 1] - sy[:, None]) ** 2
-        nearest = np.argmin(d2, axis=1)
-        dist = np.sqrt(d2[np.arange(len(signals)), nearest])
-
+        nearest, dist = _nearest_on_route(pts, self._signal_xy[cand])
+        sh = self._signal_heading[cand]
         route_h = tang[nearest]
         diff = np.abs(np.arctan2(np.sin(sh - route_h), np.cos(sh - route_h)))
 
         hits = (dist <= float(max_lateral)) & (diff <= float(max_heading_diff))
-        out = [(float(cum[nearest[i]]), int(i)) for i in np.flatnonzero(hits)]
+        out = [
+            (float(cum[nearest[i]]), int(cand[i])) for i in np.flatnonzero(hits)
+        ]
         out.sort(key=lambda item: item[0])
         return out
 
@@ -358,9 +365,7 @@ class MapIndexImpl:
             return []
 
         pts = np.asarray(points, dtype=np.float64)
-        seg = np.diff(pts, axis=0)
-        seg_len = np.hypot(seg[:, 0], seg[:, 1])
-        cum = np.concatenate([[0.0], np.cumsum(seg_len)])
+        cum, tang = _arc_and_tangent(pts)
 
         # 出発地点に適用されている速度。経路の途中からスポーンしても、
         # 最初の標識に出会うまで規制が分からない状態にはしない。
@@ -369,26 +374,16 @@ class MapIndexImpl:
         if start_limit is not None:
             breaks.append((0.0, float(start_limit)))
 
-        signs = self.data.signs
-        if signs:
-            tang = np.empty(pts.shape[0], dtype=np.float64)
-            tang[:-1] = np.arctan2(seg[:, 1], seg[:, 0])
-            tang[-1] = tang[-2]
-
-            sx = np.array([sn.x for sn in signs], dtype=np.float64)
-            sy = np.array([sn.y for sn in signs], dtype=np.float64)
-            sh = np.array([sn.heading for sn in signs], dtype=np.float64)
-
-            d2 = (pts[None, :, 0] - sx[:, None]) ** 2 + (pts[None, :, 1] - sy[:, None]) ** 2
-            nearest = np.argmin(d2, axis=1)
-            dist = np.sqrt(d2[np.arange(len(signs)), nearest])
-
+        cand = self._near_route(self._sign_tree, pts, float(max_lateral))
+        if cand.size:
+            nearest, dist = _nearest_on_route(pts, self._sign_xy[cand])
+            sh = self._sign_heading[cand]
             route_h = tang[nearest]
             diff = np.abs(np.arctan2(np.sin(sh - route_h), np.cos(sh - route_h)))
 
             hits = (dist <= float(max_lateral)) & (diff <= float(max_heading_diff))
             found = [
-                (float(cum[nearest[i]]), float(signs[i].speed_limit))
+                (float(cum[nearest[i]]), float(self._sign_limit[cand[i]]))
                 for i in np.flatnonzero(hits)
             ]
             found.sort(key=lambda item: item[0])
@@ -404,6 +399,34 @@ class MapIndexImpl:
                 continue
             out.append((arc, limit))
         return out
+
+    @staticmethod
+    def _near_route(
+        tree: "shapely.STRtree | None", pts: np.ndarray, max_lateral: float
+    ) -> np.ndarray:
+        """経路の周り `max_lateral` [m] にある点の添字を返す。
+
+        木が返すのは「経路の**線**までの距離」で判定した集合で、呼び出し側が
+        本当に欲しい「経路上の**サンプル点**までの距離」の集合を必ず含む
+        （線までの距離 ≦ 最寄りの点までの距離）。**絞り込みは超集合なので、
+        絞る前とまったく同じ結果になる。** 距離の判定はこのあとで厳密に行う。
+
+        ★ 返す添字は必ず昇順にする。呼び出し側は弧長で安定ソートするので、
+          同じ弧長に複数の地物が乗ったとき（重複した標識など。code_review M-02）
+          並びが添字順で決まる。木が返す順のまま使うと、絞り込みの有無だけで
+          結果の並びが変わってしまう。
+        """
+        if tree is None or pts.shape[0] < 2:
+            return np.zeros(0, dtype=np.int64)
+        try:
+            line = LineString(pts)
+            found = tree.query(line, predicate="dwithin", distance=float(max_lateral))
+        except Exception:
+            # GEOS が dwithin を持たない等。全件を候補にすれば結果は変わらない
+            # （遅くなるだけ）ので、ここで走行を止めない。
+            logger.exception("経路の近傍検索に失敗しました。全件を候補にします")
+            return np.arange(int(tree.geometries.size), dtype=np.int64)
+        return np.sort(np.asarray(found, dtype=np.int64).reshape(-1))
 
     def _edge_speed_limit_at(self, x: float, y: float) -> float | None:
         """指定座標に最も近い道路の規制速度 [m/s]。道路が引けなければ None。"""
@@ -592,6 +615,67 @@ def _sq_dist(a: Sequence[float], b: Sequence[float]) -> float:
     dx = float(a[0]) - float(b[0])
     dy = float(a[1]) - float(b[1])
     return dx * dx + dy * dy
+
+
+def _point_layer(items: Sequence) -> tuple[np.ndarray, np.ndarray, "shapely.STRtree | None"]:
+    """`x` / `y` / `heading` を持つ地物の列から、座標・方位・STRtree を作る。
+
+    信号と標識で同じ形なので 1 か所にまとめてある。空なら木は None。
+    """
+    n = len(items)
+    if n == 0:
+        return (
+            np.zeros((0, 2), dtype=np.float64),
+            np.zeros(0, dtype=np.float64),
+            None,
+        )
+    xy = np.array([[it.x, it.y] for it in items], dtype=np.float64)
+    heading = np.array([it.heading for it in items], dtype=np.float64)
+    return xy, heading, shapely.STRtree(shapely.points(xy))
+
+
+#: `_nearest_on_route()` が一度に確保してよい一時配列の大きさ [byte]。
+#: 経路点が多いマップでも、候補をこの単位に切って回すことで使用量を抑える。
+_NEAREST_CHUNK_BYTES = 8 << 20  # 8 MiB
+
+
+def _arc_and_tangent(pts: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """経路点列から「始点からの弧長」と「各点での進行方位」を返す。
+
+    最後の点の方位は直前の区間のものを使う（区間が 1 つ足りないため）。
+    """
+    seg = np.diff(pts, axis=0)
+    cum = np.concatenate([[0.0], np.cumsum(np.hypot(seg[:, 0], seg[:, 1]))])
+    tang = np.empty(pts.shape[0], dtype=np.float64)
+    tang[:-1] = np.arctan2(seg[:, 1], seg[:, 0])
+    tang[-1] = tang[-2]
+    return cum, tang
+
+
+def _nearest_on_route(pts: np.ndarray, xy: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """各地物 `xy` (K, 2) に最も近い経路点の添字と、その距離を返す。
+
+    (K, P) の float64 行列を一度に作ると、K も P も大きいときに数百 MB になる
+    （code_review M-01）。呼び出し側が STRtree で K を絞っているうえで、
+    さらに K を `_NEAREST_CHUNK_BYTES` 単位に切って上限を固定する。
+    """
+    k = int(xy.shape[0])
+    nearest = np.empty(k, dtype=np.int64)
+    dist = np.empty(k, dtype=np.float64)
+    if k == 0:
+        return nearest, dist
+
+    p = int(pts.shape[0])
+    chunk = max(1, _NEAREST_CHUNK_BYTES // (8 * max(p, 1)))
+    route_x = pts[None, :, 0]
+    route_y = pts[None, :, 1]
+    for lo in range(0, k, chunk):
+        hi = min(lo + chunk, k)
+        d2 = (route_x - xy[lo:hi, 0:1]) ** 2 + (route_y - xy[lo:hi, 1:2]) ** 2
+        idx = np.argmin(d2, axis=1)
+        nearest[lo:hi] = idx
+        dist[lo:hi] = np.sqrt(d2[np.arange(hi - lo), idx])
+    return nearest, dist
 
 
 def _resample_polyline(

@@ -50,7 +50,20 @@ import numpy as np
 
 from app import config
 from app.contracts import MapIndex
-from app.percep.types import DEFAULT_CAMERA, CameraSpec
+from app.percep.geometry import project_components
+from app.percep.types import (
+    DEFAULT_CAMERA,
+    SIGN_BOARD_Z,
+    SIGN_RADIUS,
+    SIGNAL_BEYOND_MARGIN,
+    SIGNAL_HEAD_Z,
+    SIGNAL_HOUSING_H,
+    SIGNAL_HOUSING_W,
+    SIGNAL_LAMP_PITCH,
+    SIGNAL_LAMP_RADIUS,
+    CameraSpec,
+    facing_viewer,
+)
 
 if TYPE_CHECKING:  # 実行時に import すると sim -> percep -> sim の循環になりうる
     from app.sim.world import World
@@ -131,21 +144,30 @@ _PHASE_LABEL = np.array([LBL_LAMP_GREEN, LBL_LAMP_YELLOW, LBL_LAMP_RED], dtype=n
 
 
 # ---------------------------------------------------------------------------
-# 実物の寸法（フロントエンドの定義と一致させること）
+# 実物の寸法
 # ---------------------------------------------------------------------------
 
-# `frontend/src/scene/signalGeometry.ts` より。灯器の向き・高さ・灯火の並びは
-# 日本の車両用信号機（横型 3 灯・運転者から見て左から青黄赤）に合わせてある。
-_SIGNAL_MOUNT_HEIGHT = 5.0
-_SIGNAL_HOUSING_W = 1.16
-_SIGNAL_HOUSING_H = 0.44
-_SIGNAL_LAMP_PITCH = 0.35
-_SIGNAL_LAMP_RADIUS = 0.15
-_SIGNAL_HEAD_Z = _SIGNAL_MOUNT_HEIGHT + _SIGNAL_HOUSING_H * 0.5
+# ★ 信号機・標識の実寸（`SIGNAL_*` / `SIGN_*`）は `percep/types.py` にある
+#   （code_review C-03）。ここと `groundtruth.py` が同じ値を別々に持っていて、
+#   片方だけ直すと「描いた物と正解の箱の大きさが違う」状態になる。
+#   灯器の向き・高さ・灯火の並びは日本の車両用信号機
+#   （横型 3 灯・運転者から見て左から青黄赤）に合わせてある。
 
-# `frontend/src/scene/signGeometry.ts` / `config.SPEED_SIGN_*` より
-_SIGN_RADIUS = config.SPEED_SIGN_DIAMETER * 0.5
-_SIGN_CENTER_Z = config.SPEED_SIGN_BOTTOM_HEIGHT + _SIGN_RADIUS
+#: 建物レイキャストの打ち切り距離 [m]（`CameraSpec.far` とは別）。
+#:
+#: ★ **`spec.far`（120m）より短いことに意味がある。** 建物だけは画面の列ごとに
+#:   1m 刻みでレイを飛ばすので、伸ばすとサンプル数が線形に増える（120m なら
+#:   96 列 × 120 点 × カメラ台数）。一方で 90m 先の壁は画面上 1〜2px にしかならず、
+#:   走行不能領域の手がかりとしての価値がほとんど無い。
+#:
+#: ★ **この値を変えると `groundtruth._line_of_sight()` との整合が崩れる**
+#:   （code_review C-05）。あちらは距離の上限を持たないので、ここで打ち切った
+#:   90〜120m の建物も遮蔽物として数える。つまり「画像では素通しに見える信号が、
+#:   遮蔽扱いでラベルから消える」ことが原理上ありうる。いまは実害が出ていない
+#:   （その距離の灯器は幅 1.38px で `MIN_BOX_PX = 1.5` に届かず、そもそも
+#:   ラベルが付かない）が、`CameraSpec` の解像度や画角を変えるとこの前提が崩れる。
+#:   **広げるなら `_line_of_sight()` にも同じ上限を入れること。**
+_BUILDING_RAY_MAX_M = 90.0
 
 #: 建物の高さ。占有グリッドは高さを持たないので既定値で描く。
 #: 銀座では 1,299 棟中 1,189 棟がこの既定値なので、実測との差は小さい。
@@ -235,7 +257,7 @@ def _ragged_range(starts: np.ndarray, counts: np.ndarray) -> np.ndarray:
 class _NeighborIndex:
     """点群を一様グリッドに入れて、半径内の候補を返す索引。
 
-    信号機・標識は広域プリセットでは数万個ある（金沢は標識 27,583 基）。
+    信号機・標識は広域プリセットでは万単位になる（金沢は標識 15,719 基）。
     カメラ 8 台ぶん全点に投影計算を掛けると、それだけで 1 ステップの予算を
     超えるので、視程 `radius` の範囲だけに絞る。
 
@@ -374,7 +396,7 @@ class PseudoCamera:
         self._col_a = (a / length).astype(np.float64)      # 進行方向右手の成分
         self._col_f = (self._cp / length).astype(np.float64)  # 進行方向の成分
         # レイの刻みと打ち切り。刻みは占有グリッドのセル（1m）に合わせる
-        ray_max = min(self._far, 90.0)
+        ray_max = min(self._far, _BUILDING_RAY_MAX_M)
         self._ray_samples = np.arange(1.0, ray_max + 1e-6, 1.0, dtype=np.float64)
 
     # ------------------------------------------------------------------
@@ -609,15 +631,15 @@ class PseudoCamera:
         sin_h = np.sin(heading)
         left_x = -sin_h
         left_y = cos_h
-        beyond = road_w * 0.5 + 2.0
+        beyond = road_w * 0.5 + SIGNAL_BEYOND_MARGIN
         self._sig_x = cx + cos_h * beyond + left_x * (road_w * 0.25)
         self._sig_y = cy + sin_h * beyond + left_y * (road_w * 0.25)
         # 灯器の並びは「運転者から見て左」= 進行方向左
         self._sig_ax = left_x
         self._sig_ay = left_y
-        # 灯器は進入車両に正対する = 面の法線は進行方向の逆
-        self._sig_nx = -cos_h
-        self._sig_ny = -sin_h
+        # 進入車両の進行方位。正対の判定（`percep.types.facing_viewer`）に使う。
+        # 灯器の面はこの逆（heading + pi）を向く。
+        self._sig_heading = heading
         self._sig_grid = _NeighborIndex(self._sig_x, self._sig_y, self._far)
 
     def _prepare_signs(self) -> None:
@@ -636,8 +658,9 @@ class PseudoCamera:
         sin_h = np.sin(heading)
         self._sign_ax = -sin_h   # 板の横方向（水平・法線に直交）
         self._sign_ay = cos_h
-        self._sign_nx = -cos_h   # 板は heading + pi を向く
-        self._sign_ny = -sin_h
+        # 板が規制する進行方位（板そのものは heading + pi を向く）。
+        # 正対の判定（`percep.types.facing_viewer`）に使う。
+        self._sign_heading = heading
 
         kph = np.rint(
             np.array([s.speed_limit for s in signs], dtype=np.float64) * 3.6
@@ -683,8 +706,8 @@ class PseudoCamera:
         for part in (
             self._collect_vehicles(world, slots, eye_x, eye_y, cos_h, sin_h),
             self._collect_obstacles(world, eye_x, eye_y, cos_h, sin_h),
-            self._collect_signals(world, eye_x, eye_y, cos_h, sin_h),
-            self._collect_signs(eye_x, eye_y, cos_h, sin_h),
+            self._collect_signals(world, eye_x, eye_y, cos_h, sin_h, heading),
+            self._collect_signs(eye_x, eye_y, cos_h, sin_h, heading),
         ):
             if part is not None:
                 specs.append(part)
@@ -815,18 +838,18 @@ class PseudoCamera:
         `px` などは呼び出し側でカメラ添字に合わせて展開済みであること。
         Zc <= near の点は呼び出し側で捨てる（**カメラの後ろの点を割ると
         座標が反転して、画面に存在しない物体が現れる**）。
+
+        ★ 中身は `percep/geometry.py` の 1 本だけ（code_review C-06）。
+          `groundtruth.py` が同じ式を別に持っていたのをまとめたもので、
+          ずれると「画像に写っていない場所に正解の箱が付く」形で壊れる。
         """
-        rel_x = px - eye_x
-        rel_y = py - eye_y
-        fwd = rel_x * cos_h + rel_y * sin_h
-        lat = rel_x * sin_h - rel_y * cos_h
-        rel_z = pz - self._eye_h
-        zc = self._cp * fwd + self._sp * rel_z
-        yc = -self._sp * fwd + self._cp * rel_z
-        safe = np.maximum(zc, 1e-3)
-        u = self._cx + self._focal * lat / safe
-        v = self._cy - self._focal * yc / safe
-        return u, v, zc
+        return project_components(
+            px, py, pz,
+            eye_x, eye_y, self._eye_h,
+            cos_h, sin_h,
+            self._cp, self._sp,
+            self._focal, self._cx, self._cy,
+        )
 
     def _collect_vehicles(
         self,
@@ -997,6 +1020,7 @@ class PseudoCamera:
         eye_y: np.ndarray,
         cos_h: np.ndarray,
         sin_h: np.ndarray,
+        heading: np.ndarray,
     ):
         """信号機を「灯器の筐体 + 3 灯」で描く。
 
@@ -1016,8 +1040,14 @@ class PseudoCamera:
         hy = self._sig_y[sig]
         ex = eye_x[cam]
         ey = eye_y[cam]
-        # 灯器の正面から見ているものだけ（背面は灯色が読めない）
-        facing = (ex - hx) * self._sig_nx[sig] + (ey - hy) * self._sig_ny[sig] > 0.0
+        # 自分に適用される灯器だけ（裏向き・交差方向・通り過ぎたものは除く）。
+        # ★ 判定は `percep.types.facing_viewer` に一本化してある。
+        #   ここが「位置の半空間」だけを見ていたころは、交差方向の灯器を
+        #   灯色まで塗っておきながら `groundtruth` 側がラベルを付けず、
+        #   認識器に矛盾した教師データを与えていた（code_review C-01）。
+        facing = facing_viewer(
+            hx, hy, self._sig_heading[sig], ex, ey, heading[cam]
+        )
         if not facing.any():
             return None
         cam = cam[facing]
@@ -1031,10 +1061,10 @@ class PseudoCamera:
         sh = sin_h[cam]
         ax = self._sig_ax[sig]
         ay = self._sig_ay[sig]
-        z = np.full(hx.shape, _SIGNAL_HEAD_Z)
+        z = np.full(hx.shape, SIGNAL_HEAD_Z)
 
         # 筐体の左右端（灯器は横型なので、横方向の見かけの幅は姿勢で変わる）
-        half = _SIGNAL_HOUSING_W * 0.5
+        half = SIGNAL_HOUSING_W * 0.5
         u_l, _v_l, zc = self._project(hx + ax * half, hy + ay * half, z, ex, ey, ch, sh)
         u_r, v_c, zc_r = self._project(hx - ax * half, hy - ay * half, z, ex, ey, ch, sh)
         # ★ 左右**両端**が前方であることを要求する（code_review P-02）。
@@ -1064,10 +1094,19 @@ class PseudoCamera:
         scale = (self._focal / np.maximum(zc, 1e-3)).astype(np.float64)
         body_cx = (u_l + u_r) * 0.5
         body_hw = np.abs(u_r - u_l) * 0.5
-        body_hh = _SIGNAL_HOUSING_H * 0.5 * scale
+        body_hh = SIGNAL_HOUSING_H * 0.5 * scale
 
+        # ★ 灯器数より短い `phases` が来ても落とさない（code_review C-04）。
+        #   `groundtruth.py` は `0 <= idx < len(phases)` を見て赤へ倒すのに、
+        #   ここは `phases.size` が 0 かどうかしか見ておらず、短いだけの配列では
+        #   IndexError で**描画ごと落ちていた**。防御の水準を揃える。
+        #   足りないぶんは赤（= 2）にする。安全側であり groundtruth の既定とも同じ。
         phases = np.asarray(world.signal_phases, dtype=np.int32)
-        phase = phases[sig] if phases.size else np.full(sig.shape, 2, dtype=np.int32)
+        if phases.size < self._sig_count:
+            phases = np.pad(
+                phases, (0, self._sig_count - phases.size), constant_values=2
+            )
+        phase = phases[sig]
 
         # 3 灯。運転者から見て左（= 進行方向左）から 青・黄・赤
         lamp_cam = []
@@ -1078,15 +1117,15 @@ class PseudoCamera:
         lamp_lbl = []
         lamp_dep = []
         for role in range(3):
-            offset = (1 - role) * _SIGNAL_LAMP_PITCH
+            offset = (1 - role) * SIGNAL_LAMP_PITCH
             u_k, v_k, _z = self._project(
                 hx + ax * offset, hy + ay * offset, z, ex, ey, ch, sh
             )
             lamp_cam.append(cam)
             lamp_cx.append(u_k)
             lamp_cy.append(v_k)
-            lamp_hw.append(_SIGNAL_LAMP_RADIUS * scale)
-            lamp_hh.append(_SIGNAL_LAMP_RADIUS * scale)
+            lamp_hw.append(SIGNAL_LAMP_RADIUS * scale)
+            lamp_hh.append(SIGNAL_LAMP_RADIUS * scale)
             lamp_lbl.append(
                 np.where(phase == role, _PHASE_LABEL[role], LBL_LAMP_OFF).astype(np.uint8)
             )
@@ -1117,6 +1156,7 @@ class PseudoCamera:
         eye_y: np.ndarray,
         cos_h: np.ndarray,
         sin_h: np.ndarray,
+        heading: np.ndarray,
     ):
         """最高速度標識を「支柱 + 赤縁の円 + 白地 + 7 セグの数字」で描く。
 
@@ -1135,7 +1175,10 @@ class PseudoCamera:
         sy = self._sign_y[sgn]
         ex = eye_x[cam]
         ey = eye_y[cam]
-        facing = (ex - sx) * self._sign_nx[sgn] + (ey - sy) * self._sign_ny[sgn] > 0.0
+        # 信号と同じ判定（code_review C-01）。裏向き・交差方向・通り過ぎた板は描かない
+        facing = facing_viewer(
+            sx, sy, self._sign_heading[sgn], ex, ey, heading[cam]
+        )
         if not facing.any():
             return None
         cam, sgn, sx, sy, ex, ey = (
@@ -1150,13 +1193,13 @@ class PseudoCamera:
         sh = sin_h[cam]
         ax = self._sign_ax[sgn]
         ay = self._sign_ay[sgn]
-        zc_center = np.full(sx.shape, _SIGN_CENTER_Z)
+        zc_center = np.full(sx.shape, SIGN_BOARD_Z)
 
         u_l, v_c, zc = self._project(
-            sx + ax * _SIGN_RADIUS, sy + ay * _SIGN_RADIUS, zc_center, ex, ey, ch, sh
+            sx + ax * SIGN_RADIUS, sy + ay * SIGN_RADIUS, zc_center, ex, ey, ch, sh
         )
         u_r, _v, zc_r = self._project(
-            sx - ax * _SIGN_RADIUS, sy - ay * _SIGN_RADIUS, zc_center, ex, ey, ch, sh
+            sx - ax * SIGN_RADIUS, sy - ay * SIGN_RADIUS, zc_center, ex, ey, ch, sh
         )
         # ★ 信号と同じ理由で左右両端を要求する（code_review P-02）。
         visible = (zc > self._near) & (zc_r > self._near) & (zc < self._far)
@@ -1177,7 +1220,7 @@ class PseudoCamera:
         scale = self._focal / np.maximum(zc.astype(np.float64), 1e-3)
         board_cx = (u_l + u_r) * 0.5
         board_hw = np.maximum(np.abs(u_r - u_l) * 0.5, 0.1)
-        board_hh = _SIGN_RADIUS * scale
+        board_hh = SIGN_RADIUS * scale
 
         # 支柱（路面から板の下端まで）
         _up, v_ground, _z2 = self._project(

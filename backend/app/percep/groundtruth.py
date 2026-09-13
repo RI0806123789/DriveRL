@@ -15,11 +15,12 @@
 
 投影の作法
 ----------
-`percep/camera.py` の `PseudoCamera` と**同じ透視投影**を使う。camera.py が
-未完成のあいだ実装が止まらないよう、投影のヘルパーはこのモジュールに自己完結で
-書いてある（後で共通化する前提）。両者がずれると、画像に写っていない場所に
-正解の箱が付く＝**学習不能な教師データ**になるので、共通化のときは
-`camera_pose()` / `project_points()` をそのまま移すこと。
+`percep/camera.py` の `PseudoCamera` と**同じ透視投影**を使う。両者がずれると、
+画像に写っていない場所に正解の箱が付く＝**学習不能な教師データ**になる。
+かつては「camera.py が未完成のあいだ実装が止まらないよう」ここに自己完結で
+書いてあったが、**いまは `percep/geometry.py` が唯一の実装**で、描く側も
+ラベルを付ける側もそこを呼ぶ（code_review C-06）。同じ理由で、正対の判定は
+`percep/types.py` の `facing_viewer()`、信号機・標識の実寸も `percep/types.py`。
 
 座標系（docs/protocol.md 1章）:
     ENU 平面・メートル・x=東 / y=北 / heading は +x 軸から反時計回り。
@@ -39,15 +40,23 @@ from typing import TYPE_CHECKING, Sequence
 import numpy as np
 
 from app import config
+from app.percep.geometry import CameraPose, camera_pose, project_points
 from app.percep.types import (
     CLASS_QUOTA,
     DEFAULT_CAMERA,
     LANE_LOOKAHEAD_M,
     LANE_POLYLINE_POINTS,
+    SIGN_BOARD_Z,
+    SIGN_RADIUS,
+    SIGNAL_BEYOND_MARGIN,
+    SIGNAL_HEAD_Z,
+    SIGNAL_HOUSING_H,
+    SIGNAL_HOUSING_W,
     CameraSpec,
     DetClass,
     Detection,
     PerceptionResult,
+    facing_viewer,
     pack_by_class_quota,
 )
 
@@ -55,41 +64,28 @@ if TYPE_CHECKING:  # 実行時に import しない（sim -> percep の循環を�
     from app.sim.world import World
 
 __all__ = [
-    "CameraPose",
-    "camera_pose",
     "clear_static_cache",
     "detect_ground_truth",
     "detect_ground_truth_batch",
     "freespace_ground_truth",
-    "project_points",
 ]
 
 
-# ---------------------------------------------------------------------------
-# 3D の寸法（frontend/src/scene/*.ts と一致させること）
-# ---------------------------------------------------------------------------
-
-# --- 信号機（signalGeometry.ts）---
-SIGNAL_HOUSING_W = 1.16          # 灯器筐体の幅 [m]（3 灯 + 縁）
-SIGNAL_HOUSING_H = 0.44          # 灯器筐体の高さ [m]
-SIGNAL_MOUNT_HEIGHT = 5.0        # 灯器下端の路面からの高さ [m]
-SIGNAL_HEAD_Z = SIGNAL_MOUNT_HEIGHT + SIGNAL_HOUSING_H * 0.5  # 筐体中心の高さ
-SIGNAL_BEYOND_MARGIN = 2.0       # 交差点中心から灯器までの余白 [m]
-
-# --- 最高速度標識（signGeometry.ts）---
-SIGN_RADIUS = 0.3                # 標示板の半径 [m]（直径 60cm）
-SIGN_BOTTOM_HEIGHT = 1.8         # 標示板下端の高さ [m]
-SIGN_BOARD_Z = SIGN_BOTTOM_HEIGHT + SIGN_RADIUS  # 標示板中心の高さ
+# ★ 信号機・標識の実寸（`SIGNAL_*` / `SIGN_*`）は `percep/types.py` にある
+#   （code_review C-03）。ここと `camera.py` が同じ値を別々に持っていたため、
+#   片方だけ直す事故が起こりうる状態だった。標識は camera が `config` 由来・
+#   ここがハードコードで、`config` を触ると黙ってずれる形になっていた。
+#   **値を変えるときは `percep/types.py` と `frontend/src/scene/*Geometry.ts` の両方。**
 
 # ---------------------------------------------------------------------------
 # 検出の可視条件
 # ---------------------------------------------------------------------------
 
-#: 灯器・標示板が運転者に正対していると認める角度差 [rad]。
-#: これを超えると裏側を見ていることになり、灯色も数字も読めない。
-#: **「箱は見えるが色は読めない」を検出扱いにしない**のは、
-#: `Detection.phase` が必ず埋まっている契約にするため。
-FACING_TOLERANCE = math.radians(75.0)
+# ★ 正対の判定（`FACING_TOLERANCE` と `facing_viewer()`）は `percep/types.py` にある
+#   （code_review C-01）。描く側（`camera.py`）とラベルを付ける側（ここ）が
+#   別々の式を持っていて、**同じ灯器が片方では描かれ片方では除外される**
+#   状態になっていたので、`LANE_LOOKAHEAD_M` と同じく共有の場所へ移した。
+#   **片方だけ変えないこと。** ここは `facing_viewer()` を呼ぶだけにしてある。
 
 #: これより小さい箱は検出扱いにしない [px]。
 #: 幅 192px・水平画角 68 度では焦点距離 142.3px なので、
@@ -129,77 +125,15 @@ VEHICLE_BLOCK_RADIUS = (config.VEHICLE_LENGTH + config.VEHICLE_WIDTH) * 0.25
 
 
 # ---------------------------------------------------------------------------
-# カメラ（camera.py が出来たら共通化する）
+# カメラ
 # ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class CameraPose:
-    """擬似カメラの外部パラメータ（1 台ぶん）。
-
-    `CameraSpec` が内部パラメータ（画角・解像度）で、こちらが姿勢。
-    """
-
-    eye_x: float
-    eye_y: float
-    eye_z: float
-    cos_yaw: float
-    sin_yaw: float
-    cos_pitch: float
-    sin_pitch: float
-
-
-def camera_pose(x: float, y: float, heading: float, spec: CameraSpec) -> CameraPose:
-    """車両の姿勢から運転席カメラの姿勢を作る。
-
-    **`frontend/src/scene/cameraMath.ts` の `driverEye()` と同じ式。**
-    日本車は右ハンドルなので進行方向の右へずらす（ENU では heading - 90 度）。
-    """
-    cos_h = math.cos(heading)
-    sin_h = math.sin(heading)
-    # 進行方向の右手 = (sin(h), -cos(h))
-    eye_x = x + cos_h * spec.forward + sin_h * spec.right
-    eye_y = y + sin_h * spec.forward - cos_h * spec.right
-    pitch = spec.pitch
-    return CameraPose(
-        eye_x=float(eye_x),
-        eye_y=float(eye_y),
-        eye_z=float(spec.eye_height),
-        cos_yaw=float(cos_h),
-        sin_yaw=float(sin_h),
-        cos_pitch=float(math.cos(pitch)),
-        sin_pitch=float(math.sin(pitch)),
-    )
-
-
-def project_points(
-    pose: CameraPose, spec: CameraSpec, points: np.ndarray
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """ワールド座標 (N, 3) をカメラ画像へ透視投影する。
-
-    Returns:
-        (u, v, depth)。u / v は**画素**（左上原点）、depth は光軸方向の距離 [m]。
-        depth <= 0 はカメラの背後なので、呼び出し側で必ず捨てること。
-    """
-    pts = np.asarray(points, dtype=np.float64).reshape(-1, 3)
-    dx = pts[:, 0] - pose.eye_x
-    dy = pts[:, 1] - pose.eye_y
-    dz = pts[:, 2] - pose.eye_z
-
-    # 自車座標系（前方 +x / 左 +y / 上 +z）へ
-    forward = dx * pose.cos_yaw + dy * pose.sin_yaw
-    left = -dx * pose.sin_yaw + dy * pose.cos_yaw
-
-    # 俯角（左軸まわりの回転）。pitch は下向きが負。
-    depth = forward * pose.cos_pitch + dz * pose.sin_pitch
-    up = -forward * pose.sin_pitch + dz * pose.cos_pitch
-
-    focal = spec.focal_px
-    safe = np.where(np.abs(depth) < 1e-6, np.float64(1e-6), depth)
-    # 画像 x は右が正なので、カメラ左方向 `left` は符号を反転して足す
-    u = spec.width * 0.5 - focal * (left / safe)
-    v = spec.height * 0.5 - focal * (up / safe)
-    return u, v, depth
+#
+# ★ 姿勢（`CameraPose` / `camera_pose()`）と透視投影（`project_points()`）は
+#   `percep/geometry.py` にある（code_review C-06）。このモジュールの冒頭が
+#   「後で共通化する前提」と書いていたとおりに 1 本へまとめたもので、
+#   `camera.py`（描く側）も同じ実装を呼ぶ。**片方だけ変えないこと。**
+#   ここでは import して使うだけで、`__all__` には載せない。
+#   同じものへの入口を 2 つ作るのは、まさに C-06 が言っている状態だから。
 
 
 def _box_from_points(
@@ -402,12 +336,6 @@ def _line_of_sight(map_index, eye: tuple[float, float], targets: np.ndarray) -> 
 # ---------------------------------------------------------------------------
 
 
-def _angle_diff(a: np.ndarray, b: float) -> np.ndarray:
-    """角度差を (-pi, pi] に畳んで返す。"""
-    d = np.asarray(a, dtype=np.float64) - float(b)
-    return np.arctan2(np.sin(d), np.cos(d))
-
-
 def _detect_signals(
     world: "World", slot: int, spec: CameraSpec, pose: CameraPose, scene: _StaticScene
 ) -> list[tuple[float, Detection]]:
@@ -422,8 +350,17 @@ def _detect_signals(
     dy = scene.signal_stop[:, 1] - eye[1]
     dist = np.hypot(dx, dy)
     heading = float(world.fleet.heading[slot])
-    # 正対しているものだけ（裏を向いた灯器は灯色が読めない）
-    facing = np.abs(_angle_diff(scene.signal_heading, heading)) <= FACING_TOLERANCE
+    # 正対しているものだけ（裏を向いた灯器・通り過ぎた灯器は灯色が読めない）。
+    # ★ 位置は灯器そのもの（`signal_head`）で見る。`camera.py` が描くのはこの点で、
+    #   距離に使う `signal_stop`（停止線）とは road_width/2 + 2m ずれている。
+    facing = facing_viewer(
+        scene.signal_head[:, 0],
+        scene.signal_head[:, 1],
+        scene.signal_heading,
+        eye[0],
+        eye[1],
+        heading,
+    )
     candidates = np.flatnonzero((dist <= spec.far) & facing)
     if candidates.size == 0:
         return out
@@ -482,7 +419,9 @@ def _detect_speed_signs(
     dy = board[:, 1] - eye[1]
     dist = np.hypot(dx, dy)
     heading = float(world.fleet.heading[slot])
-    facing = np.abs(_angle_diff(scene.sign_heading, heading)) <= FACING_TOLERANCE
+    facing = facing_viewer(
+        board[:, 0], board[:, 1], scene.sign_heading, eye[0], eye[1], heading
+    )
     candidates = np.flatnonzero((dist <= spec.far) & facing)
     if candidates.size == 0:
         return out
@@ -540,6 +479,21 @@ def _detect_vehicles(
     if near.size == 0:
         return out
 
+    # ★ 信号・標識と同じ遮蔽判定を通す（code_review C-02）。
+    #   描画はペインターズアルゴリズム（`camera.py` の深度降順ソート）なので、
+    #   建物の裏にいる車は手前の壁に確実に上書きされて**画像から完全に消える**。
+    #   通さないと「画像に写っていないものを検出しろ」と教えることになる。
+    #   教師データを集めるときは車を寄せ集めるので、ここが一番効く場面になる
+    #   （銀座・200 ステップ × 8 台の密集配置で車両ラベルの 7.1% が該当した）。
+    visible = _line_of_sight(
+        world.map_index,
+        eye,
+        np.column_stack((fleet.x[near], fleet.y[near])).astype(np.float64),
+    )
+    near = near[visible]
+    if near.size == 0:
+        return out
+
     corners_all = fleet.corners()  # (N, 4, 2)
     height = float(config.VEHICLE_HEIGHT)
     for other in near:
@@ -581,7 +535,14 @@ def _detect_obstacles(
     dy = xy[:, 1].astype(np.float64) - eye[1]
     dist = np.hypot(dx, dy)
     height = float(config.OBSTACLE_HEIGHT)
-    for i in np.flatnonzero(dist <= spec.far):
+
+    near = np.flatnonzero(dist <= spec.far)
+    if near.size == 0:
+        return out
+    # 車両と同じ理由で遮蔽を見る（code_review C-02）
+    near = near[_line_of_sight(world.map_index, eye, xy[near].astype(np.float64))]
+
+    for i in near:
         i = int(i)
         d = float(dist[i])
         if d < 1e-3:

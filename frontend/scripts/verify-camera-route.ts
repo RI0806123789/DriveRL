@@ -29,6 +29,7 @@ import {
   buildChevrons,
   buildRibbon,
   chevronsAlong,
+  writeRibbonPositions,
 } from '../src/scene/routeArrowGeometry.ts'
 import type { Point2 } from '../src/scene/routeArrowGeometry.ts'
 
@@ -194,6 +195,52 @@ console.log('='.repeat(70))
   }
 
   check('点が 1 個以下ならリボンを作らない', buildRibbon([[0, 0]]) === null)
+
+  // --- 頂点の書き換え（LaneDetectionOverlay が 20Hz で使う経路。S-02）---
+  // 点数が変わらない限りジオメトリを作り直さず頂点だけ書き換えるので、
+  // **その結果が buildRibbon と 1 ビットも違わない**ことを保証する。
+  // ここがずれると「認識車線だけ実際と違う場所に描かれる」という、
+  // 画面を見ても正常に見えてしまう形で壊れる。
+  const before: Point2[] = [
+    [0, 0],
+    [4, 0.5],
+    [8, 1.6],
+    [12, 3.4],
+    [16, 6.0],
+    [20, 9.3],
+  ]
+  const after: Point2[] = [
+    [0, 0],
+    [4, -0.4],
+    [8, -1.1],
+    [12, -2.2],
+    [16, -3.8],
+    [20, -5.9],
+  ]
+  const reused = buildRibbon(before, RIBBON_WIDTH)
+  const fresh = buildRibbon(after, RIBBON_WIDTH)
+  if (reused && fresh) {
+    const target = reused.getAttribute('position').array as Float32Array
+    writeRibbonPositions(target, after, RIBBON_WIDTH)
+    const expected = fresh.getAttribute('position').array as Float32Array
+    let maxDiff = 0
+    for (let i = 0; i < expected.length; i++) {
+      maxDiff = Math.max(maxDiff, Math.abs(target[i] - expected[i]))
+    }
+    check(
+      '書き換えた頂点が作り直したものと一致する',
+      target.length === expected.length && maxDiff === 0,
+      `最大差 ${maxDiff}`,
+    )
+    // 帯は水平なので、点列が変わっても法線は ±Y のまま（書き換え側で
+    // computeVertexNormals を呼び直さない根拠）
+    const nrm = fresh.getAttribute('normal').array as Float32Array
+    let flat = true
+    for (let i = 0; i < nrm.length; i += 3) {
+      if (Math.abs(nrm[i]) > 1e-6 || Math.abs(nrm[i + 2]) > 1e-6) flat = false
+    }
+    check('リボンの法線は常に ±Y（点列に依らない）', flat)
+  }
 }
 
 console.log('')

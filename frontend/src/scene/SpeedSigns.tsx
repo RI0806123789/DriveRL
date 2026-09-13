@@ -148,6 +148,14 @@ export function SpeedSigns() {
   const boardGeometry = useMemo(() => createSignBoardGeometry(), [])
   const faceGeometry = useMemo(() => createSignFaceGeometry(), [])
 
+  // ★ **配色はマテリアルを作り直す理由にしない**（code_review S-01）。
+  //   R3F は <instancedMesh args={[...]}> の要素を 1 つずつ比較し、違っていれば
+  //   InstancedMesh ごと作り直す（Ground.tsx の F-27 の注記と同じ挙動）。
+  //   作り直された直後は count={0} が再適用されるのに、行列を書く useEffect は
+  //   deps が変わらないので走らない。結果、**日の出・日の入りで配色が切り替わった
+  //   瞬間に支柱が消え、標示板だけが宙に浮いて残る**。配色は autoTheme が自動で
+  //   切り替えるので、利用者は何もしていないのに消える。
+  //   Vehicles.tsx と同じく「作り直さず色だけ差し替える」形にしてある。
   const poleMaterial = useMemo(
     () =>
       new THREE.MeshStandardMaterial({
@@ -155,10 +163,11 @@ export function SpeedSigns() {
         roughness: 0.68,
         metalness: 0.4,
       }),
-    [palette.signPole],
+    [], // ここで使う palette は初期色だけ。以降は下の useEffect が書き換える
   )
   // ★ 標示板の白地・赤縁・黒数字は昼夜で変えない。灯火と同じ理由で、
   //   現実の標識と違う色になっては意味を成さないため。
+  //   それでも deps は空にしておく（配色の値が将来変わっても支柱と同じ事故を起こさない）。
   const boardMaterial = useMemo(
     () =>
       new THREE.MeshStandardMaterial({
@@ -166,10 +175,17 @@ export function SpeedSigns() {
         roughness: 0.55,
         metalness: 0.05,
       }),
-    [palette.signBoard],
+    [], // 同上
   )
 
-  // テクスチャは規制速度ごとに 1 枚。配色は昼夜で変わらないので実際には作り直されない
+  useEffect(() => {
+    poleMaterial.color.set(palette.signPole)
+    boardMaterial.color.set(palette.signBoard)
+  }, [poleMaterial, boardMaterial, palette.signPole, palette.signBoard])
+
+  // テクスチャは規制速度ごとに 1 枚。配色（signBoard / signRing / signText）は
+  // 昼夜同値なので実際には作り直されない。作り直された場合も SignFaces 側の
+  // deps に material が入っているので行列は張り直される（S-01）
   const faceTextures = useMemo(
     () =>
       groups.map((g) =>
@@ -226,7 +242,10 @@ export function SpeedSigns() {
     }
   }, [faceTextures])
 
-  // 支柱と標示板の位置・向きは一度決めたら変わらない
+  // 支柱と標示板の位置・向きは一度決めたら変わらない。
+  // ★ deps には `args` に渡しているものを**すべて**入れる（code_review S-01）。
+  //   `args` の要素が 1 つでも変われば R3F は InstancedMesh を作り直し、
+  //   count は 0 に戻る。書き直す側がそれを見ていないと標識が消える。
   useEffect(() => {
     const poles = poleRef.current
     const boards = boardRef.current
@@ -256,7 +275,7 @@ export function SpeedSigns() {
     boards.instanceMatrix.needsUpdate = true
     poles.computeBoundingSphere()
     boards.computeBoundingSphere()
-  }, [placed])
+  }, [placed, poleGeometry, poleMaterial, boardGeometry, boardMaterial])
 
   if (placed.length === 0) return null
 
@@ -301,6 +320,8 @@ interface SignFacesProps {
 const SignFaces = memo(function SignFaces({ members, geometry, material }: SignFacesProps) {
   const meshRef = useRef<THREE.InstancedMesh>(null)
 
+  // deps は `args` に渡しているものと同じ（S-01）。テクスチャを作り直すと
+  // material の参照が変わり、InstancedMesh も作り直されるため。
   useEffect(() => {
     const mesh = meshRef.current
     if (!mesh || members.length === 0) return
@@ -316,7 +337,7 @@ const SignFaces = memo(function SignFaces({ members, geometry, material }: SignF
     mesh.count = members.length
     mesh.instanceMatrix.needsUpdate = true
     mesh.computeBoundingSphere()
-  }, [members])
+  }, [members, geometry, material])
 
   if (members.length === 0) return null
 
