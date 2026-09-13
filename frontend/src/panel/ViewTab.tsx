@@ -170,7 +170,7 @@ export function ViewTab() {
         <Switch label="グリッド" checked={view.grid} onChange={() => toggleView('grid')} />
         <Switch
           label="認識結果（バウンディングボックス）"
-          description="運転席・追従カメラでのみ表示。PPO が観測として受け取っている検出結果と同じものです"
+          description="運転席カメラでのみ表示。擬似カメラは運転席の位置・向きで描いているため、追従カメラ（車体後方15m）に重ねると対象物の位置が合いません。PPO が観測として受け取っている検出結果と同じものです"
           checked={view.detections}
           onChange={() => toggleView('detections')}
         />

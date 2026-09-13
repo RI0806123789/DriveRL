@@ -494,13 +494,15 @@ forward(obs: float32[B, 57]) -> (action: float32[B, 2], value: float32[B])
 丸めた値が入る。メタデータの `policy.logStd` も同じ値で、`policy.logStdRange` に
 可動域そのものが入っている。
 
-**`value` の shape は形式によって違う**（TorchScript は `[B]`、Keras は `[B, 1]`）。
-
 Keras 版の入出力：
 
 ```
-model(obs: float32[B, 57]) -> [action: float32[B, 2], value: float32[B, 1]]
+model(obs: float32[B, 57]) -> [action: float32[B, 2], value: float32[B]]
 ```
+
+`value` の Dense(1) 出力は素のままだと `[B, 1]` になるが、TorchScript 版
+（`squeeze(-1)`）と揃えるため `Reshape` で `[B]` に落としてある
+（code_review L-09。以前はここに shape の違いを明記するだけだった）。
 
 `keras.saving.load_model()` で読める。**標準の Dense 層だけで構成しているので
 `custom_objects` は不要**。行動のクリップは `hard_tanh` 活性で表しており、

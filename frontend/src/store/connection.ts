@@ -86,12 +86,13 @@ function openSocket(): void {
     return
   }
 
-  transport = {
+  const socketTransport: Transport = {
     send: (json) => {
       if (ws.readyState === WebSocket.OPEN) ws.send(json)
     },
     close: () => ws.close(),
   }
+  transport = socketTransport
 
   ws.onopen = () => {
     reconnectDelay = RECONNECT_MIN_MS
@@ -108,7 +109,14 @@ function openSocket(): void {
   }
 
   ws.onclose = () => {
-    if (transport && ws.readyState === WebSocket.CLOSED) transport = null
+    // このソケットがいま module 全体で「現在の」接続でなければ何もしない。
+    // WebSocket.close() は onclose を非同期に発火するため、
+    // stopConnection() → startConnection() が同じページ内で連続すると、
+    // 古いソケットの onclose が新しいソケットの確立後に届くことがある。
+    // 素通しにすると新しい接続の transport を null にし、
+    // 「繋がっているのに closed 表示」＋余計な再接続が起きる。
+    if (transport !== socketTransport) return
+    transport = null
     useSimStore.getState().setConnection('closed')
     scheduleReconnect()
   }
