@@ -26,8 +26,19 @@ import type {
 import { PROTOCOL_VERSION } from '../types/protocol'
 import { pushFrame, resetFrameBuffer } from './frameBuffer'
 
-/** メトリクス履歴のリングバッファ上限（要件: 300 点） */
-export const METRICS_CAPACITY = 300
+/**
+ * メトリクス履歴に**上限は設けない**。
+ *
+ * 以前は 300 点のリングバッファだったが、1Hz で届くので
+ * 直近 5 分しか残らず、「学習の始めからどう変わったか」が見えなかった。
+ * 学習の進捗は数十分単位でしか分からないので、取りこぼしていたのは
+ * 一番見たい情報だった。
+ *
+ * ★ その代わり、**配列の長さは際限なく伸びる**（1 時間で 3,600 点）。
+ *   それを前提にしていないコードを書かないこと。具体的には:
+ *   ・`Math.min(...metrics)` のような展開は使わない（約 65,000 要素で RangeError）
+ *   ・グラフは点の数だけパスを伸ばさない（MetricsChart が間引く）
+ */
 
 export type PanelTab = 'simulation' | 'map' | 'learning' | 'model' | 'view'
 /** 俯瞰（自由視点） / 追従（後方上空） / 運転席（一人称） */
@@ -305,9 +316,8 @@ export const useSimStore = create<SimStore>((set, get) => ({
 
       case 'metrics': {
         set((s) => {
-          const next = s.metrics.length >= METRICS_CAPACITY
-            ? s.metrics.slice(s.metrics.length - METRICS_CAPACITY + 1)
-            : s.metrics.slice()
+          // 間引かずに全部持つ。zustand のセレクタは参照で見るので新しい配列にする
+          const next = s.metrics.slice()
           next.push(msg)
           return { metrics: next, latestMetrics: msg }
         })

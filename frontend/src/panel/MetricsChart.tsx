@@ -2,11 +2,15 @@
  * 学習指標の折れ線グラフ。
  *
  * グラフ描画ライブラリを追加せず、SVG を自前で組み立てている
- * （依存を増やさない方針のため）。点数は最大 300（METRICS_CAPACITY）なので
- * パスを毎回作り直しても十分軽い。
+ * （依存を増やさない方針のため）。
+ *
+ * パスと目盛りの計算は metricsChartMath.ts（純粋モジュール）にある。
+ * ここには置かないこと——間引きの間違いは型チェックもビルドも通るので、
+ * 数値で検査できる場所に置いておく必要がある。
  */
 
 import { useId, useMemo } from 'react'
+import { buildChart, VIEW_W } from './metricsChartMath'
 
 export interface MetricsChartProps {
   title: string
@@ -19,8 +23,6 @@ export interface MetricsChartProps {
   showZero?: boolean
 }
 
-const VIEW_W = 300
-
 export function MetricsChart({
   title,
   values,
@@ -29,43 +31,10 @@ export function MetricsChart({
   height = 64,
   showZero = false,
 }: MetricsChartProps) {
-  const chart = useMemo(() => {
-    const pts = values.filter((v) => Number.isFinite(v))
-    if (pts.length < 2) return null
-
-    let min = Math.min(...pts)
-    let max = Math.max(...pts)
-    if (showZero) {
-      min = Math.min(min, 0)
-      max = Math.max(max, 0)
-    }
-    // 平坦な系列でも線が真ん中に出るように、幅ゼロを避ける
-    if (max - min < 1e-9) {
-      const pad = Math.max(1e-6, Math.abs(max) * 0.1)
-      min -= pad
-      max += pad
-    }
-
-    const span = max - min
-    const toY = (v: number) => height - ((v - min) / span) * height
-    const stepX = VIEW_W / (pts.length - 1)
-
-    let line = ''
-    for (let i = 0; i < pts.length; i++) {
-      line += `${i === 0 ? 'M' : 'L'}${(i * stepX).toFixed(2)},${toY(pts[i]).toFixed(2)}`
-    }
-    // 塗り用に下端まで閉じたパス
-    const area = `${line}L${VIEW_W},${height}L0,${height}Z`
-
-    return {
-      line,
-      area,
-      min,
-      max,
-      latest: pts[pts.length - 1],
-      zeroY: min <= 0 && max >= 0 ? toY(0) : null,
-    }
-  }, [values, height, showZero])
+  const chart = useMemo(
+    () => buildChart(values, { height, showZero }),
+    [values, height, showZero],
+  )
 
   // React 19 の useId は «r0» のように SVG の url(#...) では使えない文字を
   // 含むので、英数字とハイフンだけに正規化してから id にする
@@ -92,7 +61,7 @@ export function MetricsChart({
           viewBox={`0 0 ${VIEW_W} ${height}`}
           preserveAspectRatio="none"
           role="img"
-          aria-label={`${title} の推移`}
+          aria-label={`${title} の推移（${chart.count} 点、学習開始から）`}
         >
           <defs>
             <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
@@ -130,8 +99,9 @@ export function MetricsChart({
       )}
 
       {chart && (
-        <div className="m3-note m3-mono" style={{ display: 'flex', justifyContent: 'space-between' }}>
+        <div className="m3-chart-scale m3-note m3-mono">
           <span>最小 {format(chart.min)}</span>
+          <span>平均 {format(chart.mean)}</span>
           <span>最大 {format(chart.max)}</span>
         </div>
       )}
