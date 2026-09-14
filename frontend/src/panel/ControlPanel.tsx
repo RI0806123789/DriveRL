@@ -53,7 +53,6 @@ const CONNECTION_LABEL: Record<string, string> = {
 export function ControlPanel() {
   const tab = useSimStore((s) => s.tab)
   const setTab = useSimStore((s) => s.setTab)
-  const setPanelOpen = useSimStore((s) => s.setPanelOpen)
   const connection = useSimStore((s) => s.connection)
   const usingMock = useSimStore((s) => s.usingMock)
   const protocolMismatch = useSimStore((s) => s.protocolMismatch)
@@ -92,16 +91,32 @@ export function ControlPanel() {
     <div className="panel-wrap">
       <div className="panel">
         <header className="panel-header">
-          <span className="panel-title">操作パネル</span>
-          <span className="m3-conn" data-state={connection}>
-            {/* key で付け替えて、状態が変わった瞬間だけ入場アニメーションを流す。
-                外すと「接続済み」への復帰が文字の差し替えだけになって気づけない */}
-            <span key={usingMock ? 'mock' : connection} className="m3-conn-dot" />
-            {usingMock ? 'モック接続' : CONNECTION_LABEL[connection]}
-          </span>
-          <IconButton label="パネルを閉じる" onClick={() => setPanelOpen(false)}>
-            <CloseIcon size={20} />
-          </IconButton>
+          {/* 元はステージ左上に浮かせていた（.app-brand）。
+              3D を全画面で見るときに残っていても使い道が無いので、
+              パネルと一緒に出入りする位置（「操作パネル」の真上）へ移した */}
+          <div className="panel-brand">
+            <span className="panel-brand-mark" aria-hidden>
+              🚗
+            </span>
+            <span className="panel-brand-text">
+              <span className="panel-brand-title">DriveRL</span>
+              <span className="panel-brand-sub">マルチエージェント強化学習 自動運転</span>
+            </span>
+          </div>
+
+          {/* ★ ここにあった「×（パネルを閉じる）」は外してある。
+              そのため**畳む手段は M キーだけ**。ハンバーガーは畳んだ後にしか出ないので、
+              閉じるボタンを戻すかハンバーガーを常時表示にしない限り、
+              マウスだけではパネルを閉じられない */}
+          <div className="panel-header-row">
+            <span className="panel-title">操作パネル</span>
+            <span className="m3-conn" data-state={connection}>
+              {/* key で付け替えて、状態が変わった瞬間だけ入場アニメーションを流す。
+                  外すと「接続済み」への復帰が文字の差し替えだけになって気づけない */}
+              <span key={usingMock ? 'mock' : connection} className="m3-conn-dot" />
+              {usingMock ? 'モック接続' : CONNECTION_LABEL[connection]}
+            </span>
+          </div>
         </header>
 
         <div className="panel-tabs">

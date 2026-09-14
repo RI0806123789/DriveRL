@@ -71,8 +71,14 @@ p {
    アプリ全体レイアウト（memo 4章: 左 : 右 = 2 : 1）
    ========================================================================== */
 
+/* ★ ステージとパネルは左右に並べず、**ステージを全面に敷いてパネルを重ねる**。
+   パネル周囲の余白に 3D を透かせるためで、カードがシーンの上に浮いて見える。
+   並べたままキャンバスだけを広げると、**キャンバスと .detection-overlay の箱がずれる**。
+   DetectionOverlay は自分のコンテナの実寸から縦横比を測って検出枠を再投影するので
+   （three の fov は垂直画角）、箱が違うと**枠だけが黙ってごとごとずれる**。
+   inset: 0 同士で揃えておくこと。 */
 .app-root {
-  display: flex;
+  position: relative;
   height: 100%;
   width: 100%;
   background: var(--m3-surface-dim);
@@ -80,46 +86,42 @@ p {
 }
 
 .app-stage {
-  position: relative;
-  flex: 1 1 auto;
-  min-width: 0;
-  transition: none;
+  position: absolute;
+  inset: 0;
 }
 
 .app-panel-slot {
-  position: relative;
-  flex: 0 0 var(--m3-panel-ratio);
-  width: var(--m3-panel-ratio);
-  min-width: 340px;
-  max-width: 560px;
-  overflow: hidden;
-  /* ハンバーガーで畳むときのスプリング感のあるモーション */
-  transition:
-    flex-basis var(--m3-dur-long) var(--m3-ease-emphasized),
-    width var(--m3-dur-long) var(--m3-ease-emphasized),
-    min-width var(--m3-dur-long) var(--m3-ease-emphasized),
-    opacity var(--m3-dur-medium) var(--m3-ease-emphasized);
-}
-
-/* 隠したときは右パネルが完全に消え、左が画面幅一杯に広がる（memo 5章） */
-.app-panel-slot[data-collapsed='true'] {
-  flex-basis: 0;
-  width: 0;
-  min-width: 0;
-  opacity: 0;
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  /* ★ カード（.panel-wrap）と HUD を縦に積む列にする。
+     HUD の行数は画面幅とチップの枚数で変わるので、
+     「何行分空けておくか」を CSS で見積もると必ずいつか重なる。
+     flex で積めばカード側（flex: 1）が自動で縮む */
+  display: flex;
+  flex-direction: column;
+  /* 余白はこのスロットの内側（.panel-wrap の padding）にある。
+     トークン側で上乗せしてあるので、中身の幅は従来どおり 340〜560px */
+  width: var(--m3-panel-width);
+  z-index: 40;
+  /* ★ スロット自体はポインタを透かす。カードの周り 12px は 3D が見えているので、
+     ここで受け止めると**見た目はシーンなのにクリックも視点のドラッグも効かない帯**になる。
+     受け止めるのは .panel と未接続ベールだけ（下で auto に戻す） */
   pointer-events: none;
-}
-
-/* 幅が縮むのに合わせて中身も右へ逃がす（引き出しを押し込む動き）。
-   幅だけを詰めると、文字が右端で潰れながら消えていく見え方になる */
-.panel {
+  /* ★ 畳むのは transform だけで行う（旧: flex-basis / width を 400ms かけて縮めていた）。
+     レイアウトを動かさないので、アニメーション中に
+     **WebGL のドローイングバッファが毎フレーム取り直される**ことが無くなる */
   transition:
     transform var(--m3-dur-long) var(--m3-ease-emphasized),
     opacity var(--m3-dur-medium) var(--m3-ease-emphasized);
 }
-.app-panel-slot[data-collapsed='true'] .panel {
-  transform: translateX(32px);
+
+/* 隠したときは右パネルが完全に消え、画面が 3D だけになる（memo 5章） */
+.app-panel-slot[data-collapsed='true'] {
+  transform: translateX(100%);
   opacity: 0;
+  pointer-events: none;
 }
 
 /* ハンバーガーボタン（ステージ右上に浮かせる）。
@@ -143,44 +145,46 @@ p {
   transition-delay: 0s;
 }
 
-.app-brand {
-  position: absolute;
-  top: 16px;
-  left: 16px;
-  z-index: 30;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 16px 8px 12px;
-  border-radius: var(--m3-shape-full);
-  background: color-mix(in srgb, var(--m3-surface-container) 78%, transparent);
-  backdrop-filter: blur(12px);
-  border: 1px solid var(--m3-outline-variant);
-  user-select: none;
-}
+/* ブランド名（DriveRL）はステージ左上ではなく操作パネルのヘッダにある。
+   スタイルは .panel-brand（「右パネル」節）。 */
 
-.app-brand-title {
-  font-size: 14px;
-  font-weight: 600;
-  letter-spacing: 0.2px;
-}
+/* ステージ下部の情報バー（HUD）。
+   操作パネルを閉じている間は出さない（SimulatorView が data-visible を付ける）。
 
-.app-brand-sub {
-  font-size: 11px;
-  color: var(--m3-on-surface-variant);
-}
+   ★ これは 3D の上のオーバーレイではなく、**パネル列の一番下に積む flex アイテム**。
+   左右の margin をカードの外余白と同じ --m3-panel-gutter にしてあるので、
+   **幅はカードと完全に一致する**（カード幅をどこにも直書きしていない）。
 
-/* ステージ下部の情報バー（HUD） */
+   ★ 標準の 7 枚が 1 行に収まるよう、逆に**パネルの幅の下限を HUD から決めている**
+   （tokens.css の --m3-hud-oneline。そこに実測値と測り方を書いてある）。
+   それでも flex-wrap: wrap は外さないこと。カメラの警告や「描画停止中」は
+   常時出ているわけではない追加のチップなので、その分まで幅を取ると
+   パネルが画面の大半を占める。nowrap にすると、そのとき**カードから横にはみ出す**。
+   行が増えた分は .panel-wrap（flex: 1）が縮んで吸収するので、重なりようがない。 */
 .app-hud {
-  position: absolute;
-  left: 16px;
-  bottom: 16px;
-  z-index: 20;
+  flex: 0 0 auto;
+  margin: 0 var(--m3-panel-gutter) var(--m3-panel-gutter);
   display: flex;
   gap: 8px;
   align-items: center;
+  justify-content: flex-end;
   flex-wrap: wrap;
-  max-width: calc(100% - 32px);
+  /* スロットはポインタを透かしているので、ここだけ戻す
+     （チップの title ツールチップが出なくなるため） */
+  pointer-events: auto;
+  /* ★ 隠れている間は visibility で描画ごと落とすこと（ベールと同じ理由）。
+     opacity: 0 のまま置くと、チップの枚数だけ backdrop-filter の合成レイヤが
+     3D キャンバスの手前に常駐し、全画面で見ている間ずっと描画コストを払う。
+     逆に visibility の持続を短くしすぎると、チップが消え切る前に途中で消える */
+  visibility: visible;
+  transition:
+    opacity var(--m3-dur-medium) var(--m3-ease-emphasized),
+    visibility var(--m3-dur-long);
+}
+.app-hud[data-visible='false'] {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
 }
 
 .app-hud-item {
@@ -195,6 +199,52 @@ p {
   font-size: 11px;
   color: var(--m3-on-surface-variant);
   white-space: nowrap;
+  /* ★ 縮めない。flex の既定（flex-shrink: 1）のままだと、幅が足りないときに
+     折り返さずにチップ側が縮み、white-space: nowrap の文字が丸ごとはみ出す */
+  flex: 0 0 auto;
+  /* ★ パネルと**同じ向き・同じカーブ・同じ長さ**で右から入れる。
+     .app-panel-slot が transform(--m3-dur-long/--m3-ease-emphasized) +
+     opacity(--m3-dur-medium/同じ) なので、それに揃えてある。
+     ここだけ別のカーブ（バネ系）を使うと、同じ方向へ同時に動くのに
+     速度が合わず、パネルとチップが別々のものに見える */
+  transition:
+    transform var(--m3-dur-long) var(--m3-ease-emphasized),
+    opacity var(--m3-dur-medium) var(--m3-ease-emphasized);
+}
+/* ★ 遅延は nth-last-child で付ける（nth-child ではなく）。
+   パネル側、つまり**一番右のチップから順に出す**と
+   「パネルの下から滑り出てきた」見え方になる。
+   末尾の 2 行（カメラの警告・描画停止中）は出たり出なかったりするので、
+   先頭から数えると枚数が変わるたびに順番が入れ替わる。 */
+.app-hud[data-visible='true'] .app-hud-item {
+  transition-delay: 228ms;
+}
+.app-hud[data-visible='true'] .app-hud-item:nth-last-child(6) {
+  transition-delay: 200ms;
+}
+.app-hud[data-visible='true'] .app-hud-item:nth-last-child(5) {
+  transition-delay: 172ms;
+}
+.app-hud[data-visible='true'] .app-hud-item:nth-last-child(4) {
+  transition-delay: 144ms;
+}
+.app-hud[data-visible='true'] .app-hud-item:nth-last-child(3) {
+  transition-delay: 116ms;
+}
+.app-hud[data-visible='true'] .app-hud-item:nth-last-child(2) {
+  transition-delay: 88ms;
+}
+/* パネルの縁が動き始めてから出したいので、先頭でも 60ms 待つ */
+.app-hud[data-visible='true'] .app-hud-item:last-child {
+  transition-delay: 60ms;
+}
+/* 出ていくときは揃えて一気に、パネルと同じ右へ退く。
+   逆順に消すと、パネルが畳まり終わったあとも左端のチップだけが
+   居残って、消し忘れに見える */
+.app-hud[data-visible='false'] .app-hud-item {
+  transform: translateX(32px);
+  opacity: 0;
+  transition-delay: 0s;
 }
 
 .app-hud-value {
@@ -341,22 +391,129 @@ p {
   width: 100%;
   min-width: 340px;
   background: var(--m3-surface-container-low);
-  border-left: 1px solid var(--m3-outline-variant);
+  /* 画面の端に直接張り付けず、余白に浮いたカードとして見せる。
+     半径は中のカード（.m3-card = --m3-shape-lg）より外側を大きくする。
+     逆転させると入れ子の角が反り返って見える（シェイプの入れ子の原則）。
+     ★ overflow: hidden は必須。無いとスクロールした中身とスクロールバーが
+     下の角の丸みを踏み越して四角に見える。
+     ドロップダウンはネイティブの <select>（ui/Select.tsx）なのでこれでは切られない */
+  border: 1px solid var(--m3-outline-variant);
+  border-radius: var(--m3-shape-xl);
+  overflow: hidden;
 }
 
 .panel-header {
   display: flex;
-  align-items: center;
-  gap: 12px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
   padding: 14px 16px 10px;
   flex: 0 0 auto;
 }
 
+/* ---------- ヘッダのブランド名 ----------
+   ステージ左上からここへ移したもの。
+   直下の「操作パネル」と同じ大きさ・同じ太さにすると
+   見出しが 2 本並んでどちらが上位か読めなくなるので、
+   製品名を一回り大きく、「操作パネル」をセクションラベル側へ落としてある。 */
+.panel-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  user-select: none;
+}
+
+.panel-brand-mark {
+  font-size: 20px;
+  line-height: 1;
+  flex: 0 0 auto;
+}
+
+.panel-brand-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.panel-brand-title {
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  line-height: 1.25;
+}
+
+.panel-brand-sub {
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--m3-on-surface-variant);
+  /* パネルは最小 340px まで縮む。折り返させるとヘッダの高さが変わり、
+     タブと本文が下へ押されるので、横に詰めて、入り切らなければ三点リーダーで落とす */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.panel-header-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
 .panel-title {
-  font-size: 15px;
+  font-size: 12.5px;
   font-weight: 600;
+  letter-spacing: 0.5px;
+  color: var(--m3-on-surface-variant);
   flex: 1 1 auto;
   min-width: 0;
+}
+
+/* ---------- ヘッダが届くまでの順番 ----------
+   パネル本体（.panel）が右から入ってくるのに合わせて、中身を少し遅らせて着地させる。
+   全部同時に動かすと 1 枚の板がスライドするだけに見えて、「開いた」実感が残らない。
+   ★ 動かすのは transform と opacity だけ（tokens.css の約束）。 */
+.panel-brand-mark,
+.panel-brand-title,
+.panel-brand-sub,
+.panel-title {
+  transition:
+    transform var(--m3-dur-xlong) var(--m3-ease-spring-soft),
+    opacity var(--m3-dur-medium) var(--m3-ease-emphasized-decel);
+}
+.panel-brand-mark {
+  transition-delay: 110ms;
+}
+.panel-brand-title {
+  transition-delay: 150ms;
+}
+.panel-brand-sub {
+  transition-delay: 180ms;
+}
+.panel-title {
+  transition-delay: 210ms;
+}
+
+/* 畳んでいる間の姿勢。車の絵文字だけ左から入れて、残りは上から降りてくる。
+   閉じるときは遅延を消して一気に引く（入りは順番、出は揃える） */
+.app-panel-slot[data-collapsed='true'] .panel-brand-mark,
+.app-panel-slot[data-collapsed='true'] .panel-brand-title,
+.app-panel-slot[data-collapsed='true'] .panel-brand-sub,
+.app-panel-slot[data-collapsed='true'] .panel-title {
+  opacity: 0;
+  transition-delay: 0s;
+}
+.app-panel-slot[data-collapsed='true'] .panel-brand-mark {
+  transform: translateX(-16px) rotate(-10deg);
+}
+.app-panel-slot[data-collapsed='true'] .panel-brand-title {
+  transform: translateY(-10px);
+}
+.app-panel-slot[data-collapsed='true'] .panel-brand-sub {
+  transform: translateY(-8px);
+}
+.app-panel-slot[data-collapsed='true'] .panel-title {
+  transform: translateY(-6px);
 }
 
 .panel-tabs {
@@ -426,7 +583,10 @@ p {
    表示・非表示ではなく不透明度で出し入れする */
 .panel-disabled-veil {
   position: absolute;
-  inset: 0;
+  /* .panel の外側ではなく真上に重ねる。inset: 0 のままだと
+     余白まで覚って、角丸のカードの上に四角のベールが乗る */
+  inset: var(--m3-panel-gutter);
+  border-radius: var(--m3-shape-xl);
   z-index: 5;
   display: flex;
   flex-direction: column;
@@ -489,8 +649,20 @@ p {
 
 .panel-wrap {
   position: relative;
-  height: 100%;
+  /* 残り全部を取る（下に積む HUD の高さを引いた分）。
+     min-height: 0 が無いと flex アイテムの最小高さが中身で決まり、
+     カードが縮まずに HUD を画面外へ押し出す */
+  flex: 1 1 auto;
+  min-height: 0;
   width: 100%;
+  /* パネル外周の余白。ここには 3D が透けて見えている。
+     ポインタを透かすのは .app-panel-slot 側でやっている */
+  padding: var(--m3-panel-gutter);
+}
+
+.panel,
+.panel-disabled-veil[data-visible='true'] {
+  pointer-events: auto;
 }
 
 /* ==========================================================================
@@ -1518,6 +1690,23 @@ button.m3-chip:active:not(:disabled) {
   height: auto;
   overflow: visible;
 }
+/* グラフの下の目盛り（最小 / 平均 / 最大）。
+   ★ space-between ではなく 1fr auto 1fr のグリッドにすること。
+   space-between だと真ん中の位置が左右の文字数で変わり、
+   値が更新されるたびに「平均」が左右に滑って読みにくい */
+.m3-chart-scale {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: baseline;
+  gap: 8px;
+}
+.m3-chart-scale > :first-child {
+  justify-self: start;
+}
+.m3-chart-scale > :last-child {
+  justify-self: end;
+}
+
 .m3-chart-empty {
   font-size: 11px;
   color: var(--m3-on-surface-variant);
@@ -1960,5 +2149,16 @@ button.m3-chip:active:not(:disabled) {
   .m3-conn[data-state='connecting'] .m3-conn-dot {
     animation: m3-pulse 1.6s var(--m3-ease-standard) infinite !important;
     transform: none !important;
+  }
+
+  /* ★ 上の一括指定が消すのは duration だけで、delay は残る。
+     HUD のチップとヘッダは順番に遅らせているので、ここを書かないと
+     「瞬間的に現れるものが 230ms かけてパラパラ現れる」という一番雑な見え方になる */
+  .app-hud-item,
+  .panel-brand-mark,
+  .panel-brand-title,
+  .panel-brand-sub,
+  .panel-title {
+    transition-delay: 0s !important;
   }
 }
