@@ -1,8 +1,4 @@
-/**
- * セクションのまとまり。
- * M3 のトーナル・エレベーション（影ではなく surface の明度差で階層を作る）に従い、
- * variant で surface-container の階調を切り替える。
- */
+/** セクションのまとまり。 */
 
 import type { ReactNode } from 'react'
 

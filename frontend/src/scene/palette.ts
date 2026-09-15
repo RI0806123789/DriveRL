@@ -1,25 +1,8 @@
-/**
- * 3D シーンの色。**3D 側の色はここだけに書く。**
- *
- * もともと空・フォグ・地面の色は各コンポーネントに直接書かれていて、
- * `styles/tokens.css` の `--m3-scene-*` とも食い違っていた
- * （トークンは `#0d1218` なのに実際の空は `#0e1216`）。
- * CSS 変数は 3D からは読まれないので、片方を直しても永久に気づけない。
- * そこで色は TypeScript 側の 1 か所に寄せ、CSS からは `--m3-scene-*` を削除した。
- *
- * **昼と夜の 2 組を持つ。** どちらを使うかは `store/simStore` の `theme` が決め、
- * それは `sunTimes.ts` が計算する日の出・日の入りに連動する（利用者の設定項目は無い）。
- * パネル UI 側は `styles/tokens.css` の `:root[data-theme]` が担当していて、
- * **同じ `theme` を見ている**が、色の実体は別々に持っている
- * （CSS 変数は three から読めないため）。
- *
- * three / React に依存させないでおくと Node からも読める。
- */
+/** 3D シーンの色。**3D 側の色はここだけに書く。** */
 
 export type ThemeName = 'dark' | 'light'
 
 export interface ScenePalette {
-  // --- 空と地面 ---
   /** 背景色。フォグも同じ色にして遠景を溶かす */
   readonly sky: string
   /** フォグの開始・終了距離 [m] */
@@ -31,7 +14,6 @@ export interface ScenePalette {
   readonly gridMajor: string
   readonly gridMinor: string
 
-  // --- 光 ---
   /** 半球光の空側・地面側と強さ */
   readonly hemiSky: string
   readonly hemiGround: string
@@ -42,30 +24,22 @@ export interface ScenePalette {
   readonly sun: string
   readonly sunIntensity: number
 
-  // --- 建物 ---
   /** 低層 → 高層のグラデーション */
   readonly buildingLow: string
   readonly buildingHigh: string
 
-  // --- 道路 ---
   /** 舗装面。昼でもアスファルトは暗い */
   readonly roadSurface: string
-  /** 車道中央線（黄色）*/
+  /** 車道中央線（黄色） */
   readonly roadCenterline: string
-  /** 白い道路標示（車線境界線・停止線・横断歩道）*/
+  /** 白い道路標示（車線境界線・停止線・横断歩道） */
   readonly marking: string
 
-  // --- 信号機 ---
   /** 灯器の筐体と支柱 */
   readonly signalHousing: string
   /** 消灯している灯火 */
   readonly signalLampOff: string
 
-  // --- 最高速度標識 ---
-  // ★ 標示板の 3 色（白地・赤縁・黒数字）は昼夜で変えない。
-  //   信号の灯火と同じで、現実の標識がそうであるように、
-  //   環境によって色が変わっては規制の意味を成さない。
-  //   そのため DARK_SCENE / LIGHT_SCENE の両方で同じ値を入れてある。
   /** 標示板の白地 */
   readonly signBoard: string
   /** 標示板の赤縁 */
@@ -75,10 +49,9 @@ export interface ScenePalette {
   /** 支柱。こちらは背景に馴染ませたいので昼夜で変える */
   readonly signPole: string
 
-  // --- 車両 ---
   /** タイヤ */
   readonly vehicleWheel: string
-  /** ガラス（キャビン）*/
+  /** ガラス（キャビン） */
   readonly vehicleGlass: string
   /** 衝突中に寄せる色 */
   readonly vehicleCollided: string
@@ -87,16 +60,10 @@ export interface ScenePalette {
   /** 追従対象の足元リング */
   readonly vehicleHighlight: string
 
-  // --- 障害物（パイロン）---
   readonly obstacleCone: string
   readonly obstacleBase: string
 
-  // --- 認識オーバーレイ ---
-  /**
-   * CNN が認識した車線（LaneDetectionOverlay）の帯・中心線の色。
-   * ★ 実際の白線標示（marking）の上に重ねるので、昼夜どちらでも白系統とは
-   *   はっきり見分けが付く色にすること。
-   */
+  /** CNN が認識した車線（LaneDetectionOverlay）の帯・中心線の色。 */
   readonly laneOverlay: string
 }
 
@@ -126,7 +93,6 @@ export const DARK_SCENE: ScenePalette = {
   signalHousing: '#4a5560',
   signalLampOff: '#14181c',
 
-  // 標示板の 3 色は LIGHT_SCENE と同じ値（現実の標識と同じ色を昼夜で保つ）
   signBoard: '#f2f4f5',
   signRing: '#d0121b',
   signText: '#16191c',
@@ -141,19 +107,10 @@ export const DARK_SCENE: ScenePalette = {
   obstacleCone: '#ff7a3d',
   obstacleBase: '#20262c',
 
-  // 白線(marking #e8ebee)・路面(#3a4149)のどちらとも被らない鮮やかなマゼンタ
   laneOverlay: '#ff4fd1',
 }
 
-/**
- * 昼。
- *
- * 単純に反転させると読めなくなるものがあるので、実物に寄せてある。
- * - **アスファルトは昼でも暗い。** 明るくすると道路と歩道の区別が付かなくなる
- * - **白線は白のまま。** 夜は少し落としてあるが、昼は塗料どおりの白でよい
- * - **建物は高いほど明るい。** 遠景の霞（空気遠近法）と向きが揃う
- * - フォグは夜より遠くまで効かせる。晴れた昼のほうが見通しが利くため
- */
+/** 昼。 */
 export const LIGHT_SCENE: ScenePalette = {
   sky: '#a9c4dd',
   fogNear: 700,
@@ -162,11 +119,6 @@ export const LIGHT_SCENE: ScenePalette = {
   gridMajor: '#767f86',
   gridMinor: '#8f979d',
 
-  // ★ 光の総量は夜より **少なく** する。
-  //   R3F の既定のトーンマッピング（ACESFilmic）はハイライトを圧縮するので、
-  //   明るい基準色に夜と同じ光量を当てると建物が一様な白に潰れて
-  //   低層と高層の差も影も見えなくなる（実測で確認した）。
-  //   合計 2.65（夜は 3.60）。
   hemiSky: '#cfe0f2',
   hemiGround: '#9fa8a6',
   hemiIntensity: 0.62,
@@ -184,7 +136,6 @@ export const LIGHT_SCENE: ScenePalette = {
   signalHousing: '#39434a',
   signalLampOff: '#1b2126',
 
-  // 標示板の 3 色は DARK_SCENE と同じ値（現実の標識と同じ色を昼夜で保つ）
   signBoard: '#f2f4f5',
   signRing: '#d0121b',
   signText: '#16191c',
@@ -199,7 +150,6 @@ export const LIGHT_SCENE: ScenePalette = {
   obstacleCone: '#ef5416',
   obstacleBase: '#2f353a',
 
-  // 白線(marking #f5f7f9)・路面(#4e555c)のどちらとも被らない濃いマゼンタ
   laneOverlay: '#c2158f',
 }
 
@@ -208,13 +158,5 @@ export function scenePalette(theme: ThemeName): ScenePalette {
   return theme === 'light' ? LIGHT_SCENE : DARK_SCENE
 }
 
-/**
- * 信号の灯火（0=青 / 1=黄 / 2=赤）。日本の LED 信号機の見え方に寄せている
- * （「青」は実際には緑）。
- *
- * ★ **昼夜で変えないので `ScenePalette` には入れない。** 現実の信号がそうであるように、
- *   環境によって色が変わっては意味を成さない。
- *   灯器（`TrafficSignals`）と認識結果の枠（`detectionLabels`）が同じ値を使うため、
- *   ここを唯一の出どころにしてある。
- */
+/** 信号の灯火（0=青 / 1=黄 / 2=赤）。日本の LED 信号機の見え方に寄せている */
 export const SIGNAL_LAMP_COLORS = ['#00b06e', '#f2b700', '#e8302a'] as const

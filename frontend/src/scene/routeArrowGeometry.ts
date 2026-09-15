@@ -1,13 +1,4 @@
-/**
- * 進路矢印のジオメトリ生成（純粋関数）。
- *
- * カーナビの案内表示のように、経路を幅のあるリボンとして描き、
- * 一定間隔で進行方向を示す矢羽根（シェブロン）を重ねる。
- *
- * React に依存させず three だけに依存させてあるのは、
- * `frontend/scripts/verify-camera-route.ts` から Node で検証するため。
- * 座標変換の規約は docs/protocol.md 1.3（three.z = -enu.y）。
- */
+/** 進路矢印のジオメトリ生成（純粋関数）。 */
 
 import * as THREE from 'three'
 
@@ -44,16 +35,7 @@ export function directionsAlong(points: Point2[]): Point2[] {
   return dirs
 }
 
-/**
- * リボンの頂点座標を既存の配列へ書き込む（`buildRibbon` の中身）。
- *
- * 点数が変わらないのにジオメトリごと作り直すのを避けるために切り出してある
- * （`LaneDetectionOverlay` は 20Hz で点列だけが入れ替わる。code_review S-02）。
- * 書き込むのは位置だけで、`out` の長さは `points.length * 6` 以上必要。
- *
- * ★ 帯は常に水平（y が一定）なので、点列が変わっても法線は ±Y のまま変わらない。
- *   書き換え側で `computeVertexNormals()` を呼び直す必要はない。
- */
+/** リボンの頂点座標を既存の配列へ書き込む（`buildRibbon` の中身）。 */
 export function writeRibbonPositions(
   out: Float32Array,
   points: Point2[],
@@ -65,7 +47,6 @@ export function writeRibbonPositions(
   for (let i = 0; i < points.length; i++) {
     const [px, py] = points[i]
     const [dx, dy] = dirs[i]
-    // 進行方向の左手
     const nx = -dy * half
     const ny = dx * half
     out[i * 6 + 0] = px + nx
@@ -77,12 +58,7 @@ export function writeRibbonPositions(
   }
 }
 
-/**
- * 経路を幅のあるリボンにする。
- *
- * 区間ごとに独立した四角形を置くとカーブの内外で隙間や食い違いが出るので、
- * 各点の法線を前後の平均から求めて連続した帯にする。
- */
+/** 経路を幅のあるリボンにする。 */
 export function buildRibbon(
   points: Point2[],
   width: number = RIBBON_WIDTH,
@@ -146,7 +122,6 @@ export function chevronsAlong(points: Point2[]): Chevron[] {
     const py = y0 + (y1 - y0) * t
     const dx = (x1 - x0) / segLen
     const dy = (y1 - y0) / segLen
-    // 左手方向
     const nx = -dy
     const ny = dx
 
@@ -170,7 +145,6 @@ export function buildChevrons(
 
   const positions: number[] = []
   for (const c of chevrons) {
-    // 先端 → 左後ろ → 右後ろ（表を上に向けるため反時計回りに並べる）
     for (const [vx, vy] of [c.tip, c.backLeft, c.backRight]) {
       positions.push(vx, y, -vy)
     }

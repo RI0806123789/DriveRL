@@ -1,10 +1,4 @@
-/**
- * アプリ全体の状態（zustand）。
- *
- * ここに入れてよいのは「低頻度で変わるもの」だけ。
- * 20Hz の frame は store/frameBuffer.ts の可変オブジェクトに置き、
- * Three.js の useFrame から直接読む（React を再レンダリングしない）。
- */
+/** アプリ全体の状態（zustand）。 */
 
 import type { ThemeName } from '../scene/palette'
 import { bootstrapTheme } from './themeClock'
@@ -26,19 +20,30 @@ import type {
 import { PROTOCOL_VERSION } from '../types/protocol'
 import { pushFrame, resetFrameBuffer } from './frameBuffer'
 
-/**
- * メトリクス履歴に**上限は設けない**。
- *
- * 以前は 300 点のリングバッファだったが、1Hz で届くので
- * 直近 5 分しか残らず、「学習の始めからどう変わったか」が見えなかった。
- * 学習の進捗は数十分単位でしか分からないので、取りこぼしていたのは
- * 一番見たい情報だった。
- *
- * ★ その代わり、**配列の長さは際限なく伸びる**（1 時間で 3,600 点）。
- *   それを前提にしていないコードを書かないこと。具体的には:
- *   ・`Math.min(...metrics)` のような展開は使わない（約 65,000 要素で RangeError）
- *   ・グラフは点の数だけパスを伸ばさない（MetricsChart が間引く）
- */
+/** メトリクス履歴に**上限は設けない**。 */
+
+/** グラフ 1 本ぶんの系列。キーは LearningTab の並びと揃える */
+export interface MetricsSeries {
+  reward: number[]
+  policyLoss: number[]
+  valueLoss: number[]
+  entropy: number[]
+  goalRate: number[]
+  violations: number[]
+  laneDeviation: number[]
+}
+
+function emptyMetricsSeries(): MetricsSeries {
+  return {
+    reward: [],
+    policyLoss: [],
+    valueLoss: [],
+    entropy: [],
+    goalRate: [],
+    violations: [],
+    laneDeviation: [],
+  }
+}
 
 export type PanelTab = 'simulation' | 'map' | 'learning' | 'model' | 'view'
 /** 俯瞰（自由視点） / 追従（後方上空） / 運転席（一人称） */
@@ -92,9 +97,6 @@ const DEFAULT_PARAMS: SimParams = {
   obeySpeedSigns: true,
 }
 
-// init メッセージが来るまでの暫定値。実装（backend/app/config.py）と揃える。
-// ★ ずれていると、init 到着の 1 回で `Vehicles` の count が変わり、
-//   InstancedMesh が起動のたびに作り直される（code_review Q-04）。
 const DEFAULT_CONFIG: SimConfig = {
   maxVehicles: 8,
   simHz: 20,
@@ -112,7 +114,6 @@ const DEFAULT_STATUS: StatusPayload = {
 }
 
 export interface SimStore {
-  // ---- 通信 ----
   connection: ConnectionState
   /** init を受け取ったか（= プロトコル交渉が済んだか） */
   handshaked: boolean
@@ -120,7 +121,6 @@ export interface SimStore {
   /** モックサーバーに接続しているか（開発用） */
   usingMock: boolean
 
-  // ---- サーバーから来る状態 ----
   presets: MapPreset[]
   config: SimConfig
   params: SimParams
@@ -128,25 +128,25 @@ export interface SimStore {
   map: MapMessage | null
   /** 「読込中」を押した直後の楽観的表示に使う。status が来たら解除される */
   pendingPresetId: string | null
-  metrics: MetricsMessage[]
+  /**
+   * グラフ用の系列。**その場で追記する**（毎秒 O(n) のコピーを避けるため。
+   * `frameBuffer` と同じ作法。code_review E-03）。読む側は `metricsRevision` を
+   * 再計算の契機にすること。
+   */
+  metricsSeries: MetricsSeries
+  /** `metricsSeries` に追記するたびに増える */
+  metricsRevision: number
+  /** マップを切り替えた位置（系列の添字）。グラフの縦線。code_review E-04 */
+  metricsMarks: number[]
   latestMetrics: MetricsMessage | null
   /** ネットワークの状態（層ごとの重み・勾配・変化量）。1Hz で更新される */
   network: NetworkMessage | null
-  /**
-   * 認識器（CNN）の学習状況。接続直後に 1 通届き、以後は進捗が動いたときだけ。
-   * null は「サーバーからまだ何も届いていない」（= モック接続や古いサーバー）。
-   */
+  /** 認識器（CNN）の学習状況。接続直後に 1 通届き、以後は進捗が動いたときだけ。 */
   detector: DetectorMessage | null
   errors: ErrorEntry[]
 
-  // ---- UI 状態 ----
   panelOpen: boolean
-  /**
-   * 配色。**日の出・日の入りで自動的に切り替わる**（store/autoTheme.ts）。
-   * 利用者が変える手段は無いので、対応する setter も置いていない。
-   * パネル UI は tokens.css の `:root[data-theme]`、
-   * 3D シーンは scene/palette.ts が、この同じ値を見る。
-   */
+  /** 配色。**日の出・日の入りで自動的に切り替わる**（store/autoTheme.ts）。 */
   theme: ThemeName
   tab: PanelTab
   cameraMode: CameraMode
@@ -157,7 +157,6 @@ export interface SimStore {
   obstacleRadius: number
   view: ViewToggles
 
-  // ---- アクション（UI 側） ----
   setPanelOpen(open: boolean): void
   togglePanel(): void
   setTab(tab: PanelTab): void
@@ -170,23 +169,12 @@ export interface SimStore {
   patchParamsLocal(patch: Partial<SimParams>): void
   dismissError(id: number): void
 
-  // ---- 通信側から呼ばれる ----
   setConnection(state: ConnectionState): void
   setUsingMock(v: boolean): void
   applyServerMessage(msg: ServerMessage): void
 }
 
 let errorSeq = 0
-
-// ---------------------------------------------------------------------------
-// テーマ
-//
-// 利用者は選べない。**日の出・日の入りに連動して自動で切り替わる**。
-// 判定は store/themeClock.ts（純粋）、タイマーは store/autoTheme.ts（React）。
-//
-// 保存もしない。時刻から決まる値なので、保存した値と現在時刻が食い違うと
-// 「夜なのに前回の昼の配色で開く」ことになり、かえって邪魔になるため。
-// ---------------------------------------------------------------------------
 
 export type { ThemeName }
 
@@ -196,14 +184,7 @@ export function applyTheme(theme: ThemeName): void {
   document.documentElement.dataset.theme = theme
 }
 
-/**
- * 初期値。**ストアを作るより先に DOM へ反映する。**
- *
- * これを React の副作用に任せると、最初の 1 フレームだけ `data-theme` が
- * 未設定になり、CSS が既定（暗い方）に落ちてパネルが一瞬黒く光る。
- * `tokens.css` はライトを `:root[data-theme='light']` の上書きとして持つので、
- * **属性が無い＝ダーク**という非対称があることに注意。
- */
+/** 初期値。**ストアを作るより先に DOM へ反映する。** */
 const INITIAL_THEME = bootstrapTheme()
 applyTheme(INITIAL_THEME)
 
@@ -219,7 +200,9 @@ export const useSimStore = create<SimStore>((set, get) => ({
   status: DEFAULT_STATUS,
   map: null,
   pendingPresetId: null,
-  metrics: [],
+  metricsSeries: emptyMetricsSeries(),
+  metricsRevision: 0,
+  metricsMarks: [],
   latestMetrics: null,
   network: null,
   detector: null,
@@ -258,7 +241,6 @@ export const useSimStore = create<SimStore>((set, get) => ({
 
   setConnection: (connection) => {
     if (connection !== 'open') {
-      // 切断されたら補間バッファを捨てる（古い位置を引きずらせない）
       resetFrameBuffer()
       set({ connection, handshaked: false })
     } else {
@@ -282,7 +264,6 @@ export const useSimStore = create<SimStore>((set, get) => ({
           status: init.status ?? DEFAULT_STATUS,
           pendingPresetId: null,
         })
-        // 追従対象が maxVehicles を超えていたら丸める
         const cfg = init.config ?? DEFAULT_CONFIG
         if (get().followTarget >= cfg.maxVehicles) set({ followTarget: 0 })
         break
@@ -290,12 +271,19 @@ export const useSimStore = create<SimStore>((set, get) => ({
 
       case 'map': {
         resetFrameBuffer()
-        set({ map: msg as MapMessage, pendingPresetId: null })
+        set((s) => ({
+          map: msg as MapMessage,
+          pendingPresetId: null,
+          // 重みはマップをまたいで引き継ぐので系列は消さず、位置だけ覚える
+          metricsMarks:
+            s.metricsRevision > 0 && s.metricsMarks.at(-1) !== s.metricsSeries.reward.length
+              ? [...s.metricsMarks, s.metricsSeries.reward.length]
+              : s.metricsMarks,
+        }))
         break
       }
 
       case 'frame': {
-        // ★ ここだけは zustand に入れない（20Hz で React を回さないため）
         pushFrame(msg)
         break
       }
@@ -316,10 +304,15 @@ export const useSimStore = create<SimStore>((set, get) => ({
 
       case 'metrics': {
         set((s) => {
-          // 間引かずに全部持つ。zustand のセレクタは参照で見るので新しい配列にする
-          const next = s.metrics.slice()
-          next.push(msg)
-          return { metrics: next, latestMetrics: msg }
+          const series = s.metricsSeries
+          series.reward.push(msg.meanEpisodeReward)
+          series.policyLoss.push(msg.policyLoss)
+          series.valueLoss.push(msg.valueLoss)
+          series.entropy.push(msg.entropy)
+          series.goalRate.push(msg.goalRate)
+          series.violations.push(msg.signalViolations)
+          series.laneDeviation.push(msg.laneDeviation)
+          return { metricsRevision: s.metricsRevision + 1, latestMetrics: msg }
         })
         break
       }
@@ -353,7 +346,6 @@ export const useSimStore = create<SimStore>((set, get) => ({
         break
 
       default: {
-        // 未知の type は無視する（前方互換）
         break
       }
     }

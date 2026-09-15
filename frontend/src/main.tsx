@@ -1,10 +1,4 @@
-/**
- * エントリポイント。
- *
- * WebSocket は React のライフサイクルの外（モジュールスコープ）で 1 本だけ張る。
- * StrictMode の二重マウントで接続が 2 本にならないよう、startConnection() 自身が
- * 多重呼び出しを弾く実装になっている。
- */
+/** エントリポイント。 */
 
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
@@ -21,7 +15,6 @@ if (!container) {
 }
 
 startConnection()
-// PWA（インストールと全画面起動）。本番ビルドのときだけ登録される
 setupServiceWorker()
 
 createRoot(container).render(

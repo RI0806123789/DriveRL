@@ -1,10 +1,4 @@
-/**
- * 「マップ」タブ。
- *
- * memo 5章の「複数の固定エリアを事前プリセット」に対応する選択 UI。
- * OSM の取得は Overpass API 経由で 10〜60 秒かかるため、
- * 「なぜ待たされているのか」を必ずユーザーに伝えること。
- */
+/** 「マップ」タブ。 */
 
 import { send } from '../store/connection'
 import { markMapLoading, useSimStore } from '../store/simStore'
@@ -20,12 +14,16 @@ export function MapTab() {
   const status = useSimStore((s) => s.status)
   const pendingPresetId = useSimStore((s) => s.pendingPresetId)
   const connection = useSimStore((s) => s.connection)
+  const detector = useSimStore((s) => s.detector)
 
   const loading = status.state === 'loading_map'
   const activePresetId = pendingPresetId ?? status.presetId ?? map?.presetId ?? null
 
+  const trainingDetector = detector?.running ?? false
+  const blocked = loading || trainingDetector || connection !== 'open'
+
   const handleSelect = (presetId: string) => {
-    if (loading) return
+    if (blocked) return
     if (send({ type: 'load_map', presetId })) markMapLoading(presetId)
   }
 
@@ -36,6 +34,19 @@ export function MapTab() {
           事前に用意された大都市中心部から選びます。選んだ瞬間に読み込みが始まり、
           完了すると強化学習が走り出します。
         </div>
+
+        {trainingDetector && (
+          <div className="m3-banner m3-banner--warning">
+            <span className="m3-banner-icon">
+              <WarningIcon size={16} />
+            </span>
+            <span>
+              <span className="m3-banner-title">認識器の学習中はエリアを変えられません</span>
+              教師データはいま走っているエリアで集めています。変えるには「モデル作成」
+              タブで中止するか、終わるまで待ってください。
+            </span>
+          </div>
+        )}
 
         <div className="m3-col">
           {presets.length === 0 ? (
@@ -50,7 +61,7 @@ export function MapTab() {
                 className="m3-preset m3-ripple"
                 data-selected={activePresetId === p.id ? 'true' : 'false'}
                 data-loading={loading && activePresetId === p.id ? 'true' : 'false'}
-                disabled={loading || connection !== 'open'}
+                disabled={blocked}
                 onPointerDown={startRipple}
                 onClick={() => handleSelect(p.id)}
               >

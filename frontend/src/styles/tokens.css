@@ -1,22 +1,5 @@
-/*
- * Material 3 Expressive デザイントークン
- * ------------------------------------------------------------------
- * memo 4章「Android Metareal3 for Expressive」= Google の Material 3 Expressive。
- * モバイル仕様の厳密再現ではなく、デスクトップ Web の 3D シミュレータ向けに
- * （マウス操作・高い情報密度に合わせて）読み替えて適用している。
- *
- * ・カラーロール: primary / secondary / tertiary + それぞれの container
- * ・surface の階調（lowest 〜 highest）でトーナル・エレベーションを作る
- *   （影ではなく面の明度差で階層を表現する）
- * ・シェイプスケール: 4 / 8 / 12 / 16 / 28 / full
- * ・スプリング感のあるモーション: cubic-bezier(0.2, 0, 0, 1) 系, 200〜400ms
- *
- * 3D シーンと同居するためダークテーマを基調とする。
- * ライトテーマは [data-theme="light"] で上書きできるようにしてある。
- */
-
 :root {
-  /* ---------- カラー: ダーク（既定） ---------- */
+
   --m3-primary: #9ecaff;
   --m3-on-primary: #003257;
   --m3-primary-container: #00497d;
@@ -41,7 +24,6 @@
   --m3-on-warning-container: #ffe6bd;
   --m3-warning-container: #6b4b12;
 
-  /* surface の階調（トーナル・エレベーション） */
   --m3-surface: #101418;
   --m3-surface-dim: #0b0f13;
   --m3-surface-bright: #363a3e;
@@ -60,13 +42,6 @@
   --m3-inverse-on-surface: #2e3134;
   --m3-scrim: rgba(0, 0, 0, 0.6);
 
-  /* 3D シーンの空・霧の色（scene 側から読む） */
-  /* 3D シーンの色はここには置かない。CSS 変数は three から読まれないので、
-     ここに書くと実コードと食い違っても永久に気づけない（実際 --m3-scene-sky は
-     #0d1218 なのに実際の空は #0e1216 とずれていた）。
-     3D の色は scene/palette.ts が唯一の出どころ（code_review F-24）。 */
-
-  /* ---------- シェイプスケール ---------- */
   --m3-shape-xs: 4px;
   --m3-shape-sm: 8px;
   --m3-shape-md: 12px;
@@ -74,73 +49,40 @@
   --m3-shape-xl: 28px;
   --m3-shape-full: 999px;
 
-  /* ---------- モーション（Expressive: 押すと形が変わる／少し弾む） ----------
-   * 使い分けの原則:
-   *   ・入ってくるもの   … decel 系（速く出て、ゆっくり止まる）
-   *   ・出ていくもの     … accel 系（ゆっくり離れて、速く消える）
-   *   ・その場で形が変わるもの … spring 系（行き過ぎて戻る）
-   * ★ 動かすのは transform と opacity だけにすること。操作パネルは 3D と
-   *   同じメインスレッドに乗っているので、幅・高さ・影を毎フレーム変える演出を
-   *   足すとシミュレータ側のフレームが落ちる。 */
   --m3-ease-emphasized: cubic-bezier(0.2, 0, 0, 1);
   --m3-ease-emphasized-decel: cubic-bezier(0.05, 0.7, 0.1, 1);
   --m3-ease-emphasized-accel: cubic-bezier(0.3, 0, 0.8, 0.15);
   --m3-ease-standard: cubic-bezier(0.2, 0, 0, 1);
   --m3-ease-spring: cubic-bezier(0.34, 1.4, 0.64, 1);
-  /* 小さい要素（つまみ・チップ）向け。はっきり弾む */
+
   --m3-ease-spring-snappy: cubic-bezier(0.32, 1.7, 0.55, 1);
-  /* 大きい面（カード・パネル）向け。弾みは気づくか気づかないか程度に留める */
+
   --m3-ease-spring-soft: cubic-bezier(0.22, 1.12, 0.36, 1);
   --m3-dur-xshort: 90ms;
   --m3-dur-short: 150ms;
   --m3-dur-medium: 250ms;
   --m3-dur-long: 400ms;
   --m3-dur-xlong: 560ms;
-  /* カードが順に出てくる間隔。これ以上広げると「待たされている」側に転ぶ */
+
   --m3-stagger: 38ms;
 
-  /* ---------- タイポグラフィ ---------- */
   --m3-font: 'Segoe UI Variable', 'Segoe UI', 'Yu Gothic UI', 'Hiragino Sans',
     'Noto Sans JP', system-ui, sans-serif;
   --m3-font-mono: 'Cascadia Mono', 'Consolas', 'SFMono-Regular', ui-monospace,
     monospace;
 
-  /* ---------- レイアウト ---------- */
-  /* memo 4章: 左（シミュレーター）: 右（操作パネル） = 2 : 1 */
   --m3-panel-ratio: 33.3333%;
-  /* 操作パネルを浮いたカードに見せるための外周の余白。
-     ★ この分は 2 : 1 の「1」の内側から取る（比率は変えない）。
-     外側に足すとステージがその分狭くなり、memo 4章の比率が崩れる。
-     .app-panel-slot の min/max はこの分を上乗せしてあり、
-     中身（.panel）が取れる幅は余白を入れる前と同じ 340〜560px。 */
+
   --m3-panel-gutter: 12px;
-  /* パネルの実効幅（比率を最小・最大で振ったもの）。
-     ★ 左の HUD はこれを見て右端を決めているので、ここだけ直せば両方が付いてくる。
-     .app-panel-slot と .app-hud で幅を二重に書かないこと（必ず片方だけ古くなる）。
-     % はどちらも画面全幅に対して解釈される
-     （.app-panel-slot の包含ブロックは .app-root、.app-hud は .app-stage。どちらも全面） */
-  /* ★ HUD のチップを**折り返さず 1 行に並べる**のに要るカードの幅。
-     実測（標準の 7 枚、nowrap での max-content）:
-       今の値                              674px
-       数値が伸びたとき（ステップ 123,456 等） 751px
-       最悪（実効倍速に「/ 要求 4.00 倍」が付く）  849px
-     849 に少し余裕を取ってこの値。
-     チップの文言・枚数・padding・font-size を変えたら実測し直すこと。
-     測り方: HUD を clone して flex-wrap: nowrap / width: max-content で幅を読む。 */
+
   --m3-hud-oneline: 860px;
-  /* ★ 下限には min(…, 60vw) の歯止めを入れる。
-     HUD を 1 行に収めるのに要る 884px を無条件の床にすると、
-     狭いウィンドウ（1280px なら 69%）でパネルが画面を埋め、
-     シミュレーターが見えなくなる。
-     そのときだけは折り返しを許して、幅を 60% で止める。
-     実用上の画面幅（1920px）では 884 / 1920 = 46% なのでここは効かない。 */
+
   --m3-panel-width: clamp(
     min(calc(var(--m3-hud-oneline) + var(--m3-panel-gutter) * 2), 60vw),
     var(--m3-panel-ratio),
     calc(960px + var(--m3-panel-gutter) * 2)
   );
 
-  /* ---------- 状態レイヤの不透明度 ---------- */
   --m3-state-hover: 0.08;
   --m3-state-focus: 0.1;
   --m3-state-press: 0.12;
@@ -148,7 +90,6 @@
   color-scheme: dark;
 }
 
-/* ---------- カラー: ライト（任意。data-theme="light" で有効） ---------- */
 :root[data-theme='light'] {
   --m3-primary: #00579a;
   --m3-on-primary: #ffffff;
@@ -190,7 +131,6 @@
 
   --m3-inverse-surface: #2e3134;
   --m3-inverse-on-surface: #eff1f5;
-
 
   color-scheme: light;
 }

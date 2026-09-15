@@ -1,16 +1,4 @@
-/**
- * 車両の形と姿勢の計算。**React から切り離した純粋モジュール。**
- *
- * Vehicles.tsx を InstancedMesh 化したことで、以前は three のシーングラフ
- * （親の group に position/rotation を持たせる形）が面倒を見ていた
- * 「車体からの取り付け位置」「前輪の舵角」「車輪の転がり」を、
- * すべて自前の行列計算でやることになった。
- * 行列の掛け順を 1 か所間違えても型チェックもビルドも通ってしまうので、
- * ここに切り出して `npm run verify` で数値で確かめる（CLAUDE.md の方針）。
- *
- * 座標の規約（protocol.md 1.3）:
- *   three.x = enu.x / three.z = -enu.y / 前方は +X / rotation.y = heading
- */
+/** 車両の形と姿勢の計算。**React から切り離した純粋モジュール。** */
 
 import * as THREE from 'three'
 
@@ -24,10 +12,7 @@ export const NOSE_OFFSET: readonly [number, number, number] = [2.18, 0.72, 0]
 /** キャビンの中心 */
 export const CABIN_OFFSET: readonly [number, number, number] = [-0.25, 1.28, 0]
 
-/**
- * 車輪の取り付け位置と、舵角を効かせるかどうか。
- * 並びは 前左 / 前右 / 後左 / 後右。前 2 本だけ steer で向きが変わる。
- */
+/** 車輪の取り付け位置と、舵角を効かせるかどうか。 */
 export const WHEEL_OFFSETS: ReadonlyArray<{
   readonly position: readonly [number, number, number]
   readonly steered: boolean
@@ -59,10 +44,7 @@ export function makeCabinGeometry(): THREE.BufferGeometry {
   return g
 }
 
-/**
- * 車輪。シリンダーの軸（+Y）を車体左右方向（+Z）へ向ける。
- * 転がりは rotation.z で表せるようになる。
- */
+/** 車輪。シリンダーの軸（+Y）を車体左右方向（+Z）へ向ける。 */
 export function makeWheelGeometry(): THREE.BufferGeometry {
   const g = new THREE.CylinderGeometry(WHEEL_RADIUS, WHEEL_RADIUS, 0.24, 14)
   g.rotateX(Math.PI / 2)
@@ -79,12 +61,7 @@ export function createTransformScratch(): TransformScratch {
   return { node: new THREE.Object3D(), wheel: new THREE.Object3D() }
 }
 
-/**
- * 車両そのものの姿勢（ENU の位置と方位 → three のワールド行列）。
- *
- * 車体・ノーズ・キャビンはオフセットをジオメトリへ焼き込んであるので、
- * この行列をそのままインスタンス行列として使える。
- */
+/** 車両そのものの姿勢（ENU の位置と方位 → three のワールド行列）。 */
 export function composeVehicleMatrix(
   scratch: TransformScratch,
   enuX: number,
@@ -100,13 +77,7 @@ export function composeVehicleMatrix(
   return out.copy(n.matrix)
 }
 
-/**
- * 車輪 1 本のワールド行列。
- *
- * 元の実装は「親 group に rotation.y = steer、子 mesh に rotation.z = roll」
- * という親子構成だった。Euler の既定順 'XYZ' は x=0 のとき Ry(steer)・Rz(roll)
- * の順に効くので、1 つの Object3D にまとめても同じ姿勢になる。
- */
+/** 車輪 1 本のワールド行列。 */
 export function composeWheelMatrix(
   scratch: TransformScratch,
   base: THREE.Matrix4,

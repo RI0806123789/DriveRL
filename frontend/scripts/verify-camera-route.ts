@@ -1,16 +1,4 @@
-/**
- * 運転席カメラと進路矢印の幾何を検証する（ブラウザ不要）。
- *
- *     cd frontend
- *     node scripts/verify-camera-route.ts
- *
- * カメラの向きや矢印の前後は、間違っていても型チェックもビルドも通ってしまう。
- * ここでは実際に座標を計算し、
- *   - 運転席が右ハンドル（日本仕様）の位置にあるか
- *   - 視線が進行方向を向いているか
- *   - 矢羽根が進行方向を指しているか
- * といった不変条件を数値で確かめる。
- */
+/** 運転席カメラと進路矢印の幾何を検証する（ブラウザ不要）。 */
 
 import {
   DRIVER_EYE_HEIGHT,
@@ -58,10 +46,8 @@ console.log('1. 運転席の視点位置（日本車 = 右ハンドル）')
 console.log('='.repeat(70))
 
 for (const [name, h] of HEADINGS) {
-  // 車両を原点に置く
   const eye = toEnu(driverEye(0, 0, h))
 
-  // 進行方向と、その右手
   const fwdX = Math.cos(h)
   const fwdY = Math.sin(h)
   const rightX = Math.sin(h)
@@ -86,14 +72,12 @@ for (const [name, h] of HEADINGS) {
     `${eye.h.toFixed(2)}m`,
   )
 
-  // 視点が車体（全長4.4m×全幅1.8m）の内側にあるか
   check(
     `${name}: 視点が車体の内側にある`,
     Math.abs(longitudinal) < 4.4 / 2 && Math.abs(lateral) < 1.8 / 2,
     `前後 ${longitudinal.toFixed(2)}m / 左右 ${lateral.toFixed(2)}m`,
   )
 
-  // --- 視線 ---
   const look = toEnu(driverLookAt(0, 0, h))
   const dirX = look.x - eye.x
   const dirY = look.y - eye.y
@@ -135,7 +119,6 @@ console.log('3. 進路矢印のリボン')
 console.log('='.repeat(70))
 
 {
-  // まっすぐな経路
   const straight: Point2[] = Array.from({ length: 26 }, (_, i) => [i * 2, 0] as Point2)
   const ribbon = buildRibbon(straight)
   check('リボンが生成される', ribbon !== null)
@@ -144,7 +127,6 @@ console.log('='.repeat(70))
     const pos = ribbon.getAttribute('position')
     check('頂点数が点数 x 2', pos.count === straight.length * 2, `${pos.count} 頂点`)
 
-    // 左右の頂点対の距離 = リボン幅
     let minW = Infinity
     let maxW = -Infinity
     for (let i = 0; i < straight.length; i++) {
@@ -169,7 +151,6 @@ console.log('='.repeat(70))
     check('インデックスがある', ribbon.getIndex() !== null)
   }
 
-  // カーブした経路でも幅が保たれるか（法線を平均しているので内外で崩れやすい）
   const curve: Point2[] = Array.from({ length: 40 }, (_, i) => {
     const t = (i / 39) * Math.PI * 0.5
     return [30 * Math.cos(t), 30 * Math.sin(t)] as Point2
@@ -196,11 +177,6 @@ console.log('='.repeat(70))
 
   check('点が 1 個以下ならリボンを作らない', buildRibbon([[0, 0]]) === null)
 
-  // --- 頂点の書き換え（LaneDetectionOverlay が 20Hz で使う経路。S-02）---
-  // 点数が変わらない限りジオメトリを作り直さず頂点だけ書き換えるので、
-  // **その結果が buildRibbon と 1 ビットも違わない**ことを保証する。
-  // ここがずれると「認識車線だけ実際と違う場所に描かれる」という、
-  // 画面を見ても正常に見えてしまう形で壊れる。
   const before: Point2[] = [
     [0, 0],
     [4, 0.5],
@@ -232,8 +208,6 @@ console.log('='.repeat(70))
       target.length === expected.length && maxDiff === 0,
       `最大差 ${maxDiff}`,
     )
-    // 帯は水平なので、点列が変わっても法線は ±Y のまま（書き換え側で
-    // computeVertexNormals を呼び直さない根拠）
     const nrm = fresh.getAttribute('normal').array as Float32Array
     let flat = true
     for (let i = 0; i < nrm.length; i += 3) {
@@ -261,7 +235,6 @@ for (const [name, h] of HEADINGS) {
   if (chevrons.length > 0) {
     let allForward = true
     for (const c of chevrons) {
-      // 先端が、後端 2 点の中点より進行方向側にあるか
       const midX = (c.backLeft[0] + c.backRight[0]) / 2
       const midY = (c.backLeft[1] + c.backRight[1]) / 2
       const vx = c.tip[0] - midX
@@ -271,7 +244,6 @@ for (const [name, h] of HEADINGS) {
     }
     check(`${name}: すべての矢羽根が進行方向を指す`, allForward)
 
-    // 間隔
     if (chevrons.length >= 2) {
       const d = Math.hypot(
         chevrons[1].tip[0] - chevrons[0].tip[0],
@@ -300,7 +272,6 @@ for (const [name, h] of HEADINGS) {
   if (mesh) {
     const pos = mesh.getAttribute('position')
     check('三角形 1 枚につき 3 頂点', pos.count % 3 === 0, `${pos.count} 頂点`)
-    // すべての頂点が同じ高さ（路面に貼り付いている）
     let sameY = true
     const y0 = pos.getY(0)
     for (let i = 1; i < pos.count; i++) if (Math.abs(pos.getY(i) - y0) > 1e-9) sameY = false

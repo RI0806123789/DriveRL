@@ -1,21 +1,4 @@
-"""車線に沿った経路の生成（左側通行）。
-
-道路中心線をそのまま走らせると中央線をまたぐことになるので、
-**進行方向の左側の車線**へ寄せた経路を作る。交差点では前後の車線中心線が
-つながらないため、両端を切り詰めてベジエ曲線で滑らかに接続する。
-
-日本の道路交通法に合わせている点:
-
-- **左側通行**（17条4項）。車線は進行方向の左半分だけを使う。
-- **基本は一番左の車線**を走る（20条1項: 車両通行帯があるときは最も左側の通行帯）。
-- **左折時**（34条1項）: あらかじめできる限り道路の左側端に寄る
-  → 手前の区間で左端車線（lane 0）に入る。
-- **右折時**（34条2項）: あらかじめできる限り道路の中央に寄る
-  → 手前の区間で自分の進行方向の一番右の車線に移る。
-
-車線変更は「経路の横方向オフセットを手前で滑らかに変える」ことで表現する。
-別途の車線変更判断を持たせず経路に織り込むので、走行側は経路を追うだけでよい。
-"""
+"""車線に沿った経路の生成（左側通行）。"""
 
 from __future__ import annotations
 
@@ -29,19 +12,14 @@ __all__ = ["RouteSegment", "build_lane_route", "lane_count_for_direction", "lane
 
 Point = tuple[float, float]
 
-#: これ以上曲がっていれば右左折とみなす [rad]（30 度）
 TURN_ANGLE_THRESHOLD = math.radians(30.0)
 
-#: 右左折の手前で車線を寄せ始める距離 [m]
 LANE_CHANGE_LEAD_M = 35.0
 
-#: 交差点でポリラインを切り詰める最小距離 [m]
 MIN_TRIM_M = 3.0
 
-#: 区間の何割までなら切り詰めてよいか
 MAX_TRIM_RATIO = 0.4
 
-#: ベジエの制御点を端点からどれだけ離すか（両端間距離に対する比）
 BEZIER_HANDLE_RATIO = 0.45
 
 
@@ -53,47 +31,27 @@ class RouteSegment:
     points: list[Point]
 
 
-# ---------------------------------------------------------------------------
-# 車線の幾何
-# ---------------------------------------------------------------------------
-
-
 def lane_count_for_direction(edge: MapEdge) -> int:
     """この道路で自分の進行方向が使える車線数。"""
     lanes = max(1, int(edge.lanes))
     if edge.oneway:
         return lanes
-    # 対面通行なら車線は両方向で分け合う
     return max(1, lanes // 2)
 
 
 def lane_width_for_direction(edge: MapEdge) -> float:
-    """自分の進行方向が使える幅を車線数で割った、1 車線あたりの幅 [m]。
-
-    対面通行では**必ず中心線の左半分だけ**を使う。`lanes` を素直に割ると、
-    車線数が奇数（データ上 lanes=1 の対面通行路など）のときに車線幅が広くなりすぎ、
-    中心線の上を走ることになってしまう。
-    """
+    """自分の進行方向が使える幅を車線数で割った、1 車線あたりの幅 [m]。"""
     n = lane_count_for_direction(edge)
     usable = edge.width if edge.oneway else edge.width / 2.0
     return usable / n
 
 
 def lane_offset_left(edge: MapEdge, lane_index: int) -> float:
-    """車線中心が道路中心線からどれだけ**左**へ離れているか [m]。
-
-    lane_index=0 が最も左（路肩側）。左側通行なので、対面通行路では
-    自分の車線は常に中心線の左半分にある。
-    """
+    """車線中心が道路中心線からどれだけ**左**へ離れているか [m]。"""
     n = lane_count_for_direction(edge)
     lane_width = lane_width_for_direction(edge)
     idx = min(max(int(lane_index), 0), n - 1)
     return edge.width / 2.0 - lane_width * (idx + 0.5)
-
-
-# ---------------------------------------------------------------------------
-# ポリラインの小道具
-# ---------------------------------------------------------------------------
 
 
 def _cumulative(points: Sequence[Point]) -> list[float]:
@@ -142,7 +100,6 @@ def _trim(points: Sequence[Point], from_start: float, from_end: float) -> list[P
     a = min(max(0.0, from_start), limit)
     b = min(max(0.0, from_end), limit)
     if a + b >= total * 0.9:
-        # 短すぎる区間。中央付近だけ残す
         a = b = total * 0.45
 
     start_d = a
@@ -172,7 +129,6 @@ def _slice(points: Sequence[Point], cum: Sequence[float], start_d: float, end_d:
             out.append(tuple(points[i]))
     out.append(at(end_d))
 
-    # 重複点を落とす
     cleaned = [out[0]]
     for p in out[1:]:
         if math.dist(cleaned[-1], p) > 1e-6:
@@ -236,17 +192,8 @@ def _angle_diff(a: float, b: float) -> float:
     return math.atan2(math.sin(a - b), math.cos(a - b))
 
 
-# ---------------------------------------------------------------------------
-# 車線経路の組み立て
-# ---------------------------------------------------------------------------
-
-
 def _target_lane_before_turn(edge: MapEdge, turn: str) -> int:
-    """この区間を抜けるときに居るべき車線。
-
-    右折なら道路の中央寄り（自分の方向で一番右）、それ以外は左端。
-    道交法 34 条の「あらかじめ寄る」に対応する。
-    """
+    """この区間を抜けるときに居るべき車線。"""
     if turn == "right":
         return lane_count_for_direction(edge) - 1
     return 0
@@ -274,11 +221,9 @@ def _offset_points(
         elif remaining >= lead:
             offset = entry_offset
         else:
-            # 残り距離が短くなるほど exit_offset に近づく
             t = _smoothstep(1.0 - remaining / lead)
             offset = entry_offset + (exit_offset - entry_offset) * t
         dx, dy = tangents[i]
-        # 進行方向の左手
         out.append((px - dy * offset, py + dx * offset))
     return out
 
@@ -286,16 +231,11 @@ def _offset_points(
 def build_lane_route(
     segments: Sequence[RouteSegment], resample_m: float = 2.0
 ) -> list[Point]:
-    """区間列から、車線に沿った走行経路を作る。
-
-    各区間は「入口では左端車線、出口では次の曲がり方に応じた車線」に置き、
-    交差点は前後の車線中心線をベジエ曲線でつなぐ。
-    """
+    """区間列から、車線に沿った走行経路を作る。"""
     usable = [s for s in segments if len(s.points) >= 2]
     if not usable:
         return []
 
-    # --- 1. 交差点ごとの曲がり方を先に決める ---
     turns: list[str] = []
     for i in range(len(usable) - 1):
         out_h = _heading(usable[i].points, at_end=True)
@@ -307,19 +247,17 @@ def build_lane_route(
             turns.append("right")
         else:
             turns.append("straight")
-    turns.append("straight")  # 最終区間の先は曲がらない（目的地）
+    turns.append("straight")
 
-    # --- 2. 区間ごとに車線へ寄せ、交差点手前を切り詰める ---
     lane_segments: list[list[Point]] = []
     for i, seg in enumerate(usable):
         edge = seg.edge
-        entry_offset = lane_offset_left(edge, 0)  # 入口は常に左端車線
+        entry_offset = lane_offset_left(edge, 0)
         exit_lane = _target_lane_before_turn(edge, turns[i])
         exit_offset = lane_offset_left(edge, exit_lane)
 
         offset_pts = _offset_points(seg.points, entry_offset, exit_offset, LANE_CHANGE_LEAD_M)
 
-        # 交差点の手前・直後を切り詰めて、曲線を差し込む余地を作る
         prev_width = usable[i - 1].edge.width if i > 0 else 0.0
         next_width = usable[i + 1].edge.width if i + 1 < len(usable) else 0.0
         trim_start = max(MIN_TRIM_M, prev_width / 2.0 + 1.0) if i > 0 else 0.0
@@ -327,7 +265,6 @@ def build_lane_route(
 
         lane_segments.append(_trim(offset_pts, trim_start, trim_end))
 
-    # --- 3. 区間どうしをベジエでつなぐ ---
     points: list[Point] = []
     for i, seg_pts in enumerate(lane_segments):
         if not points:
@@ -351,7 +288,6 @@ def build_lane_route(
         points.extend(_bezier(p0, p1, p2, p3, samples))
         points.extend(seg_pts)
 
-    # --- 4. 重複を落として等間隔に均す ---
     cleaned: list[Point] = []
     for p in points:
         if cleaned and math.dist(cleaned[-1], p) <= 1e-6:

@@ -1,15 +1,4 @@
-"""FastAPI アプリケーション本体。
-
-役割は 3 つだけ：
-
-1. WebSocket 接続を受け付け、`docs/protocol.md` のメッセージを送受信する
-2. クライアントからのコマンドを `SimulationEngine` へ受け渡す
-3. エンジンが持つ最新スナップショットを一定周期で全接続へ配信する
-
-重い処理（OSM の取得、物理、学習）はここには一切書かない。asyncio のイベントループを
-止めないことが最優先で、地図取得は `asyncio.to_thread`、物理と学習は専用スレッド
-（`app.runtime.engine`）が担当する。
-"""
+"""FastAPI アプリケーション本体。"""
 
 from __future__ import annotations
 
@@ -39,7 +28,6 @@ logger = logging.getLogger("autoware_sim")
 
 engine = SimulationEngine()
 
-# 介入イベントとしてそのまま流せるメッセージ種別
 _EVENT_KINDS = {
     "spawn_vehicle",
     "despawn_vehicle",
@@ -49,18 +37,12 @@ _EVENT_KINDS = {
     "reset_episode",
 }
 
-# エンジンへ素通しするコマンド
 _COMMAND_KINDS = {"save_checkpoint", "load_checkpoint", "reset_policy"}
 
-# モデル書き出しの待ち時間の上限 [s]。PPO 更新中に依頼が来ると 1 ステップ分待たされる。
 EXPORT_TIMEOUT_SEC = 60.0
 
-# モデル読み込みの待ち時間の上限 [s]。検証・バックアップ・載せ替えを含む。
 IMPORT_TIMEOUT_SEC = 120.0
 
-# 実行中のバックグラウンドタスク。
-# asyncio はタスクへの強参照を持たないので、ここに入れておかないと実行途中で
-# GC に回収されうる（マップ読込は数十秒かかるため最も起こりやすい）。
 _background_tasks: set[asyncio.Task[Any]] = set()
 
 
@@ -73,32 +55,17 @@ def _spawn_background(coro: Any, *, name: str) -> "asyncio.Task[Any]":
 
 
 def _safe_upload_name(name: str | None) -> str:
-    """アップロードされたファイル名をそのまま使わず、安全な形に落とす。
-
-    ディレクトリ区切りや `..` を含む名前を信用すると、保存先を抜け出して
-    任意の場所へ書き込まれてしまう。
-    """
+    """アップロードされたファイル名をそのまま使わず、安全な形に落とす。"""
     base = PurePath(name or "model.pt").name
     cleaned = re.sub(r"[^0-9A-Za-z._-]+", "-", base).strip("-.")
     return (cleaned or "model.pt")[:120]
 
 
-# ---------------------------------------------------------------------------
-# 接続管理
-# ---------------------------------------------------------------------------
-
-#: 1 接続への送信をここで打ち切る [秒]（code_review R-05）。
-#: フレームは 20Hz、金沢の map は 18.5MB。ローカル接続で 5 秒かかるのは
-#: 「クライアントが読んでいない」以外に考えにくいので、切って他を守る。
 _SEND_TIMEOUT_SEC = 5.0
 
 
 class ConnectionManager:
-    """接続中の WebSocket をまとめて扱う。
-
-    memo 5章の通り単一ユーザー想定だが、ページのリロードで一時的に 2 本になることは
-    あるので集合で持っておく。
-    """
+    """接続中の WebSocket をまとめて扱う。"""
 
     def __init__(self) -> None:
         self._connections: set[WebSocket] = set()
@@ -117,18 +84,7 @@ class ConnectionManager:
         return len(self._connections)
 
     async def broadcast(self, payload: dict[str, Any]) -> None:
-        """全接続へ 1 通送る。**読み取りの遅い接続では時間切れで切断する。**
-
-        ★ タイムアウトを外さないこと（code_review R-05）。素の
-          `await ws.send_text(...)` には上限が無いので、受信を止めた
-          クライアントが 1 本いると TCP の送信ウィンドウが埋まって
-          `drain()` が無期限に待つ。すると配信ループ全体が止まり、
-          **正常なクライアントにも何も届かなくなる**（学習は裏で進むので
-          画面だけ凍る）。`handle_load_map` もここを await するのでマップ読込も
-          止まり、詰まっている間は例外が出ないので掃除もされない。
-          CLAUDE.md が勧める検証手順（`websockets` で /ws に繋ぐ）で
-          `recv()` を回さないスクリプトを繋ぎっぱなしにすると数秒で再現する。
-        """
+        """全接続へ 1 通送る。**読み取りの遅い接続では時間切れで切断する。**"""
         if not self._connections:
             return
         text = orjson.dumps(payload).decode("utf-8")
@@ -155,7 +111,7 @@ class ConnectionManager:
                 try:
                     await ws.close(code=1011)
                 except Exception:
-                    pass  # 既に切れている接続。閉じられなくても掃除は済んでいる
+                    pass
 
 
 manager = ConnectionManager()
@@ -165,17 +121,8 @@ async def send_json(websocket: WebSocket, payload: dict[str, Any]) -> None:
     await websocket.send_text(orjson.dumps(payload).decode("utf-8"))
 
 
-# ---------------------------------------------------------------------------
-# 配信ループ
-# ---------------------------------------------------------------------------
-
-
 async def broadcast_loop() -> None:
-    """フレーム・指標・通知を全接続へ配信する常駐タスク。
-
-    フレームは「エンジンが新しいものを作ったときだけ」送る。`render_paused` のときは
-    エンジンが None を返すので自然に配信が止まる（学習は裏で進み続ける）。
-    """
+    """フレーム・指標・通知を全接続へ配信する常駐タスク。"""
     last_seq = -1
     last_metrics_at = 0.0
     poll_interval = 1.0 / 60.0
@@ -200,14 +147,8 @@ async def broadcast_loop() -> None:
                 if network is not None:
                     await manager.broadcast({"type": "network", **network})
 
-                # 認識器の学習（「モデル作成」タブ）の進捗。
-                # **変わったときだけ**送る。収集中は 20 ステップごとに動くので、
-                # 毎周期送ると何も走っていないときまで 1Hz で流れてしまう
                 await broadcast_detector_if_changed()
 
-            # エンジン側でパラメータが動いたとき（手動スポーンで台数が増えた等）は
-            # そのまま配信する。送らないと UI の「車両数」が実態とずれたままになり、
-            # 次に利用者がスライダーを触った瞬間に足した車両が消える
             changed_params = engine.take_params_update()
             if changed_params is not None:
                 await manager.broadcast(
@@ -226,24 +167,11 @@ async def broadcast_loop() -> None:
             await asyncio.sleep(0.5)
 
 
-# ---------------------------------------------------------------------------
-# 認識器の学習（「モデル作成」タブ）
-# ---------------------------------------------------------------------------
-
-#: 最後に配信した `detector` の中身。**版番号ではなくペイロードそのものを比べる。**
-#: ★ ジョブの版番号だけを見ると、ジョブが動いていないときの変化を取りこぼす。
-#:   実際、`model.inUse`（観測が CNN 由来か）はマップを読み込んだ瞬間に変わるが、
-#:   そのときジョブは何もしていないので版番号は動かない。**学習済みの認識器で
-#:   走っているのに画面は「真値フォールバック」と言い続ける**という形で出た。
 _last_detector_payload: dict[str, Any] | None = None
 
 
 async def broadcast_detector(force: bool = False) -> None:
-    """`detector` メッセージを全接続へ送る（中身が変わったときだけ）。
-
-    `force` は「押した直後の反応」を返すためのもので、押した本人が
-    1Hz の配信周期ぶん待たされないようにする。
-    """
+    """`detector` メッセージを全接続へ送る（中身が変わったときだけ）。"""
     global _last_detector_payload
     payload = engine.detector_job.snapshot()
     if not force and payload == _last_detector_payload:
@@ -256,20 +184,13 @@ async def broadcast_detector_if_changed() -> None:
     await broadcast_detector(force=False)
 
 
-# ---------------------------------------------------------------------------
-# マップ読み込み
-# ---------------------------------------------------------------------------
-
 _map_load_lock = asyncio.Lock()
 
-# 直近に配信した map メッセージ。あとから接続してきたクライアントへ再送するために保持する
-# （これが無いと、マップ読込後にページをリロードしたとき 3D が空のままになる）。
 _current_map_wire: dict[str, Any] | None = None
 
 
 def _load_map_blocking(preset_id: str):
     """別スレッドで実行される同期処理。OSM 取得とインデックス構築。"""
-    # 依存が重いのでここで初めて読み込む
     from app.map import build_map_index, get_preset, load_map
 
     preset = get_preset(preset_id)
@@ -333,31 +254,15 @@ async def handle_load_map(preset_id: str) -> None:
             elapsed,
         )
 
-        # ★ ワイヤ変換もイベントループから追い出す（code_review R-01）。
-        #   全ノード・全エッジ・全建物の点に round() を回す純 Python ループで、
-        #   金沢（ノード 19,493 / 建物 35,607）で実測 781.7ms。この間フレーム配信・
-        #   metrics・ping/pong・他クライアントの HTTP がすべて止まる。
-        #   銀座は 6.9ms なので、400m プリセットしか触っていないと気づけない。
         wire = await asyncio.to_thread(data.to_wire)
 
-        # ★ フレーム配信は map を**送り始める前**に止める（code_review R-02）。
-        #   `engine.set_map()` の中で止めていたときは、18.5MB の map を送っている
-        #   最中に配信ループが**古いマップのフレームを map の後ろへ追記**していた。
-        #   止めるのは broadcast を始める前でなければ意味が無い（この broadcast 自体が
-        #   await なので、その間に配信ループが走る）。
         engine.pause_frames()
         _current_map_wire = wire
         await manager.broadcast({"type": "map", **_current_map_wire})
         engine.set_map(index, preset.id, preset.name)
 
-        # エンジンがマップを取り込むまで少しだけ待ってから status を送る
         await asyncio.sleep(0.15)
         await manager.broadcast({"type": "status", **engine.status_payload()})
-
-
-# ---------------------------------------------------------------------------
-# クライアントメッセージの処理
-# ---------------------------------------------------------------------------
 
 
 async def handle_client_message(websocket: WebSocket, message: dict[str, Any]) -> None:
@@ -375,6 +280,16 @@ async def handle_client_message(websocket: WebSocket, message: dict[str, Any]) -
                 {"type": "error", "code": "INVALID_MESSAGE", "message": "presetId が指定されていません"},
             )
             return
+        if engine.detector_job.running:
+            await send_json(
+                websocket,
+                {
+                    "type": "error",
+                    "code": "DETECTOR_TRAINING",
+                    "message": "認識器の学習中はエリアを変えられません。中止するか、終わるまで待ってください",
+                },
+            )
+            return
         _spawn_background(handle_load_map(preset_id), name=f"load-map-{preset_id}")
         return
 
@@ -388,8 +303,6 @@ async def handle_client_message(websocket: WebSocket, message: dict[str, Any]) -
             return
         params, patch_result = engine.update_params(patch)
         if patch_result.has_problem:
-            # 黙って捨てると「動かしたのに効かない」としか分からない。
-            # 反映した値は下の params メッセージで返すので、UI はそちらで直る
             details: list[str] = []
             if patch_result.rejected:
                 details.append(f"無視した項目: {', '.join(patch_result.rejected)}")
@@ -407,9 +320,6 @@ async def handle_client_message(websocket: WebSocket, message: dict[str, Any]) -
         return
 
     if kind == "set_render_paused":
-        # ★ `bool()` に任せないこと（code_review R-09）。`bool("false")` は True に
-        #   なるので、文字列 `"false"` が**一時停止**として通っていた。
-        #   必須項目の欠落は protocol.md 2.8 どおり INVALID_MESSAGE で返す。
         paused = coerce_bool(message.get("paused"))
         if paused is None:
             await send_json(
@@ -446,8 +356,6 @@ async def handle_client_message(websocket: WebSocket, message: dict[str, Any]) -
             return
         problem = engine.detector_job.start(request)
         if problem:
-            # 「実行中」「教師データが無い」は利用者の操作に対する説明なので、
-            # protocol.md 2.8 の方針どおり error ではなく status で返す
             await manager.broadcast(
                 {"type": "status", **engine.status_payload(), "message": problem}
             )
@@ -484,13 +392,25 @@ async def handle_client_message(websocket: WebSocket, message: dict[str, Any]) -
     )
 
 
-# ---------------------------------------------------------------------------
-# アプリケーション
-# ---------------------------------------------------------------------------
+MAX_UPLOAD_FILES = 3
+
+
+def _prune_uploads() -> None:
+    """起動時にアップロードの残骸を片付ける（code_review E-07）。"""
+    from app.rl.export import prune_exports
+
+    try:
+        removed = prune_exports(config.UPLOAD_DIR, keep=MAX_UPLOAD_FILES)
+    except Exception:
+        logger.exception("アップロードの整理に失敗しました（起動は続行します）")
+        return
+    if removed:
+        logger.info("古いアップロードを %d 件片付けました", len(removed))
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    _prune_uploads()
     engine.start()
     task = asyncio.create_task(broadcast_loop(), name="broadcast-loop")
     logger.info("サーバーを起動しました（http://%s:%d）", config.HOST, config.PORT)
@@ -530,15 +450,7 @@ async def health() -> JSONResponse:
 
 @app.get("/api/export/{kind}")
 async def export_model_endpoint(kind: str):
-    """学習済みモデルを書き出してダウンロードさせる。
-
-    kind:
-        "checkpoint"  — 重み＋オプティマイザ状態＋メタデータ。このアプリに読み戻せる
-        "torchscript" — 推論だけを切り出した自己完結形式。torch.jit.load() で読める
-
-    実際の書き出しはエンジンスレッドがステップ境界で行う（学習中の中途半端な重みを
-    掴まないため）。ここはその完了を待つだけで、イベントループはブロックしない。
-    """
+    """学習済みモデルを書き出してダウンロードさせる。"""
     from app.rl.export import EXPORT_KINDS
 
     if kind not in EXPORT_KINDS:
@@ -548,9 +460,6 @@ async def export_model_endpoint(kind: str):
         )
 
     if kind == "keras":
-        # `import keras` は数秒かかる。書き出し自体はシミュレーションスレッドの
-        # ステップ境界で行うので、そこで初回インポートすると学習が数秒止まる。
-        # 先にこのリクエストのスレッドで済ませておく。
         from app.rl.export import ExportError, preload_keras
 
         try:
@@ -577,7 +486,6 @@ async def export_model_endpoint(kind: str):
         filename=result.filename,
         media_type=result.media_type,
         headers={
-            # フロントがサイズと形式を読めるようにしておく
             "X-Export-Kind": result.kind,
             "X-Export-Size": str(result.size_bytes),
         },
@@ -586,27 +494,15 @@ async def export_model_endpoint(kind: str):
 
 @app.post("/api/import")
 async def import_model_endpoint(file: UploadFile = File(...)):
-    """書き出したモデルを受け取り、その状態から学習を再開する。
-
-    受け取ったファイルは **ユーザーがアップロードしたもの** なので、
-    `app.rl.importer` が `weights_only=True` で安全に解析してから載せ替える。
-
-    実際の載せ替えはエンジンスレッドのステップ境界で行い、その直前に
-    現在のモデルを `backend/data/exports/` へ自動バックアップする。
-
-    受け取ったファイルは **成否によらず必ず消す**。読み込みが済めば用済みで、
-    失敗したもの（形式違い・空・サイズ超過で打ち切った部分ファイル）を
-    残しておく理由も無い。載せ替え前の状態は `data/exports/` の
-    `..._before-import_...pt` に退避されているので、これで失うものは無い。
-    """
+    """書き出したモデルを受け取り、その状態から学習を再開する。"""
     from app.rl.importer import MAX_UPLOAD_BYTES
 
     stamp = time.strftime("%Y%m%d-%H%M%S")
     safe_name = _safe_upload_name(file.filename)
     dest = config.UPLOAD_DIR / f"{stamp}_{safe_name}"
 
-    # サイズ上限を見ながら少しずつ書き出す（丸ごとメモリに載せない）
     written = 0
+    handed_off = False
     try:
         try:
             with dest.open("wb") as out:
@@ -638,6 +534,7 @@ async def import_model_endpoint(file: UploadFile = File(...)):
             return JSONResponse({"ok": False, "error": "ファイルが空です"}, status_code=400)
 
         ticket = engine.request_import(dest)
+        handed_off = True
         finished = await asyncio.to_thread(ticket.done.wait, IMPORT_TIMEOUT_SEC)
 
         if not finished:
@@ -645,7 +542,6 @@ async def import_model_endpoint(file: UploadFile = File(...)):
                 {"ok": False, "error": "読み込みが時間内に完了しませんでした"}, status_code=504
             )
         if ticket.error is not None or ticket.info is None:
-            # 形が合わないなどの「利用者が直せる」失敗なので 400 で返す
             return JSONResponse(
                 {"ok": False, "error": ticket.error or "モデルの読み込みに失敗しました"},
                 status_code=400,
@@ -667,21 +563,19 @@ async def import_model_endpoint(file: UploadFile = File(...)):
             "message": f"学習回数 {ticket.info.updates} 回の状態から学習を再開します",
         }
 
-        # 他の接続にも状態変化を知らせる
         await manager.broadcast({"type": "status", **engine.status_payload()})
         return JSONResponse(payload)
 
     finally:
-        # 通常はエンジンスレッドが読み終えた後（ticket.done 待ちの後）なので、
-        # 掴まれたまま消すことはない。時間切れ（504）だけは engine が後から
-        # 読みに来る可能性があるが、その場合は「ファイルが見つかりません」で
-        # 失敗するだけで、消せなければ下の警告が出る
-        try:
-            dest.unlink(missing_ok=True)
-        except OSError as exc:
-            logger.warning(
-                "アップロードファイルを削除できませんでした: %s（%s）", dest.name, exc
-            )
+        # 依頼を積めたなら削除はエンジン側（_handle_import）の責任（code_review E-05）。
+        # 積む前に抜けた場合だけここで消す
+        if not handed_off:
+            try:
+                dest.unlink(missing_ok=True)
+            except OSError as exc:
+                logger.warning(
+                    "アップロードファイルを削除できませんでした: %s（%s）", dest.name, exc
+                )
 
 
 @app.websocket("/ws")
@@ -691,9 +585,6 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     logger.info("WebSocket 接続を受け付けました（接続数 %d）", manager.count)
 
     try:
-        # ★ `app.map` ではなく `app.map.presets` から引く（code_review R-08）。
-        #   パッケージ側も遅延化したので実害は消えているが、ここは
-        #   「プリセット一覧しか要らない」ことを import で明示しておく
         from app.map.presets import list_presets
 
         presets = [p.to_wire() for p in list_presets()]
@@ -719,18 +610,12 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
             },
         )
 
-        # 認識器の状態（学習中かどうか、いま使っているモデル）も最初に送る。
-        # これが無いと、学習中にページをリロードしただけで
-        # 「モデル作成」タブが空になり、進行中のジョブが見えなくなる
         await send_json(
             websocket, {"type": "detector", **engine.detector_job.snapshot()}
         )
 
-        # 接続時点で既にマップが読み込まれていれば、それも送って画面を復元させる。
-        # （ページをリロードしただけで 3D が空になるのを防ぐ）
         if _current_map_wire is not None:
             await send_json(websocket, {"type": "map", **_current_map_wire})
-            # 経路は差分配信なので、次のフレームだけ全スロット分を載せてもらう
             engine.request_full_frame()
 
         while True:
@@ -759,8 +644,6 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
         await manager.remove(websocket)
 
 
-# 本番用：フロントエンドをビルド済みなら静的配信する。
-# 開発時は Vite の dev サーバー（5173）を使うのでここは通らない。
 _dist_dir = config.PROJECT_DIR / "frontend" / "dist"
 
 import os as _os  # noqa: E402
@@ -769,24 +652,11 @@ from fastapi.staticfiles import StaticFiles  # noqa: E402
 from starlette.responses import Response as _Response  # noqa: E402
 from starlette.types import Scope as _Scope  # noqa: E402
 
-
-#: ファイル名が固定で中身だけ変わるもの。**ブラウザにキャッシュさせない。**
-#: ★ `sw.js` を入れておくこと（PWA）。Service Worker はこれ自身の中身が
-#:   変わったときにだけ更新されるので、古いものがキャッシュから返ると
-#:   **キャッシュ規則を直しても永久に効かない**。症状は「再ビルドしたのに
-#:   画面が古いまま」で、原因までたどり着けない。
 _NO_CACHE_FILES = {"sw.js", "manifest.webmanifest"}
 
 
 class _FrontendStatic(StaticFiles):
-    """index.html と Service Worker だけキャッシュさせない静的配信。
-
-    Vite の出力は `index-<ハッシュ>.js` のようにファイル名が内容で変わるので、
-    アセットは永続キャッシュして構わない。一方 index.html はファイル名が固定なので、
-    ブラウザにキャッシュされると **再ビルドしても古いバンドルを指したまま**になる
-    （実際に、古い index.html が既に消えた JS を参照し続ける事故が起きた）。
-    そのため HTML だけ毎回サーバーへ確認させる。
-    """
+    """index.html と Service Worker だけキャッシュさせない静的配信。"""
 
     def file_response(
         self,
@@ -800,7 +670,6 @@ class _FrontendStatic(StaticFiles):
         if name.endswith(".html") or name.rsplit("/", 1)[-1] in _NO_CACHE_FILES:
             response.headers["Cache-Control"] = "no-cache"
         elif "/assets/" in name:
-            # 内容が変わればファイル名が変わるので、長期キャッシュして問題ない
             response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
         return response
 

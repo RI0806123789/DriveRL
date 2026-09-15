@@ -1,14 +1,4 @@
-/**
- * 学習済みモデルの書き出し（ダウンロード）と読み込み（アップロード）。
- *
- * WebSocket ではなく HTTP の `GET /api/export/<kind>` を使う。
- * バイナリを WebSocket 越しに流すよりブラウザのダウンロード機構に任せたほうが、
- * 進捗表示・保存先の選択・中断のいずれも素直に扱えるためである。
- *
- * 単純な <a href> にせず fetch を経由しているのは、失敗したときに
- * サーバーが返す JSON のエラー文をそのまま画面に出したいから。
- * リンク遷移だと、エラー JSON がタブに表示されるだけで何が起きたか分からない。
- */
+/** 学習済みモデルの書き出し（ダウンロード）と読み込み（アップロード）。 */
 
 export type ExportKind = 'checkpoint' | 'torchscript' | 'keras'
 
@@ -22,13 +12,11 @@ export interface ExportOutcome {
 /** Content-Disposition ヘッダからファイル名を取り出す */
 function filenameFromHeader(header: string | null, fallback: string): string {
   if (!header) return fallback
-  // filename*=UTF-8''... 形式を優先し、無ければ filename="..." を見る
   const extended = /filename\*=UTF-8''([^;]+)/i.exec(header)
   if (extended) {
     try {
       return decodeURIComponent(extended[1])
     } catch {
-      /* 壊れていたら下の素の filename にフォールバック */
     }
   }
   const plain = /filename="?([^";]+)"?/i.exec(header)
@@ -45,16 +33,10 @@ function saveBlob(blob: Blob, filename: string): void {
   document.body.appendChild(anchor)
   anchor.click()
   document.body.removeChild(anchor)
-  // すぐ revoke するとダウンロードが始まる前に無効化されることがあるので少し待つ
   window.setTimeout(() => URL.revokeObjectURL(url), 10_000)
 }
 
-/**
- * モデルを書き出してダウンロードする。
- *
- * サーバー側は学習スレッドのステップ境界で書き出すため、
- * PPO 更新と重なると 1 秒ほど待たされることがある（学習は止まらない）。
- */
+/** モデルを書き出してダウンロードする。 */
 export async function downloadModel(kind: ExportKind): Promise<ExportOutcome> {
   let response: Response
   try {
@@ -70,13 +52,11 @@ export async function downloadModel(kind: ExportKind): Promise<ExportOutcome> {
   }
 
   if (!response.ok) {
-    // サーバーは失敗時に {"error": "..."} を返す
     let message = `サーバーがエラーを返しました（HTTP ${response.status}）`
     try {
       const body = (await response.json()) as { error?: string }
       if (body?.error) message = body.error
     } catch {
-      /* JSON でなければ既定のメッセージのまま */
     }
     return { ok: false, error: message }
   }
@@ -103,10 +83,6 @@ export async function downloadModel(kind: ExportKind): Promise<ExportOutcome> {
   return { ok: true, filename, sizeBytes: blob.size }
 }
 
-// ---------------------------------------------------------------------------
-// 読み込み（アップロード）
-// ---------------------------------------------------------------------------
-
 /** サーバーが返す、読み込んだチェックポイントの概要 */
 export interface ImportedCheckpoint {
   updates: number
@@ -130,12 +106,7 @@ export interface ImportOutcome {
   backup?: { filename: string; sizeBytes: number } | null
 }
 
-/**
- * 書き出したモデルをアップロードして、その状態から学習を再開する。
- *
- * サーバー側は載せ替える直前に現在のモデルを自動バックアップするので、
- * 間違ったファイルを読み込んでも学習成果は失われない。
- */
+/** 書き出したモデルをアップロードして、その状態から学習を再開する。 */
 export async function importModel(file: File): Promise<ImportOutcome> {
   const form = new FormData()
   form.append('file', file, file.name)

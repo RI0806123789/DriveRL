@@ -1,7 +1,4 @@
-/**
- * 地面。マップの範囲より少し大きい平面を 1 枚敷き、影を受けさせる。
- * ViewTab のトグルでグリッドも出せる。
- */
+/** 地面。マップの範囲より少し大きい平面を 1 枚敷き、影を受けさせる。 */
 
 import { useMemo } from 'react'
 import * as THREE from 'three'
@@ -21,7 +18,6 @@ function groundFromBounds(bounds: MapBounds | null) {
   const h = bounds.maxY - bounds.minY
   const size = Math.max(w, h) * 2.2 + 200
   const cx = (bounds.minX + bounds.maxX) / 2
-  // three.z = -enu.y
   const cz = -((bounds.minY + bounds.maxY) / 2)
   return { size, cx, cz }
 }
@@ -30,9 +26,6 @@ export function Ground({ bounds, showGrid, receiveShadow }: GroundProps) {
   const palette = usePalette()
   const { size, cx, cz } = useMemo(() => groundFromBounds(bounds), [bounds])
 
-  // THREE.Color まで useMemo の中で作る。JSX の中で new すると R3F の args は
-  // 浅い比較なので毎回不一致になり、再レンダリングのたびに gridHelper が
-  // 破棄・再生成される（code_review F-27）
   const gridArgs = useMemo(() => {
     const span = Math.round(size / 2 / 100) * 100 * 2
     const divisions = Math.max(4, Math.round(span / 50))

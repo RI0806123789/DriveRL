@@ -1,10 +1,4 @@
-/**
- * 3D 側から HUD へ渡す値を置く可変オブジェクト。
- *
- * frameBuffer と同じ理由で zustand には入れない。
- * ここへ書くのは 60fps の useFrame、読むのは 4Hz のポーリング（StageHud）なので、
- * React state を経由させると毎秒 60 回の再レンダリングになってしまう。
- */
+/** 3D 側から HUD へ渡す値を置く可変オブジェクト。 */
 
 export interface SceneStats {
   /** 直前フレームのドローコール数（gl.info.render.calls） */

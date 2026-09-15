@@ -1,29 +1,4 @@
-/**
- * CNN が認識した車線を路面へ重ねて描く 3D オーバーレイ。
- *
- * バウンディングボックス（DetectionOverlay）は車線には向かない。車線は細長い
- * 曲線なので矩形では道の形をまったく表せず、認識のずれが見えない。ここでは
- * backend が返す車線中心線の点列（frame.detections の cls===4 の lanePoints）を
- * 実際の車線標示の上へ直接重ね、ずれていればそのままずれて見えるようにする。
- *
- * ★ lanePoints は**自車座標系**（前方 +x / 左 +y）で届く。ジオメトリはこの
- *   ローカル座標のまま作り（RouteLines の buildRibbon をそのまま流用できる。
- *   「前方・左」は「東・北」と同じ右手系の関係にあるため、buildRibbon の
- *   ENU 前提の式がそのまま成り立つ）、**車両の補間済みの位置・向き**（60fps）を
- *   group の transform として毎フレーム乗せる。20Hz の frame をそのまま
- *   使うとカクつくため、scene/interpolation.ts の補間結果を Vehicles.tsx /
- *   RouteLines.tsx と同じやり方で使う。検出点列の作り直し（frame 受信のたび）
- *   と姿勢の更新（毎描画フレーム）を分けるのは RouteLines と同じ設計。
- *
- * ★ polygonOffset の重ね順は CLAUDE.md の表のとおり厳守。進路の矢羽根
- *   （高さ 0.13 / -5,-10）より手前の高さ 0.15 / -6,-12 に置く。
- *   depthTest は切らない（建物の裏まで透けてしまうため）。
- *
- * ★ 追跡中の車両（followTarget）1 台分だけを描く。表示トグルは
- *   DetectionOverlay と同じ view.detections に従うが、**カメラモードは
- *   問わない**（路面に描くので俯瞰・追従でも意味がある。運転席専用の
- *   DetectionOverlay とはここが異なる）。
- */
+/** CNN が認識した車線を路面へ重ねて描く 3D オーバーレイ。 */
 
 import { useEffect, useMemo, useRef } from 'react'
 import { useFrame } from '@react-three/fiber'
@@ -61,15 +36,7 @@ interface RibbonSlot {
   points: number
 }
 
-/**
- * 帯のジオメトリを点列に合わせる。**点数が同じなら作り直さず頂点だけ書き換える。**
- *
- * 車線の点列は毎フレーム変わるが、点数は `LANE_POLYLINE_POINTS`（既定 6）で
- * 固定なので、頂点数も添字も変わらない。それでも `BufferGeometry` ごと
- * 捨てて作り直すと、車線が見えているあいだ毎秒 40 個の GPU バッファを
- * 生成・破棄し続けることになる（code_review S-02）。
- * 認識器を差し替えて点数が変わった場合だけ作り直す。
- */
+/** 帯のジオメトリを点列に合わせる。**点数が同じなら作り直さず頂点だけ書き換える。** */
 function syncRibbon(slot: RibbonSlot, points: Point2[] | null, width: number): boolean {
   if (!points || points.length < 2) {
     slot.geom?.dispose()
@@ -82,7 +49,6 @@ function syncRibbon(slot: RibbonSlot, points: Point2[] | null, width: number): b
     const attr = slot.geom.getAttribute('position') as THREE.BufferAttribute
     writeRibbonPositions(attr.array as Float32Array, points, width, LANE_Y)
     attr.needsUpdate = true
-    // 頂点が動くと境界球が古くなり、フラスタムカリングで消えることがある
     slot.geom.computeBoundingSphere()
     return true
   }
@@ -110,8 +76,6 @@ export function LaneDetectionOverlay() {
     center: { geom: null, points: 0 },
   })
 
-  // 色は palette.ts の 1 か所だけに書く約束（CLAUDE.md）。白線と昼夜どちらでも
-  // 見分けが付く色を usePalette() 経由で読む。帯は半透明、中心線は不透明寄り。
   const ribbonMaterial = useMemo(
     () =>
       new THREE.MeshBasicMaterial({
@@ -150,7 +114,6 @@ export function LaneDetectionOverlay() {
     }
   }, [ribbonMaterial, centerMaterial])
 
-  // アンマウント時に自前のジオメトリも手放す
   useEffect(() => {
     const b = built
     return () => {
@@ -177,8 +140,6 @@ export function LaneDetectionOverlay() {
       return
     }
 
-    // 検出結果は受信フレームが変わったときだけ作り直す。追跡対象を切り替えた
-    // 直後は次の frame を待たず必ず読み直す（DetectionOverlay と同じ理由）
     if (frameBuffer.received !== lastReceived.current || followTarget !== lastFollowTarget.current) {
       lastReceived.current = frameBuffer.received
       lastFollowTarget.current = followTarget
@@ -187,12 +148,10 @@ export function LaneDetectionOverlay() {
       const laneDet = findLaneDetection(dets)
       const points = laneDet?.lanePoints ?? null
 
-      // 点数が同じなら頂点を書き換えるだけ（S-02）。作り直すのは点数が変わったときだけ
       const ok = syncRibbon(built.current.ribbon, points, LANE_WIDTH)
       syncRibbon(built.current.center, points, CENTERLINE_WIDTH)
       hasLane.current = ok
 
-      // mesh に差すのは参照が変わったときだけでよいが、比較のほうが高くつかないので毎回入れる
       if (ribbonMesh.current) {
         ribbonMesh.current.geometry = built.current.ribbon.geom ?? EMPTY_GEOMETRY
       }
@@ -206,8 +165,6 @@ export function LaneDetectionOverlay() {
       return
     }
 
-    // ENU -> three（protocol.md 1.3）。lanePoints は自車座標系のままジオメトリ化
-    // してあるので、車両の位置・向きへ持ち上げるのは group の transform だけでよい
     g.visible = true
     g.position.set(pose.x, 0, -pose.y)
     g.rotation.y = pose.heading

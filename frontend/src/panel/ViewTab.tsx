@@ -1,9 +1,4 @@
-/**
- * 「表示」タブ。カメラワークと描画の重さの調整。
- *
- * 建物は数千件あるので、フレームレートが出ないときはまず影を切るのが効く。
- * その旨をユーザーに伝えるため、トグルに説明文を添えている。
- */
+/** 「表示」タブ。カメラワークと描画の重さの調整。 */
 
 import { useEffect, useState } from 'react'
 import { frameBuffer } from '../store/frameBuffer'
@@ -25,10 +20,6 @@ export function ViewTab() {
   const toggleView = useSimStore((s) => s.toggleView)
   const map = useSimStore((s) => s.map)
 
-  // 追従対象の候補は「いまアクティブなスロット」だけにする。
-  // パネルが畳まれている間は止め（F-10）、集合が変わったときだけ state を
-  // 差し替える（F-11）。毎回新しい配列を作ると 64 個の Chip が 2Hz で
-  // 無条件に再レンダリングされる。
   const panelOpen = useSimStore((s) => s.panelOpen)
   const [activeIds, setActiveIds] = useState<number[]>([])
   useEffect(() => {

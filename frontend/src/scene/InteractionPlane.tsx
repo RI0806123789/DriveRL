@@ -1,14 +1,4 @@
-/**
- * 3D 画面のクリック介入（memo F-05 / 5章「介入も現実の交通現象の一部」）。
- *
- * 地面平面へのレイキャストでクリック位置の ENU 座標を求め、
- * 介入モードに応じて add_obstacle / spawn_vehicle をサーバーへ送る。
- *
- * OrbitControls はキャンバスの DOM イベントを直接見ているので、R3F 側で
- * stopPropagation してもカメラ操作は止められない。そこで
- * 「押してから離すまでの移動量と時間」でクリックとドラッグを区別している。
- * これをやらないと、視点を回すたびにパイロンが置かれてしまう。
- */
+/** 3D 画面のクリック介入（memo F-05 / 5章「介入も現実の交通現象の一部」）。 */
 
 import { useMemo, useRef } from 'react'
 import { useFrame } from '@react-three/fiber'
@@ -49,10 +39,6 @@ export function InteractionPlane({ bounds }: InteractionPlaneProps) {
   const { size, cx, cz } = useMemo(() => planeFromBounds(bounds), [bounds])
 
   const down = useRef<{ x: number; y: number; t: number } | null>(null)
-  // ★ カーソル位置は React state に入れない（code_review F-28）。
-  //   pointermove ごとに setState すると、高ポーリングのマウスでは
-  //   毎秒 100 回以上ツリー全体が再レンダリングされる。
-  //   位置は ref に置き、useFrame で group を直接動かす。
   const cursor = useRef<{ x: number; z: number } | null>(null)
   const ghostRef = useRef<THREE.Group>(null)
 
@@ -70,10 +56,9 @@ export function InteractionPlane({ bounds }: InteractionPlaneProps) {
     const dx = e.nativeEvent.clientX - start.x
     const dy = e.nativeEvent.clientY - start.y
     const moved = Math.hypot(dx, dy)
-    if (moved > DRAG_THRESHOLD_PX) return // カメラを回しただけ
+    if (moved > DRAG_THRESHOLD_PX) return
     if (performance.now() - start.t > CLICK_MAX_MS) return
 
-    // Three -> ENU（protocol.md 1.3 の逆変換）: enu.y = -three.z
     const enuX = e.point.x
     const enuY = -e.point.z
 
@@ -116,11 +101,9 @@ export function InteractionPlane({ bounds }: InteractionPlaneProps) {
         onPointerOut={handlePointerOut}
       >
         <planeGeometry args={[size, size]} />
-        {/* visible={false} なのでマテリアルは当たり判定用の置物 */}
         <meshBasicMaterial transparent opacity={0} depthWrite={false} />
       </mesh>
 
-      {/* 位置は useFrame が直接書き込む。モードと半径が変わったときだけ作り直す */}
       {active && (
         <group ref={ghostRef} visible={false}>
           <Ghost mode={interaction} radius={obstacleRadius} />
@@ -130,17 +113,12 @@ export function InteractionPlane({ bounds }: InteractionPlaneProps) {
   )
 }
 
-// ---------------------------------------------------------------------------
-// カーソル位置のプレビュー
-// ---------------------------------------------------------------------------
-
 function Ghost({ mode, radius }: { mode: 'obstacle' | 'vehicle'; radius: number }) {
   const palette = usePalette()
   const color = mode === 'obstacle' ? palette.obstacleCone : vehicleColor(0)
 
   return (
     <group>
-      {/* 設置位置を示す輪 */}
       <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.05, 0]}>
         <ringGeometry args={[mode === 'obstacle' ? radius * 1.6 : 3.0, mode === 'obstacle' ? radius * 2.1 : 3.5, 32]} />
         <meshBasicMaterial color={color} transparent opacity={0.7} side={THREE.DoubleSide} />
@@ -152,7 +130,6 @@ function Ghost({ mode, radius }: { mode: 'obstacle' | 'vehicle'; radius: number 
           <meshBasicMaterial color={color} transparent opacity={0.45} />
         </mesh>
       ) : (
-        // 車の当たりを示す箱（前方 +X なので長辺が x）
         <mesh position={[0, 0.6, 0]}>
           <boxGeometry args={[4.4, 1.2, 1.86]} />
           <meshBasicMaterial color={color} transparent opacity={0.35} />

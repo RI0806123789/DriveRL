@@ -1,14 +1,4 @@
-/**
- * 最高速度標識の向きと高さを検証する（ブラウザ不要）。
- *
- *     cd frontend
- *     node scripts/verify-sign-geometry.ts
- *
- * 信号機（verify-signal-geometry.ts）と同じ理由で置いてある。標識は
- * 「運転者に正対していない」「裏を向いている」「高さが違う」といった間違いを
- * しても型チェックもビルドも通ってしまうので、実際に three で行列を組み立て、
- * 日本の設置基準に関わる不変条件を数値で確かめる。
- */
+/** 最高速度標識の向きと高さを検証する（ブラウザ不要）。 */
 
 import * as THREE from 'three'
 import {
@@ -61,7 +51,6 @@ console.log('='.repeat(70))
 for (const [name, heading] of HEADINGS) {
   const sign = makeSign(heading)
 
-  // --- 法線が進行方向と向かい合っているか ---
   const [nx, ny, nz] = signBoardNormal(sign)
   const forward = headingVector(heading)
   const dot = nx * forward.x + ny * forward.y + nz * forward.z
@@ -71,8 +60,6 @@ for (const [name, heading] of HEADINGS) {
     `内積 ${dot.toFixed(6)}（-1.0 が完全な正対）`,
   )
 
-  // --- 実際にインスタンス行列を組んでも同じ向きになるか ---
-  // SpeedSigns.tsx と同じ組み方（position + rotation.y = facing）で確かめる
   const dummy = new THREE.Object3D()
   const [bx, by, bz] = signBoardCenter(sign)
   dummy.position.set(bx, by, bz)
@@ -155,7 +142,6 @@ for (const [name, heading] of HEADINGS) {
     Math.abs(bx - px) < 1e-9 && Math.abs(bz - pz) < 1e-9,
     `ずれ ${Math.hypot(bx - px, bz - pz).toFixed(6)}m`,
   )
-  // 支柱の位置は入力の ENU をそのまま three へ移したものであること
   check(
     `${name}: ENU -> three の変換が three.z = -enu.y`,
     Math.abs(px - sign.x) < 1e-9 && Math.abs(pz + sign.y) < 1e-9,
@@ -187,7 +173,6 @@ console.log('='.repeat(70))
     check(`${name}のジオメトリに NaN が無い`, !bad, `${p.count} 頂点`)
   }
 
-  // 標示板は円柱を寝かせて軸を +X に向けてある（前方 = +X の規約）
   board.computeBoundingBox()
   const bb = board.boundingBox!
   check(
@@ -198,7 +183,6 @@ console.log('='.repeat(70))
     `厚み ${(bb.max.x * 2).toFixed(3)}m / 直径 ${(bb.max.y * 2).toFixed(3)}m`,
   )
 
-  // 数字の面は法線 +X。板の前面へ僅かに浮かせてある
   face.computeVertexNormals()
   const n = face.getAttribute('normal')
   check(
@@ -215,7 +199,6 @@ console.log('='.repeat(70))
     `${(lift * 1000).toFixed(1)}mm（板の前面は ${((SIGN_BOARD_THICKNESS / 2) * 1000).toFixed(1)}mm）`,
   )
 
-  // 行列側（SpeedSigns.tsx と同じ組み方）
   let badMatrix = false
   const dummy = new THREE.Object3D()
   for (const [, heading] of HEADINGS) {
@@ -240,7 +223,6 @@ console.log('6. 規制速度 [m/s] から表示する数字 [km/h] への丸め'
 console.log('='.repeat(70))
 
 {
-  // バックエンドは speed_limit を m/s の小数 3 桁で送る。標示板は km/h の整数。
   const CASES: Array<[number, number]> = [
     [5.56, 20],
     [8.33, 30],

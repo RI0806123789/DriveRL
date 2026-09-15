@@ -1,9 +1,4 @@
-"""強化学習パッケージ（共有ポリシー・PPO）。
-
-外部（runtime）からはこのモジュールの re-export だけを使う想定::
-
-    from app.rl import PPOTrainer
-"""
+"""強化学習パッケージ（共有ポリシー・PPO）。"""
 
 from __future__ import annotations
 

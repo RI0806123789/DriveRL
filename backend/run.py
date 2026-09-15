@@ -1,18 +1,4 @@
-"""バックエンドの起動スクリプト。フロントエンドもここから一緒に起動できる。
-
-    cd backend
-    .venv\\Scripts\\python.exe run.py           # バックエンドのみ（ビルド済みを 8000 で配信）
-    .venv\\Scripts\\python.exe run.py --dev     # Vite も一緒に起動する（開発用。5173 を開く）
-    .venv\\Scripts\\python.exe run.py --build   # 先にビルドしてから 8000 で配信
-
-プロジェクト直下の `run.ps1`（PowerShell）/ `run.cmd`（cmd.exe）からも同じことが
-できる（venv のパスを打たずに済む）。
-
-`--reload` は使わない。リロードのたびにシミュレーションスレッドが作り直され、
-学習の途中経過が失われてしまうため（memo 5章「常にオンライン学習を継続」）。
-**`--dev` が動かすのは Vite だけで、バックエンドはリロードしない。**
-フロントを直すと HMR で即反映されるが、学習は途切れない。
-"""
+"""バックエンドの起動スクリプト。フロントエンドもここから一緒に起動できる。"""
 
 from __future__ import annotations
 
@@ -25,7 +11,6 @@ import sys
 import threading
 from pathlib import Path
 
-# `python run.py` でも `app` パッケージを解決できるようにする
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import uvicorn  # noqa: E402
@@ -34,15 +19,11 @@ from app import config  # noqa: E402
 
 FRONTEND_DIR = config.PROJECT_DIR / "frontend"
 DIST_DIR = FRONTEND_DIR / "dist"
-VITE_PORT = 5173  # frontend/vite.config.ts の strictPort と揃えること
+VITE_PORT = 5173
 
 
 def _force_utf8_console() -> None:
-    """Windows のコンソールを UTF-8 にして、日本語ログの文字化けを防ぐ。
-
-    既定のコードページ（日本語環境では cp932）のままだとログが化けるため、
-    出力ストリームとコンソールのコードページの両方を UTF-8 に揃える。
-    """
+    """Windows のコンソールを UTF-8 にして、日本語ログの文字化けを防ぐ。"""
     for stream in (sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure is not None:
@@ -59,11 +40,6 @@ def _force_utf8_console() -> None:
             ctypes.windll.kernel32.SetConsoleCP(65001)
         except Exception:
             pass
-
-
-# ---------------------------------------------------------------------------
-# フロントエンド（Vite）の面倒を見る
-# ---------------------------------------------------------------------------
 
 
 def _find_npm() -> str | None:
@@ -83,11 +59,7 @@ def _frontend_ready(npm: str | None) -> str | None:
 
 
 def _pump_output(proc: subprocess.Popen[str]) -> None:
-    """Vite の出力に `[vite]` を付けて流す。
-
-    uvicorn のログと混ざるので、どちらの出力か分かるようにする。
-    子プロセスを殺した直後に読むと ValueError になることがあるので握る。
-    """
+    """Vite の出力に `[vite]` を付けて流す。"""
     stream = proc.stdout
     if stream is None:
         return
@@ -101,12 +73,7 @@ def _pump_output(proc: subprocess.Popen[str]) -> None:
 
 
 def _spawn_vite(npm: str) -> subprocess.Popen[str] | None:
-    """Vite の開発サーバーを子プロセスとして起動する。
-
-    Windows では新しいプロセスグループで起動する。こうしないとコンソールの
-    Ctrl+C が npm にも飛んでしまい、こちらが後始末をする前に中途半端に死ぬ。
-    代わりに終了時は `_stop_vite()` から明示的に木ごと落とす。
-    """
+    """Vite の開発サーバーを子プロセスとして起動する。"""
     creationflags = 0
     if sys.platform == "win32":
         creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
@@ -129,12 +96,7 @@ def _spawn_vite(npm: str) -> subprocess.Popen[str] | None:
 
 
 def _stop_vite(proc: subprocess.Popen[str] | None) -> None:
-    """Vite を確実に止める。
-
-    Windows の `npm.cmd` は cmd.exe 経由で node を起動するので、
-    `terminate()` だと npm だけ死んで node（実際にポートを掴んでいる方）が残る。
-    次回の起動が `strictPort` で失敗するため、`taskkill /T` で木ごと落とす。
-    """
+    """Vite を確実に止める。"""
     if proc is None or proc.poll() is not None:
         return
 
@@ -165,24 +127,8 @@ def _build_frontend(npm: str) -> bool:
     return True
 
 
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# ポートの事前確認
-#
-# 埋まったまま起動すると、uvicorn の WinError 10048 と Vite のスタックトレースが
-# そのまま流れて「大量のエラーで起動できない」という見え方になる。
-# 原因はたいてい「既に自分で起動してある」なので、先に確かめて短く伝える。
-# ---------------------------------------------------------------------------
-
-
 def _port_taken(port: int) -> bool:
-    """待ち受けているプロセスがあるか。
-
-    bind ではなく connect で確かめる。Vite は IPv6 の ::1 だけで待つことがあり、
-    IPv4 側への bind はそのとき成功してしまって見逃すため。
-    """
+    """待ち受けているプロセスがあるか。"""
     targets = (
         (socket.AF_INET, ("127.0.0.1", port)),
         (socket.AF_INET6, ("::1", port)),
@@ -204,7 +150,6 @@ def _listening_pid(port: int) -> str:
         return ""
     try:
         out = subprocess.run(
-            # -p TCP を付けると IPv4 だけになる。Vite は ::1 で待つので付けない
             ["netstat", "-ano"],
             capture_output=True,
             text=True,
@@ -290,7 +235,6 @@ def main() -> None:
     if args.dev and args.build:
         parser.error("--dev と --build は同時に指定できません（--dev はビルドを使いません）")
 
-    # 何かを起動する前に確かめる。埋まったまま進むとエラーの山になる
     if not _check_ports(dev=args.dev):
         sys.exit(1)
 
@@ -309,7 +253,6 @@ def main() -> None:
     if args.dev:
         problem = _frontend_ready(npm)
         if problem is not None:
-            # バックエンドだけでも動かす価値がある（学習が進む）ので、止めずに知らせる
             print(f"[vite] 起動を飛ばします: {problem}", flush=True)
         else:
             assert npm is not None
@@ -327,15 +270,8 @@ def main() -> None:
             log_level="info",
             ws_ping_interval=20.0,
             ws_ping_timeout=20.0,
-            # ★ 送信側の設定は入れない（code_review R-10）。以前ここにあった
-            #   `ws_max_size` は「送信キューを深めに取る」というコメント付きだったが、
-            #   実際は**受信**メッセージの最大バイト数で送信側には効かない。
-            #   /ws が受け取るのは小さな JSON コマンドだけなので、32MB の上限は
-            #   意図と逆に「クライアントから 32MB の 1 メッセージを受け付ける」
-            #   という緩和にしかなっていなかった。既定（16MB）で足りる。
         )
     finally:
-        # uvicorn は Ctrl+C を受けても正常終了として戻ってくるので、ここで必ず片付ける
         _stop_vite(vite)
 
 

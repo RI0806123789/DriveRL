@@ -1,13 +1,4 @@
-/**
- * 道路メッシュ。
- *
- * 各エッジの polyline と width から「幅を持つリボン」を生成する。
- * 各点で進行方向の法線方向に width/2 だけオフセットして三角形ストリップを張り、
- * 角では前後の方向を平均して法線を作る。
- *
- * エッジは数百〜数千本になるので、mergeGeometries で 1 メッシュにまとめて
- * ドローコールを削減する。地面（y=0）よりわずかに上に置いて z-fighting を避ける。
- */
+/** 道路メッシュ。 */
 
 import { useEffect, useMemo } from 'react'
 import * as THREE from 'three'
@@ -34,10 +25,7 @@ function dedupe(points: Vec2[]): Vec2[] {
   return out
 }
 
-/**
- * ENU の折れ線から、幅 width のリボンジオメトリを作る。
- * Three 座標への変換は x = enu.x, y = height, z = -enu.y（protocol.md 1.3）。
- */
+/** ENU の折れ線から、幅 width のリボンジオメトリを作る。 */
 function buildRibbon(points: Vec2[], width: number, height: number): THREE.BufferGeometry | null {
   const pts = dedupe(points)
   const n = pts.length
@@ -60,7 +48,6 @@ function buildRibbon(points: Vec2[], width: number, height: number): THREE.Buffe
       dx = pts[n - 1][0] - pts[n - 2][0]
       dy = pts[n - 1][1] - pts[n - 2][1]
     } else {
-      // 角では前後の単位ベクトルを足して平均方向にする
       const ax = pts[i][0] - pts[i - 1][0]
       const ay = pts[i][1] - pts[i - 1][1]
       const bx = pts[i + 1][0] - pts[i][0]
@@ -74,7 +61,6 @@ function buildRibbon(points: Vec2[], width: number, height: number): THREE.Buffe
     dx /= len
     dy /= len
 
-    // ENU 平面での左法線
     const nx = -dy
     const ny = dx
 
@@ -85,11 +71,9 @@ function buildRibbon(points: Vec2[], width: number, height: number): THREE.Buffe
     const px = pts[i][0]
     const py = pts[i][1]
     const o = i * 6
-    // 左端
     position[o + 0] = px + nx * half
     position[o + 1] = height
     position[o + 2] = -(py + ny * half)
-    // 右端
     position[o + 3] = px - nx * half
     position[o + 4] = height
     position[o + 5] = -(py - ny * half)
@@ -139,7 +123,6 @@ function buildRoadGeometries(edges: MapEdge[]): RoadGeometries {
     const g = buildRibbon(e.polyline, width, ROAD_Y)
     if (g) surfaces.push(g)
 
-    // 対面通行かつ 2 車線以上なら中央線を薄く引く
     if (!e.oneway && e.lanes >= 2) {
       const c = buildRibbon(e.polyline, CENTERLINE_WIDTH, CENTERLINE_Y)
       if (c) centers.push(c)
@@ -149,7 +132,6 @@ function buildRoadGeometries(edges: MapEdge[]): RoadGeometries {
   const surface = surfaces.length ? mergeGeometries(surfaces, false) : null
   const centerline = centers.length ? mergeGeometries(centers, false) : null
 
-  // マージ後は元のジオメトリを解放する
   for (const g of surfaces) g.dispose()
   for (const g of centers) g.dispose()
 
@@ -182,12 +164,6 @@ export function RoadNetwork({ edges, receiveShadow }: RoadNetworkProps) {
           roughness={0.94}
           metalness={0.02}
           side={THREE.DoubleSide}
-          // ★ 地面（y=0）との Z ファイティング対策。
-          //   路面は 2cm しか浮いていないが、near=0.5 / far=8000 では
-          //   24bit 深度バッファでも 531m 先で 3.41cm しか区別できない。
-          //   高さを離すと車両（y=0 基準）が路面に埋まるので、
-          //   深度値そのものを手前へ押す。polygonOffset はバッファの
-          //   最小単位で押すため **視点距離によらず効く**。
           polygonOffset
           polygonOffsetFactor={-1}
           polygonOffsetUnits={-2}
@@ -200,7 +176,6 @@ export function RoadNetwork({ edges, receiveShadow }: RoadNetworkProps) {
             roughness={0.8}
             metalness={0}
             side={THREE.DoubleSide}
-            // 路面よりさらに手前。地面 < 路面 < 中央線 < 白線標示 の順を保つ
             polygonOffset
             polygonOffsetFactor={-2}
             polygonOffsetUnits={-4}

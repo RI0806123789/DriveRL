@@ -1,8 +1,4 @@
-/**
- * Material 3 Expressive のボタン。
- * 押下すると角丸が縮んでわずかに潰れ（形が変わる表現）、押した点から波紋が広がる。
- * 見た目は global.css の .m3-btn 系クラスで実装している。
- */
+/** Material 3 Expressive のボタン。 */
 
 import type { ButtonHTMLAttributes, PointerEvent, ReactNode } from 'react'
 import { startRipple } from './motion'

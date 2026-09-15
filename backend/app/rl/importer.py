@@ -1,20 +1,4 @@
-"""書き出したモデルファイルの読み込み（学習の再開）。
-
-`app/rl/export.py` が書き出した `.pt` を受け取り、中身を検証してから
-`PPOTrainer` へ載せ替えるための下ごしらえを行う。
-
-扱えるのは `checkpoint` 形式（`.pt`）だけ。TorchScript や Keras 形式は推論専用で
-オプティマイザ状態を持たないため学習を再開できない。取り違えたときに
-「壊れています」ではなく理由が分かるよう、形式を見分けて案内する。
-
-このモジュールが扱うファイルは **ユーザーがアップロードしたもの** である。
-`torch.load` は既定でピクルを実行するため、任意コード実行の入口になりうる。
-そこでここでは必ず `weights_only=True` で解析し、テンソルと素の Python 値しか
-入っていないことを確認してから先へ進める。
-
-（`export.py` が `torch.__version__` を `str()` で包んでいるのはこのため。
-  TorchVersion オブジェクトのままだと安全モードで弾かれてしまう。）
-"""
+"""書き出したモデルファイルの読み込み（学習の再開）。"""
 
 from __future__ import annotations
 
@@ -33,7 +17,6 @@ __all__ = ["CheckpointImportError", "CheckpointInfo", "inspect_checkpoint", "MAX
 
 logger = logging.getLogger(__name__)
 
-# アップロードを受け付ける最大サイズ。実測で 1 ファイル約 0.6MB なので十分な余裕。
 MAX_UPLOAD_BYTES = 256 * 1024 * 1024
 
 
@@ -68,10 +51,7 @@ class CheckpointInfo:
 
 
 def _looks_like_keras(path: Path) -> bool:
-    """Keras の .keras（zip）を渡されたかどうかを見分ける。
-
-    keras を import せずに済むよう、zip の中身だけで判定する。
-    """
+    """Keras の .keras（zip）を渡されたかどうかを見分ける。"""
     try:
         with zipfile.ZipFile(path) as archive:
             names = set(archive.namelist())
@@ -81,24 +61,12 @@ def _looks_like_keras(path: Path) -> bool:
 
 
 def _looks_like_torchscript(path: Path) -> bool:
-    """TorchScript ファイルを間違って渡されたかどうかを見分ける。
-
-    ユーザーの手元には `.pt` と `.torchscript.pt` の 2 つが並んでいるので、
-    取り違えは十分起こりうる。「読めません」で終わらせず、どちらを選ぶべきか伝えたい。
-
-    ★ **`torch.jit.load()` を呼ばない**（code_review L-05）。SECURITY.md と README は
-      「受け取ったファイルは**必ず** `weights_only=True` で解析する」と宣言している
-      のに、ここだけがユーザー提供ファイルを C++ のデシリアライザへ渡していた。
-      案内文を親切にするためだけの呼び出しで、宣言に例外を作るには見合わない。
-      `_looks_like_keras()` と同じく zip の namelist だけで判定できる:
-      本物の TorchScript は `code/` 配下と `constants.pkl` を持ち、
-      `torch.save` のチェックポイントはどちらも持たない（実測で確認）。
-    """
+    """TorchScript ファイルを間違って渡されたかどうかを見分ける。"""
     try:
         with zipfile.ZipFile(path) as archive:
             names = archive.namelist()
     except Exception:
-        return False  # zip ですらない（旧 pickle 形式の .pt など）
+        return False
     return any(n.endswith("constants.pkl") for n in names) and any(
         "/code/" in n for n in names
     )
@@ -111,11 +79,7 @@ def inspect_checkpoint(
     expected_action_dim: int,
     expected_hidden_sizes: Sequence[int],
 ) -> CheckpointInfo:
-    """チェックポイントを安全に解析し、このアプリに載せられるか検証する。
-
-    Raises:
-        CheckpointImportError: 読めない、または形が合わないとき（理由は日本語で入る）
-    """
+    """チェックポイントを安全に解析し、このアプリに載せられるか検証する。"""
     path = Path(path)
     if not path.exists():
         raise CheckpointImportError("ファイルが見つかりません")
@@ -129,7 +93,6 @@ def inspect_checkpoint(
             f"上限は {MAX_UPLOAD_BYTES // 1024 // 1024} MB です"
         )
 
-    # --- 安全モードで解析する（ピクルの任意コード実行を通さない） ---
     try:
         payload = torch.load(path, map_location="cpu", weights_only=True)
     except Exception as exc:
@@ -163,9 +126,6 @@ def inspect_checkpoint(
             "このアプリが書き出した「重み一式（.pt）」を選んでください"
         )
 
-    # 形式の識別子。**未知でも欠けていても拒否はしない。**
-    # 以前は保存経路によって int の 1 と文字列が混在しており、
-    # 手元に両方のファイルが残っているため（形が合わなければ下の次元チェックで落ちる）
     fmt = payload.get("format")
     if fmt is None:
         logger.warning("形式の識別子が入っていないチェックポイントです: %s", path.name)
@@ -179,12 +139,8 @@ def inspect_checkpoint(
         action_dim = int(payload["action_dim"])
         hidden_sizes = [int(h) for h in payload["hidden_sizes"]]
     except (TypeError, ValueError, OverflowError) as exc:
-        # ★ `OverflowError` を忘れないこと（code_review L-07）。
-        #   `int(float("inf"))` が投げるのは ValueError ではなくこちらで、
-        #   捕まえ損ねるとユーザーへの案内ではなく素の例外になる
         raise CheckpointImportError("チェックポイントのモデル定義が壊れています") from exc
 
-    # --- このアプリのネットワークと形が一致するか ---
     if obs_dim != expected_obs_dim:
         raise CheckpointImportError(
             f"観測ベクトルの次元が違います（ファイル: {obs_dim} / このアプリ: {expected_obs_dim}）。"

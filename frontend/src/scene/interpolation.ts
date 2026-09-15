@@ -1,13 +1,4 @@
-/**
- * フレーム間補間（memo 5章「学習頻度と描画頻度の関係」）
- *
- * サーバーは 20Hz、描画は 60fps。そのまま描くとカクつくので、
- * 前フレーム(prev)と最新フレーム(curr)の間を線形補間して滑らかに見せる。
- *
- * 表示は意図的に 1 フレーム分（既定 50ms）遅れる。
- * 「curr に向かって進む」外挿ではなく「prev → curr を追いかける」内挿にすることで、
- * サーバーの配信ジッタで車がガタつくのを防ぐ。
- */
+/** フレーム間補間（memo 5章「学習頻度と描画頻度の関係」） */
 
 import type { VehicleState } from '../types/protocol'
 import { frameBuffer } from '../store/frameBuffer'
@@ -52,32 +43,24 @@ function lerp(a: number, b: number, t: number): number {
   return a + (b - a) * t
 }
 
-/**
- * 現在時刻における補間係数 alpha を求める。
- * @param renderPaused 一時停止中は補間を進めない（memo 5章: 一時停止は描画のみ）
- */
+/** 現在時刻における補間係数 alpha を求める。 */
 export function computeAlpha(nowMs: number, renderPaused: boolean): number {
   if (renderPaused) return 1
   const dt = frameBuffer.intervalMs
   if (dt <= 0) return 1
   const t = (nowMs - frameBuffer.currTime) / dt
-  // 外挿しない。遅延到着で 1 を超えたら最新値で止める
   return t <= 0 ? 0 : t >= 1 ? 1 : t
 }
 
 function findVehicle(list: VehicleState[] | undefined, id: number): VehicleState | undefined {
   if (!list) return undefined
-  // vehicles は常に全スロット分・スロット番号順で来る想定なので、まず添字を試す
   const guess = list[id]
   if (guess && guess.id === id) return guess
   for (const v of list) if (v.id === id) return v
   return undefined
 }
 
-/**
- * スロット id の車両姿勢を補間して out に書き込む。
- * @returns 描画すべきなら true（非アクティブ／データ無しなら false）
- */
+/** スロット id の車両姿勢を補間して out に書き込む。 */
 export function sampleVehicle(
   id: number,
   alpha: number,
@@ -98,7 +81,6 @@ export function sampleVehicle(
   out.goalY = cv.goal[1]
   out.teleported = false
 
-  // 前フレームが無い / 直前まで非アクティブ（= 今スポーンした）なら補間しない
   if (!pv || !pv.active) {
     out.x = cv.x
     out.y = cv.y
@@ -109,7 +91,6 @@ export function sampleVehicle(
     return true
   }
 
-  // 大きく飛んだら respawn とみなして瞬間移動させる
   const dx = cv.x - pv.x
   const dy = cv.y - pv.y
   if (dx * dx + dy * dy > TELEPORT_DISTANCE_M * TELEPORT_DISTANCE_M) {

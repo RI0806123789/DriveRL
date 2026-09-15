@@ -1,38 +1,9 @@
 # -*- coding: utf-8 -*-
-"""world の真値から「理想の検出結果」を作る。
-
-★ **この関数は 2 つの役割を兼ねる。** 互換のための逃げ道ではない。
-
-  1. 認識器（`percep/detector.py`）の**教師データ**
-  2. 認識器がまだ学習できていないときの**フォールバック**
-     （`config.PERCEP_FALLBACK_GROUND_TRUTH`）
-
-  同じ関数を両方に使うのが要点で、分けてはいけない。分けると
-  「フォールバックでは走れるのに、学習した認識器に差し替えると走れない」
-  という食い違いが生まれ、原因が認識器なのか教師データなのか切り分けられなくなる。
-  この設計のおかげで「まず走らせる → 教師データを集める → 認識器を学習する →
-  差し替える」という順序で立ち上げられる。
-
-投影の作法
-----------
-`percep/camera.py` の `PseudoCamera` と**同じ透視投影**を使う。両者がずれると、
-画像に写っていない場所に正解の箱が付く＝**学習不能な教師データ**になる。
-かつては「camera.py が未完成のあいだ実装が止まらないよう」ここに自己完結で
-書いてあったが、**いまは `percep/geometry.py` が唯一の実装**で、描く側も
-ラベルを付ける側もそこを呼ぶ（code_review C-06）。同じ理由で、正対の判定は
-`percep/types.py` の `facing_viewer()`、信号機・標識の実寸も `percep/types.py`。
-
-座標系（docs/protocol.md 1章）:
-    ENU 平面・メートル・x=東 / y=北 / heading は +x 軸から反時計回り。
-    自車座標系は「前方 +x / 左 +y」。カメラは heading 方向を向き、
-    `CameraSpec.pitch` だけ下を向く。
-
-3D の寸法はフロントエンドの `scene/signalGeometry.ts` / `scene/signGeometry.ts`
-と一致させてある。**片方だけ変えると、画面の見た目と検出枠がずれる。**
-"""
+"""world の真値から「理想の検出結果」を作る。"""
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Sequence
@@ -60,8 +31,9 @@ from app.percep.types import (
     pack_by_class_quota,
 )
 
-if TYPE_CHECKING:  # 実行時に import しない（sim -> percep の循環を避けるため）
+if TYPE_CHECKING:
     from app.sim.world import World
+
 
 __all__ = [
     "clear_static_cache",
@@ -70,70 +42,32 @@ __all__ = [
     "freespace_ground_truth",
 ]
 
+logger = logging.getLogger("autoware_sim")
 
-# ★ 信号機・標識の実寸（`SIGNAL_*` / `SIGN_*`）は `percep/types.py` にある
-#   （code_review C-03）。ここと `camera.py` が同じ値を別々に持っていたため、
-#   片方だけ直す事故が起こりうる状態だった。標識は camera が `config` 由来・
-#   ここがハードコードで、`config` を触ると黙ってずれる形になっていた。
-#   **値を変えるときは `percep/types.py` と `frontend/src/scene/*Geometry.ts` の両方。**
+_WARNED: set[str] = set()
 
-# ---------------------------------------------------------------------------
-# 検出の可視条件
-# ---------------------------------------------------------------------------
 
-# ★ 正対の判定（`FACING_TOLERANCE` と `facing_viewer()`）は `percep/types.py` にある
-#   （code_review C-01）。描く側（`camera.py`）とラベルを付ける側（ここ）が
-#   別々の式を持っていて、**同じ灯器が片方では描かれ片方では除外される**
-#   状態になっていたので、`LANE_LOOKAHEAD_M` と同じく共有の場所へ移した。
-#   **片方だけ変えないこと。** ここは `facing_viewer()` を呼ぶだけにしてある。
+def _warn_once(key: str, message: str) -> None:
+    """同じ失敗を初回だけログに残す（code_review B-15 / E-01 / E-02）。"""
+    if key in _WARNED:
+        return
+    _WARNED.add(key)
+    logger.exception(message)
 
-#: これより小さい箱は検出扱いにしない [px]。
-#: 幅 192px・水平画角 68 度では焦点距離 142.3px なので、
-#: 1.16m の灯器は 60m 先で 2.75px、0.6m の標識は 20m 先で 4.3px になる。
-#: ここを 0 にすると「1px に満たない＝画像に情報が無いもの」まで正解に含まれ、
-#: 認識器に**原理的に学習できない目標**を与えることになる。
+
 MIN_BOX_PX = 1.5
 
-# ★ `LANE_LOOKAHEAD_M` と `LANE_POLYLINE_POINTS` は `percep/types.py` にある
-#   （code_review Q-10）。認識器（`detector.py`）が同じ値を別に持っていて
-#   「揃えること」というコメントだけで担保されていたのを 1 か所へまとめた。
-#   ずれると「認識器の車線だけ長さや点数が違う」という形で出るが、
-#   型でもビルドでも捕まらない。
-#: 車線の見た目の半幅 [m]（車線幅 3.2m 相当）
 LANE_HALF_WIDTH_M = 1.6
-#: 車線をサンプルする間隔 [m]
 LANE_SAMPLE_M = 2.5
 
-#: 遮蔽判定のサンプル間隔 [m]。建物の裏の信号を「見えている」ことにしないため。
 OCCLUSION_STEP_M = 2.0
-#: 遮蔽判定の最大サンプル数（遠方でも打ち切る）
 OCCLUSION_MAX_SAMPLES = 64
 
-
-#: 走行可能領域を測る向き（heading からの相対角 [rad]）。
-#: config.OBS_FREESPACE_DIM 本を前方 ±90 度に等分する。
-#: ★ ±90 度は水平画角 68 度より広い。**両端は画像に写っていない**ので、
-#:   認識器は端の 2〜3 本を画像から推定できない（報告書の懸念を参照）。
 FREESPACE_ANGLES = np.linspace(
     -math.pi / 2.0, math.pi / 2.0, config.OBS_FREESPACE_DIM, dtype=np.float32
 )
 
-#: 車両を走行可能領域のレイで遮る円の半径 [m]。
-#: 長方形（4.4 x 1.8）を円で近似する。長さで取ると横に広がりすぎ、
-#: 幅で取ると前後に短すぎるので平均を使う。
 VEHICLE_BLOCK_RADIUS = (config.VEHICLE_LENGTH + config.VEHICLE_WIDTH) * 0.25
-
-
-# ---------------------------------------------------------------------------
-# カメラ
-# ---------------------------------------------------------------------------
-#
-# ★ 姿勢（`CameraPose` / `camera_pose()`）と透視投影（`project_points()`）は
-#   `percep/geometry.py` にある（code_review C-06）。このモジュールの冒頭が
-#   「後で共通化する前提」と書いていたとおりに 1 本へまとめたもので、
-#   `camera.py`（描く側）も同じ実装を呼ぶ。**片方だけ変えないこと。**
-#   ここでは import して使うだけで、`__all__` には載せない。
-#   同じものへの入口を 2 つ作るのは、まさに C-06 が言っている状態だから。
 
 
 def _box_from_points(
@@ -143,12 +77,7 @@ def _box_from_points(
     *,
     require_all_in_front: bool = True,
 ) -> tuple[float, float, float, float] | None:
-    """点群を囲む正規化 BBox を返す。視野外・背後・小さすぎるものは None。
-
-    `require_all_in_front=True` は「近接平面をまたぐ物体は捨てる」という意味。
-    信号・標識・車両のような小さい物体では、またいだ時点でほぼ画面外なので
-    素直に捨てたほうが正しい。車線のように大きく広がるものだけ False にする。
-    """
+    """点群を囲む正規化 BBox を返す。視野外・背後・小さすぎるものは None。"""
     u, v, depth = project_points(pose, spec, points)
     front = depth > spec.near
     if require_all_in_front:
@@ -164,14 +93,11 @@ def _box_from_points(
     y0 = float(np.min(v))
     y1 = float(np.max(v))
 
-    # 画面外（完全に外れている）
     if x1 <= 0.0 or y1 <= 0.0 or x0 >= spec.width or y0 >= spec.height:
         return None
-    # 小さすぎて画像に情報が残らない
     if (x1 - x0) < MIN_BOX_PX and (y1 - y0) < MIN_BOX_PX:
         return None
 
-    # 画面内へ切り詰めてから正規化座標にする
     x0 = min(max(x0, 0.0), float(spec.width))
     x1 = min(max(x1, 0.0), float(spec.width))
     y0 = min(max(y0, 0.0), float(spec.height))
@@ -181,44 +107,20 @@ def _box_from_points(
     return (x0 / spec.width, y0 / spec.height, x1 / spec.width, y1 / spec.height)
 
 
-# ---------------------------------------------------------------------------
-# マップ由来の静的な 3D 形状（毎ステップ組み直さないためのキャッシュ）
-# ---------------------------------------------------------------------------
-
-
 @dataclass(frozen=True)
 class _StaticScene:
-    """信号・標識の 3D 位置をあらかじめ配列にしたもの。
+    """信号・標識の 3D 位置をあらかじめ配列にしたもの。"""
 
-    毎ステップ・毎車両で `MapData.signals` を走査すると、金沢（灯器 2,736 基）
-    では Python のループだけで予算を使い切る。マップは走行中変わらないので
-    一度だけ作る。
-    """
-
-    # 信号: 灯器筐体の中心 (S, 3) と、幅方向の単位ベクトル (S, 2)
     signal_head: np.ndarray
     signal_across: np.ndarray
     signal_heading: np.ndarray
-    signal_stop: np.ndarray       # 停止線の位置 (S, 2)
-    # 標識: 標示板の中心 (G, 3)、幅方向 (G, 2)、規制速度 (G,)
+    signal_stop: np.ndarray
     sign_board: np.ndarray
     sign_across: np.ndarray
     sign_heading: np.ndarray
     sign_limit: np.ndarray
 
 
-#: (map_index, _StaticScene) の 1 件キャッシュ。マップは同時に 1 つしか
-#: 読まれないので 1 件で足りる。タプルの差し替えは CPython では不可分なので、
-#: 別スレッドから読まれても owner と scene がちぐはぐになることはない。
-#:
-#: ★ **これは「1 プロセスに `SimulationEnv` は 1 つ」という運用の前提に乗った
-#:   設計で、コードはその制約を強制していない**（code_review P-06）。
-#:   当たり外れは `map_index` の identity 比較だけで決まるので、テストや
-#:   `train_detector.py` の中で複数の `map_index` を同時に扱うと、片方の env が
-#:   別の env のキャッシュを黙って再利用しうる。**複数マップを行き来する
-#:   コードを書くときは切り替えのたびに `clear_static_cache()` を呼ぶこと。**
-#:   恒久的に複数マップを同時に扱うなら、キャッシュを `World` か
-#:   `SimulationEnv` のインスタンスへ紐づける設計に変えること。
 _STATIC_CACHE: tuple[object, _StaticScene] | None = None
 
 
@@ -229,11 +131,7 @@ def clear_static_cache() -> None:
 
 
 def _build_static_scene(map_index) -> _StaticScene:
-    """`MapData` から信号・標識の 3D 形状を組み立てる。
-
-    信号の灯器位置は `frontend/src/scene/signalGeometry.ts` と同じ式で置く:
-        交差点中心から進行方向へ (road_width/2 + 2.0)、さらに左へ road_width*0.25。
-    """
+    """`MapData` から信号・標識の 3D 形状を組み立てる。"""
     data = getattr(map_index, "data", None)
     signals = list(getattr(data, "signals", []) or [])
     signs = list(getattr(data, "signs", []) or [])
@@ -248,7 +146,6 @@ def _build_static_scene(map_index) -> _StaticScene:
         cx, cy = node_xy.get(int(sig.node_id), (float(sig.x), float(sig.y)))
         cos_h = math.cos(float(sig.heading))
         sin_h = math.sin(float(sig.heading))
-        # 進行方向の左（ENU では反時計回りに 90 度）
         left_x, left_y = -sin_h, cos_h
         beyond = float(sig.road_width) * 0.5 + SIGNAL_BEYOND_MARGIN
         offset = float(sig.road_width) * 0.25
@@ -293,22 +190,57 @@ def _static_scene(map_index) -> _StaticScene:
     return scene
 
 
-# ---------------------------------------------------------------------------
-# 遮蔽（建物の裏にあるものを「見えている」ことにしない）
-# ---------------------------------------------------------------------------
+def _blocked_by_fleet(
+    world: "World",
+    eye: tuple[float, float],
+    targets: np.ndarray,
+    viewer: int,
+    exclude: np.ndarray | None = None,
+) -> np.ndarray:
+    """視線が**他車の車体**で遮られているターゲットを True で返す。shape (T,)。
+
+    `_line_of_sight` は建物レイヤの占有グリッドしか見ないので、動く物体はここで見る
+    （code_review C-07）。遮蔽物を車両に限るのは、実測で「箱の領域に当該クラスの
+    画素が無い」障害物 681 件のうち **672 件（98.7%）が他車の陰**だったため。
+    パイロン（高さ 0.75m）は 2D の線分交差では信号・標識まで隠してしまい、
+    過剰に遮蔽する側へ倒れるので遮蔽物には含めない。
+
+    `exclude` は「そのターゲット自身である車両のスロット番号」（無ければ -1）。
+    自分自身の車体で自分が隠れる、という判定を避ける。
+    """
+    t = int(targets.shape[0])
+    if t == 0:
+        return np.zeros(0, dtype=bool)
+    fleet = world.fleet
+    occ = np.flatnonzero(fleet.active)
+    occ = occ[occ != int(viewer)]
+    if occ.size == 0:
+        return np.zeros(t, dtype=bool)
+
+    corners = fleet.corners()[occ].astype(np.float64)
+    q1 = corners.reshape(-1, 2)
+    q2 = np.roll(corners, -1, axis=1).reshape(-1, 2)
+    owner = np.repeat(occ.astype(np.int64), 4)
+
+    p1 = np.array(eye, dtype=np.float64)
+    d1 = targets.astype(np.float64) - p1
+    d2 = q2 - q1
+
+    cross = d1[:, None, 0] * d2[None, :, 1] - d1[:, None, 1] * d2[None, :, 0]
+    diff = q1[None, :, :] - p1[None, None, :]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        tt = (diff[..., 0] * d2[None, :, 1] - diff[..., 1] * d2[None, :, 0]) / cross
+        uu = (diff[..., 0] * d1[:, None, 1] - diff[..., 1] * d1[:, None, 0]) / cross
+    eps = 1e-6
+    hit = np.isfinite(tt) & np.isfinite(uu)
+    hit &= (tt > eps) & (tt < 1.0 - eps) & (uu >= 0.0) & (uu <= 1.0)
+    if exclude is not None:
+        hit &= owner[None, :] != exclude[:, None]
+    return hit.any(axis=1)
 
 
 def _line_of_sight(map_index, eye: tuple[float, float], targets: np.ndarray) -> np.ndarray:
-    """視線が建物を貫いていないターゲットを True で返す。shape (M,)。
-
-    占有グリッド（`OccupancyGrid.building`）を線分上で数点だけ拾う近似。
-    厳密な遮蔽ではないが、**遮蔽を一切考えないと「建物の裏の信号が見える」
-    教師データ**になり、画像には写っていないものを検出しろと教えることになる。
-    症状は「認識器の精度が上がらない」だけで、原因が教師データ側にあることに
-    外から気づけないので、粗くても入れておく。
-
-    グリッドが無い / 失敗した場合はすべて可視とみなす（走行は続けられる）。
-    """
+    """視線が建物を貫いていないターゲットを True で返す。shape (M,)。"""
     m = int(targets.shape[0])
     if m == 0:
         return np.zeros(0, dtype=bool)
@@ -320,20 +252,19 @@ def _line_of_sight(map_index, eye: tuple[float, float], targets: np.ndarray) -> 
     dy = targets[:, 1] - eye[1]
     dist = np.hypot(dx, dy)
     steps = int(min(OCCLUSION_MAX_SAMPLES, max(2, math.ceil(float(np.max(dist)) / OCCLUSION_STEP_M))))
-    # 端点（カメラ自身と対象そのもの）は含めない。対象は建物に接して立つため
     t = np.linspace(0.0, 1.0, steps + 2, dtype=np.float64)[1:-1]
     sample_x = eye[0] + dx[:, None] * t[None, :]
     sample_y = eye[1] + dy[:, None] * t[None, :]
     try:
         blocked = grid.sample_building(sample_x, sample_y)
     except Exception:
+        _warn_once(
+            "line_of_sight",
+            "遮蔽判定に失敗しました。以後この画では遮蔽を考えず、"
+            "建物の裏の物体にも正解ラベルが付きます（初回のみ記録）",
+        )
         return np.ones(m, dtype=bool)
     return ~np.asarray(blocked, dtype=bool).reshape(m, -1).any(axis=1)
-
-
-# ---------------------------------------------------------------------------
-# クラスごとの検出
-# ---------------------------------------------------------------------------
 
 
 def _detect_signals(
@@ -350,9 +281,6 @@ def _detect_signals(
     dy = scene.signal_stop[:, 1] - eye[1]
     dist = np.hypot(dx, dy)
     heading = float(world.fleet.heading[slot])
-    # 正対しているものだけ（裏を向いた灯器・通り過ぎた灯器は灯色が読めない）。
-    # ★ 位置は灯器そのもの（`signal_head`）で見る。`camera.py` が描くのはこの点で、
-    #   距離に使う `signal_stop`（停止線）とは road_width/2 + 2m ずれている。
     facing = facing_viewer(
         scene.signal_head[:, 0],
         scene.signal_head[:, 1],
@@ -396,8 +324,6 @@ def _detect_signals(
                     x0=box[0], y0=box[1], x1=box[2], y1=box[3],
                     confidence=1.0,
                     phase=phase,
-                    # ★ 停止線までの水平距離。灯器そのものまでの距離ではない
-                    #   （観測は「停止線までの距離」を必要とするため）
                     distance=float(dist[idx]),
                 ),
             )
@@ -479,12 +405,6 @@ def _detect_vehicles(
     if near.size == 0:
         return out
 
-    # ★ 信号・標識と同じ遮蔽判定を通す（code_review C-02）。
-    #   描画はペインターズアルゴリズム（`camera.py` の深度降順ソート）なので、
-    #   建物の裏にいる車は手前の壁に確実に上書きされて**画像から完全に消える**。
-    #   通さないと「画像に写っていないものを検出しろ」と教えることになる。
-    #   教師データを集めるときは車を寄せ集めるので、ここが一番効く場面になる
-    #   （銀座・200 ステップ × 8 台の密集配置で車両ラベルの 7.1% が該当した）。
     visible = _line_of_sight(
         world.map_index,
         eye,
@@ -494,10 +414,15 @@ def _detect_vehicles(
     if near.size == 0:
         return out
 
-    corners_all = fleet.corners()  # (N, 4, 2)
+    centers = np.column_stack((fleet.x[near], fleet.y[near])).astype(np.float64)
+    near = near[~_blocked_by_fleet(world, eye, centers, slot, exclude=near.astype(np.int64))]
+    if near.size == 0:
+        return out
+
+    corners_all = fleet.corners()
     height = float(config.VEHICLE_HEIGHT)
     for other in near:
-        flat = corners_all[int(other)].astype(np.float64)  # (4, 2)
+        flat = corners_all[int(other)].astype(np.float64)
         pts = np.empty((8, 3), dtype=np.float64)
         pts[:4, :2] = flat
         pts[:4, 2] = 0.0
@@ -522,7 +447,7 @@ def _detect_vehicles(
 
 
 def _detect_obstacles(
-    world: "World", spec: CameraSpec, pose: CameraPose
+    world: "World", slot: int, spec: CameraSpec, pose: CameraPose
 ) -> list[tuple[float, Detection]]:
     """ユーザーが置いたパイロン。円柱を視線に垂直な板で近似する。"""
     out: list[tuple[float, Detection]] = []
@@ -539,8 +464,10 @@ def _detect_obstacles(
     near = np.flatnonzero(dist <= spec.far)
     if near.size == 0:
         return out
-    # 車両と同じ理由で遮蔽を見る（code_review C-02）
     near = near[_line_of_sight(world.map_index, eye, xy[near].astype(np.float64))]
+    if near.size:
+        pts = xy[near].astype(np.float64)
+        near = near[~_blocked_by_fleet(world, eye, pts, slot)]
 
     for i in near:
         i = int(i)
@@ -548,7 +475,6 @@ def _detect_obstacles(
         if d < 1e-3:
             continue
         radius = float(world.obstacles[i].radius) if i < len(world.obstacles) else config.OBSTACLE_RADIUS
-        # 視線に垂直な水平方向（円柱の見かけの幅はこの向きに広がる）
         ax, ay = -dy[i] / d, dx[i] / d
         cx, cy = float(xy[i, 0]), float(xy[i, 1])
         pts = np.array(
@@ -580,11 +506,7 @@ def _detect_obstacles(
 def _detect_lane(
     world: "World", slot: int, spec: CameraSpec, pose: CameraPose
 ) -> tuple[float, Detection] | None:
-    """走行車線。経路（＝車線中心線）への射影から作る。
-
-    `lateral` には `world.lateral[slot]`（左が正の符号付き横方向偏差 [m]）を
-    そのまま入れる。ここが観測の車線項の真値になる。
-    """
+    """走行車線。経路（＝車線中心線）への射影から作る。"""
     state = world.slots[int(slot)]
     route = state.route
     if route.shape[0] < 2:
@@ -594,21 +516,15 @@ def _detect_lane(
 
     offsets = np.arange(0.0, LANE_LOOKAHEAD_M + 1e-6, LANE_SAMPLE_M, dtype=np.float64)
     targets = arc + offsets
-    # ★ 経路の総延長を超えるサンプルは捨てる（code_review P-04）。
-    #   `np.interp` は外挿せず終端の値でクランプするので、目的地の直前
-    #   （残り 25m 未満）ではサンプル後半が同じ 1 点へ収束し、そこから取る
-    #   接線 `np.gradient` がほぼ 0 になる。`norm` の下駄で例外にはならないが、
-    #   車線の左右方向 `lx, ly` が不安定になって帯の向きと終端がぶれる。
     usable = int(np.count_nonzero(targets <= cum[-1]))
     if usable < 2:
-        return None  # 目的地に着く寸前。車線としてたどれる長さが残っていない
+        return None
     targets = targets[:usable]
     cx = np.interp(targets, cum, route[:, 0])
     cy = np.interp(targets, cum, route[:, 1])
     if cx.size < 2:
         return None
 
-    # 各サンプル点の接線から左右へ広げて「車線の帯」にする
     tx = np.gradient(cx)
     ty = np.gradient(cy)
     norm = np.maximum(np.hypot(tx, ty), 1e-6)
@@ -622,14 +538,9 @@ def _detect_lane(
     if box is None:
         return None
 
-    # 見えている車線の前方距離。交差点やカーブで短くなるので、
-    # 「どこまで車線をたどれるか」の目安になる
     _, _, depth = project_points(pose, spec, pts3)
     visible_depth = float(np.max(depth[depth > spec.near])) if np.any(depth > spec.near) else 0.0
 
-    # --- 路面へ重ねて描くための中心線（自車座標系 前方 +x / 左 +y）---
-    # ★ ここを送らないと、フロントは車線を**矩形でしか描けない**。
-    #   車線は細長い曲線なので、ボックスでは認識のずれが見えない。
     fleet = world.fleet
     ox = float(fleet.x[int(slot)])
     oy = float(fleet.y[int(slot)])
@@ -639,7 +550,7 @@ def _detect_lane(
     stride = max(1, int(round(cx.size / max(LANE_POLYLINE_POINTS, 1))))
     keep = np.arange(0, cx.size, stride)
     if keep[-1] != cx.size - 1:
-        keep = np.append(keep, cx.size - 1)  # 終端は必ず残す（線が途中で切れて見えるため）
+        keep = np.append(keep, cx.size - 1)
     ddx = cx[keep] - ox
     ddy = cy[keep] - oy
     lane_points = [
@@ -648,7 +559,7 @@ def _detect_lane(
     ]
 
     return (
-        0.0,  # 車線は常に自車の足元にあるので優先度の距離は 0
+        0.0,
         Detection(
             cls=DetClass.LANE,
             x0=box[0], y0=box[1], x1=box[2], y1=box[3],
@@ -660,32 +571,15 @@ def _detect_lane(
     )
 
 
-# ---------------------------------------------------------------------------
-# 公開 API
-# ---------------------------------------------------------------------------
-
-
 def detect_ground_truth(
     world: "World", slot: int, spec: CameraSpec = DEFAULT_CAMERA
 ) -> PerceptionResult:
-    """world の真値から「理想の検出結果」を作る。
-
-    教師データ生成とフォールバックの**共通経路**。信頼度は常に 1.0 で、
-    `phase` / `speed_limit` / `distance` / `lateral` も真値で埋まる。
-
-    並び順は `PerceptionResult` の約束どおり信頼度の降順だが、真値では
-    すべて 1.0 なので同着になる。同着の中は
-    **「観測化に必要なものが必ず残る順」**（車線 → 信号 → 標識 → 車両 → 障害物 の
-    ラウンドロビン、各クラス内は近い順）に並べる。`best()` が最寄りの信号を
-    返すこと、`config.PERCEP_MAX_DETECTIONS`（12）で切っても内訳が欠けないことを
-    保証するため。
-    """
+    """world の真値から「理想の検出結果」を作る。"""
     slot = int(slot)
     result = PerceptionResult(slot=slot)
     if not (0 <= slot < len(world.slots)):
         return result
     if not bool(world.fleet.active[slot]):
-        # 走っていないスロットには何も見えない（観測もゼロ埋めされる）
         return result
 
     pose = camera_pose(
@@ -701,18 +595,15 @@ def detect_ground_truth(
         (DetClass.TRAFFIC_LIGHT, _detect_signals(world, slot, spec, pose, scene)),
         (DetClass.SPEED_SIGN, _detect_speed_signs(world, slot, spec, pose, scene)),
         (DetClass.VEHICLE, _detect_vehicles(world, slot, spec, pose)),
-        (DetClass.OBSTACLE, _detect_obstacles(world, spec, pose)),
+        (DetClass.OBSTACLE, _detect_obstacles(world, slot, spec, pose)),
     ]
     lane = _detect_lane(world, slot, spec, pose)
     if lane is not None:
         per_class[DetClass.LANE] = [lane[1]]
     for cls, items in buckets:
-        items.sort(key=lambda pair: pair[0])  # 近い順
+        items.sort(key=lambda pair: pair[0])
         per_class[cls] = [det for _, det in items[: CLASS_QUOTA[cls]]]
 
-    # クラス枠つきの優先度ラウンドロビンで詰める（上限で切っても内訳が欠けない）。
-    # ★ 認識器（`detector.decode_detections`）も**同じ関数**を呼ぶ。
-    #   片方だけ直すと同じ食い違いがまた生まれる（code_review Q-01）。
     result.detections = pack_by_class_quota(
         per_class, int(config.PERCEP_MAX_DETECTIONS)
     )
@@ -732,16 +623,7 @@ def freespace_ground_truth(
     spec: CameraSpec = DEFAULT_CAMERA,
     max_distance: float = float(config.OBS_FREESPACE_MAX_DISTANCE),
 ) -> np.ndarray:
-    """走行可能領域の真値。前方 ±90 度を `OBS_FREESPACE_DIM` 本に分けた距離 [m]。
-
-    ★ `Detection` にも `PerceptionResult` にも走行可能領域を入れる場所が無い
-      （`DetClass` は箱で表せる 5 クラスしか持たない）。そこで**検出とは別の
-      戻り値**として扱い、認識器側も専用の出力ヘッドを持たせてある。
-      `types.py` に持たせるかどうかは要相談（報告の「要確認」を参照）。
-
-    建物は占有グリッドのレイキャスト、他車両と障害物は円との交差で測る。
-    観測の元になっていた建物レイキャストと同じ値に、動く障害物を足したもの。
-    """
+    """走行可能領域の真値。前方 ±90 度を `OBS_FREESPACE_DIM` 本に分けた距離 [m]。"""
     slot = int(slot)
     out = np.full(config.OBS_FREESPACE_DIM, float(max_distance), dtype=np.float32)
     if not (0 <= slot < len(world.slots)) or not bool(world.fleet.active[slot]):
@@ -754,7 +636,6 @@ def freespace_ground_truth(
     ox, oy = pose.eye_x, pose.eye_y
     angles = (heading + FREESPACE_ANGLES).astype(np.float64)
 
-    # --- 建物 ---
     try:
         hit = world.map_index.raycast(
             np.array([ox], dtype=np.float32),
@@ -765,11 +646,13 @@ def freespace_ground_truth(
         )
         out[:] = np.asarray(hit, dtype=np.float32).reshape(-1)
     except Exception:
-        # レイキャストが失敗しても走行は続けられる。ここで例外を投げると
-        # 教師データ生成が止まるので、最大距離のまま続ける
-        pass
+        _warn_once(
+            "freespace_raycast",
+            "走行可能距離のレイキャストに失敗しました。全方向が "
+            "max_distance（＝前方はすべて空いている）のまま観測と教師データに入ります"
+            "（初回のみ記録）",
+        )
 
-    # --- 他車両・障害物（円で近似してレイと交差させる） ---
     blockers: list[tuple[float, float, float]] = []
     fleet = world.fleet
     for other in np.flatnonzero(fleet.active):
@@ -781,10 +664,9 @@ def freespace_ground_truth(
     for obstacle in world.obstacles:
         blockers.append((float(obstacle.x), float(obstacle.y), float(obstacle.radius)))
     if blockers:
-        circles = np.asarray(blockers, dtype=np.float64)  # (M, 3)
-        dirs = np.stack([np.cos(angles), np.sin(angles)], axis=1)  # (R, 2)
+        circles = np.asarray(blockers, dtype=np.float64)
+        dirs = np.stack([np.cos(angles), np.sin(angles)], axis=1)
         rel = circles[None, :, :2] - np.array([[ox, oy]], dtype=np.float64)[:, None, :]
-        # 各レイ（行）× 各円（列）の投影長と垂線距離
         along = rel[..., 0] * dirs[:, None, 0] + rel[..., 1] * dirs[:, None, 1]
         perp2 = (rel * rel).sum(axis=2) - along * along
         radius2 = circles[None, :, 2] ** 2

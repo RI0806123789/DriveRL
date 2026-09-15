@@ -1,15 +1,4 @@
-/**
- * 日の出・日の入りの計算を検証する（ブラウザ不要）。
- *
- *     cd frontend
- *     node scripts/verify-sun.ts
- *
- * 配色がこの計算に連動するので、ここが狂うと「昼なのに夜の画面」になる。
- * しかも**間違っていても型チェックもビルドも通る**ため、数値で確かめる。
- *
- * 外部の暦データは持ち込まない（ローカル完結が前提のため）。
- * 代わりに、暦の知識から確実に言える不変条件と、広く知られた値を使う。
- */
+/** 日の出・日の入りの計算を検証する（ブラウザ不要）。 */
 
 import { daylightMs, isDaylight, nextSunEvent, sunTimes } from '../src/scene/sunTimes.ts'
 
@@ -38,7 +27,6 @@ function utc(y: number, mo: number, d: number, h = 0, mi = 0): Date {
   return new Date(Date.UTC(y, mo - 1, d, h, mi))
 }
 
-// プリセットの座標（backend/app/map/presets.py と同じ値）
 const GINZA = { lat: 35.6717, lon: 139.765, name: '銀座' }
 const UMEDA = { lat: 34.7025, lon: 135.4959, name: '梅田' }
 const SAKAE = { lat: 35.1681, lon: 136.9083, name: '栄' }
@@ -58,7 +46,6 @@ for (let month = 1; month <= 12; month += 1) {
     }
     if (!(t.sunrise.getTime() < t.solarNoon.getTime())) orderOk = false
     if (!(t.solarNoon.getTime() < t.sunset.getTime())) orderOk = false
-    // 南中は日の出と日の入りのちょうど中間（対称性）
     const mid = (t.sunrise.getTime() + t.sunset.getTime()) / 2
     if (Math.abs(mid - t.solarNoon.getTime()) > 1000) noonOk = false
   }
@@ -83,7 +70,6 @@ for (const [label, date] of [
   )
 }
 
-// 東京の夏至の昼は約 14 時間 35 分、冬至は約 9 時間 45 分（理科年表などで広く知られた値）
 const summer = daylightMs(utc(2026, 6, 21), GINZA.lat, GINZA.lon)
 const winter = daylightMs(utc(2026, 12, 22), GINZA.lat, GINZA.lon)
 check('夏至の昼が 14 時間 35 分 ±10 分', Math.abs(summer - (14 * 60 + 35) * 60_000) < 10 * 60_000,
@@ -91,7 +77,6 @@ check('夏至の昼が 14 時間 35 分 ±10 分', Math.abs(summer - (14 * 60 + 
 check('冬至の昼が 9 時間 45 分 ±10 分', Math.abs(winter - (9 * 60 + 45) * 60_000) < 10 * 60_000,
   hours(winter))
 
-// 春分・秋分の昼はちょうど 12 時間ではなく、太陽の視半径と大気差のぶん 7 分ほど長い
 const equinox = daylightMs(utc(2026, 3, 20), GINZA.lat, GINZA.lon)
 check('春分の昼が 12 時間より長く、12 時間 15 分未満',
   equinox > 12 * 3600_000 && equinox < (12 * 60 + 15) * 60_000, hours(equinox))
@@ -112,7 +97,6 @@ check('銀座 → 栄 → 梅田 の順に日の出が遅い',
   rises[0].at.getTime() < rises[1].at.getTime() &&
   rises[1].at.getTime() < rises[2].at.getTime())
 
-// 経度 1 度で 4 分。銀座と梅田は 4.27 度離れているので約 17 分の差になるはず
 const lonGapMin = (GINZA.lon - UMEDA.lon) * 4
 const riseGapMin = (rises[2].at!.getTime() - rises[0].at!.getTime()) / 60_000
 check('銀座と梅田の日の出差が経度差から出る値（±3 分）',
@@ -132,13 +116,12 @@ console.log('='.repeat(70))
   check('日の入りの 1 分前は昼', isDaylight(new Date(set - 60_000), GINZA.lat, GINZA.lon))
   check('日の入りの 1 分後は夜', !isDaylight(new Date(set + 60_000), GINZA.lat, GINZA.lon))
   check('正午は昼', isDaylight(t.solarNoon, GINZA.lat, GINZA.lon))
-  check('真夜中は夜', !isDaylight(utc(2026, 9, 5, 15, 0), GINZA.lat, GINZA.lon)) // JST 9/6 00:00
+  check('真夜中は夜', !isDaylight(utc(2026, 9, 5, 15, 0), GINZA.lat, GINZA.lon))
 
-  // 次の切り替わりは必ず未来で、かつそこで昼夜が反転する
   let eventOk = true
   let flipOk = true
   for (let h = 0; h < 24; h += 1) {
-    const at = utc(2026, 9, 5, 15 + h, 0) // JST 9/6 の各正時
+    const at = utc(2026, 9, 5, 15 + h, 0)
     const next = nextSunEvent(at, GINZA.lat, GINZA.lon)
     if (!next || next.getTime() <= at.getTime()) {
       eventOk = false
@@ -158,7 +141,6 @@ console.log('='.repeat(70))
 console.log('5. 高緯度（白夜・極夜）で壊れないこと')
 console.log('='.repeat(70))
 {
-  // トロムソ（ノルウェー、北緯 69.65）は 5〜7 月が白夜、11〜1 月が極夜
   const TROMSO = { lat: 69.6496, lon: 18.9553 }
   const midsummer = sunTimes(utc(2026, 6, 21), TROMSO.lat, TROMSO.lon)
   const midwinter = sunTimes(utc(2026, 12, 22), TROMSO.lat, TROMSO.lon)
@@ -167,12 +149,10 @@ console.log('='.repeat(70))
   check('白夜は昼と判定される', isDaylight(utc(2026, 6, 21, 1, 0), TROMSO.lat, TROMSO.lon))
   check('極夜は夜と判定される', !isDaylight(utc(2026, 12, 22, 12, 0), TROMSO.lat, TROMSO.lon))
 
-  // 極夜のさなかでも、いずれ日は昇る（無限ループや null 固定にならないこと）
   const escape = nextSunEvent(utc(2026, 12, 22), TROMSO.lat, TROMSO.lon)
   check('極夜からでも次の日の出が見つかる', escape !== null,
     escape ? escape.toISOString().slice(0, 10) : 'null')
 
-  // 赤道は年間を通して昼が約 12 時間
   let equatorOk = true
   for (let month = 1; month <= 12; month += 1) {
     const len = daylightMs(utc(2026, month, 15), 0, 0)

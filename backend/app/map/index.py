@@ -1,16 +1,4 @@
-"""`MapData` から実行時インデックス（`contracts.MapIndex`）を組み立てる。
-
-構築するもの:
-    - 経路探索用の `networkx.DiGraph`（oneway を尊重した有向グラフ）
-    - ノード座標の numpy 配列（最近傍ノード探索）
-    - エッジ中心線の STRtree（道路へのスナップ）
-    - 建物ポリゴンの STRtree（厳密な衝突判定）
-    - 信号・標識の点の STRtree（経路との突き合わせ）
-    - 占有グリッド `OccupancyGrid`（建物レイヤのみ。レイキャスト用）
-
-いずれも「構築は 1 回だけ・参照は毎ステップ」という使われ方なので、
-参照側（`raycast` / `collides_with_building`）は完全ベクトル化して軽く保つ。
-"""
+"""`MapData` から実行時インデックス（`contracts.MapIndex`）を組み立てる。"""
 
 from __future__ import annotations
 
@@ -31,36 +19,35 @@ __all__ = ["MapIndexImpl", "build_map_index"]
 
 from app.map.lanes import RouteSegment, build_lane_route
 
-
 logger = logging.getLogger("autoware_sim")
+
+_WARNED: set[str] = set()
+
+
+def _warn_once(key: str, message: str) -> None:
+    """同じ失敗を初回だけログに残す（code_review B-15 / E-06 / E-10）。"""
+    if key in _WARNED:
+        return
+    _WARNED.add(key)
+    logger.exception(message)
 
 
 class MapIndexImpl:
-    """`contracts.MapIndex` プロトコルの実装。
-
-    `build_map_index()` から生成する。外から直接コンストラクタを呼ばないこと。
-    """
+    """`contracts.MapIndex` プロトコルの実装。"""
 
     def __init__(self, data: MapData) -> None:
         self.data = data
-        # バッチ衝突判定の失敗を 1 度だけログに出すためのフラグ（B-15）
         self._batch_collision_failed = False
 
-        # --- ノード座標 -------------------------------------------------
-        # ノード ID は loader で 0..N-1 の連番に振り直されているので、
-        # 配列添字 == ノード ID になる。念のため ID 順に並べ替えて保証する。
         nodes = sorted(data.nodes, key=lambda n: n.id)
         self._node_xy = np.array([[n.x, n.y] for n in nodes], dtype=np.float64)
         if self._node_xy.size == 0:
             self._node_xy = np.zeros((0, 2), dtype=np.float64)
 
-        # --- エッジの索引 -----------------------------------------------
         self._edges_by_id: dict[int, MapEdge] = {e.id: e for e in data.edges}
 
-        # --- 経路探索グラフ ---------------------------------------------
         self.graph = self._build_graph(data)
 
-        # --- エッジ中心線の STRtree -------------------------------------
         self._edge_lines: list[LineString] = []
         self._edge_line_ids: list[int] = []
         for e in data.edges:
@@ -70,14 +57,12 @@ class MapIndexImpl:
             self._edge_line_ids.append(e.id)
         self._edge_tree = shapely.STRtree(self._edge_lines) if self._edge_lines else None
 
-        # --- 建物ポリゴンの STRtree -------------------------------------
         self._building_polys: list[Polygon] = []
         for b in data.buildings:
             if len(b.outline) < 3:
                 continue
             poly = Polygon(b.outline)
             if not poly.is_valid:
-                # 自己交差した輪郭は buffer(0) で救えることが多い
                 poly = poly.buffer(0)
                 if poly.is_empty or poly.geom_type not in ("Polygon", "MultiPolygon"):
                     continue
@@ -86,13 +71,6 @@ class MapIndexImpl:
             shapely.STRtree(self._building_polys) if self._building_polys else None
         )
 
-        # --- 信号・標識の点 STRtree -------------------------------------
-        # 経路を張り直すたびに「全標識 × 全経路点」の密行列を作っていた
-        # （code_review M-01）。金沢は標識 15,719 基・経路 2,880 点あるので
-        # 1 回あたり数百 MB・1 秒近くかかり、その間エンジンスレッドが止まる。
-        # 経路の近くにあるものだけ木で引いてから距離を測る。
-        # 座標配列もここで 1 度だけ作る（呼ばれるたびに万単位の
-        # リスト内包表記を 3 本回すのも、それ自体が数十 ms かかっていた）。
         self._signal_xy, self._signal_heading, self._signal_tree = _point_layer(
             data.signals
         )
@@ -101,12 +79,7 @@ class MapIndexImpl:
             [sn.speed_limit for sn in data.signs], dtype=np.float64
         )
 
-        # --- 占有グリッド -----------------------------------------------
         self.occupancy = self._build_occupancy(data)
-
-    # ------------------------------------------------------------------
-    # 構築
-    # ------------------------------------------------------------------
 
     @staticmethod
     def _build_graph(data: MapData) -> nx.DiGraph:
@@ -117,7 +90,6 @@ class MapIndexImpl:
 
         for edge in data.edges:
             if edge.u == edge.v:
-                # 自己ループ（ロータリー等）は経路に現れないので追加しない
                 continue
             graph.add_edge(edge.u, edge.v, length=edge.length, edge_id=edge.id)
             if not edge.oneway:
@@ -148,14 +120,8 @@ class MapIndexImpl:
             building=np.zeros((height, width), dtype=bool),
         )
 
-        # 建物レイヤ: ポリゴン内部を True
         _rasterize_into(grid.building, self._building_polys, grid)
 
-        # ★ 道路レイヤは作らない（code_review B-16）。
-        #   `grid.road` / `sample_road()` を読む箇所はコードベースに 1 件も無い。
-        #   レイキャストが `sample_building` だけを使う設計に落ち着いた時点で
-        #   使われなくなったまま残っていたもので、マップ読み込みのたびに
-        #   全エッジ（銀座 293 本）を buffer してラスタライズしていた。
         return grid
 
     def _iter_edge_lines(self):
@@ -163,10 +129,6 @@ class MapIndexImpl:
             edge = self._edges_by_id.get(edge_id)
             if edge is not None:
                 yield edge, line
-
-    # ------------------------------------------------------------------
-    # 最近傍
-    # ------------------------------------------------------------------
 
     def nearest_node(self, x: float, y: float) -> int:
         """指定座標に最も近い道路ノード ID を返す。"""
@@ -177,12 +139,7 @@ class MapIndexImpl:
         return int(np.argmin(dx * dx + dy * dy))
 
     def nearest_road_point(self, x: float, y: float) -> tuple[float, float, int, float]:
-        """指定座標を最寄りの道路中心線上へスナップする。
-
-        Returns:
-            (snapped_x, snapped_y, edge_id, heading)
-            heading はスナップ地点における道路の進行方向 [rad]（+x 軸から反時計回り）。
-        """
+        """指定座標を最寄りの道路中心線上へスナップする。"""
         if self._edge_tree is None or not self._edge_lines:
             return float(x), float(y), -1, 0.0
 
@@ -201,11 +158,7 @@ class MapIndexImpl:
 
     @staticmethod
     def _tangent_heading(line: LineString, distance: float, eps: float = 0.5) -> float:
-        """ポリライン上の距離 `distance` における接線方向 [rad]。
-
-        前後 eps の 2 点を差分して求める。ポリラインの向きは u→v なので、
-        得られる heading はそのエッジの正方向を指す。
-        """
+        """ポリライン上の距離 `distance` における接線方向 [rad]。"""
         total = float(line.length)
         if total <= 1e-9:
             return 0.0
@@ -216,10 +169,6 @@ class MapIndexImpl:
         p0 = line.interpolate(back)
         p1 = line.interpolate(fore)
         return math.atan2(p1.y - p0.y, p1.x - p0.x)
-
-    # ------------------------------------------------------------------
-    # 経路
-    # ------------------------------------------------------------------
 
     def shortest_path(self, src_node: int, dst_node: int) -> list[int] | None:
         """ノード ID 列で最短経路を返す。到達不能なら None。"""
@@ -235,10 +184,7 @@ class MapIndexImpl:
     def route_polyline(
         self, node_path: Sequence[int], resample_m: float = 2.0
     ) -> list[tuple[float, float]]:
-        """ノード列をエッジのポリラインへ展開し、等間隔にリサンプルして返す。
-
-        グラフ上を v→u の向きに進む場合はエッジのポリラインを反転して連結する。
-        """
+        """ノード列をエッジのポリラインへ展開し、等間隔にリサンプルして返す。"""
         path = [int(n) for n in node_path]
         if not path:
             return []
@@ -252,7 +198,6 @@ class MapIndexImpl:
         for a, b in zip(path[:-1], path[1:]):
             attrs = self.graph.get_edge_data(a, b)
             if attrs is None:
-                # 経路が壊れている場合はノード直結で埋める（描画の連続性を優先）
                 segment = [self._node_point(a), self._node_point(b)]
             else:
                 edge = self._edges_by_id.get(int(attrs["edge_id"]))
@@ -271,15 +216,10 @@ class MapIndexImpl:
             return points
         return _resample_polyline(points, float(resample_m))
 
-
     def lane_route_polyline(
         self, node_path: Sequence[int], resample_m: float = 2.0
     ) -> list[tuple[float, float]]:
-        """左側通行の車線に沿った走行経路を返す（道交法 17 条 4 項 / 34 条）。
-
-        中心線をそのまま走ると中央線をまたぐことになるので、進行方向左側の車線へ
-        寄せた経路を作る。右左折の手前では法令どおり寄せ、交差点は曲線でつなぐ。
-        """
+        """左側通行の車線に沿った走行経路を返す（道交法 17 条 4 項 / 34 条）。"""
         path = [int(n) for n in node_path]
         if len(path) < 2:
             return self.route_polyline(path, resample_m)
@@ -294,11 +234,10 @@ class MapIndexImpl:
                 continue
             pts = [(float(px), float(py)) for px, py in edge.polyline]
             if edge.u != a:
-                pts.reverse()  # 進行方向に揃える
+                pts.reverse()
             segments.append(RouteSegment(edge=edge, points=pts))
 
         if not segments:
-            # 車線を引けない経路（グラフが壊れている等）は中心線で代替する
             return self.route_polyline(path, resample_m)
 
         route = build_lane_route(segments, float(resample_m))
@@ -310,17 +249,9 @@ class MapIndexImpl:
         self,
         points: Sequence[tuple[float, float]],
         max_lateral: float = 11.0,
-        # 60 度だと斜め交差点で「交差する方向の信号」まで自分の経路の信号として
-        # 拾ってしまい、青で通過しているのに赤信号無視と数えられる。
-        # 実測で 57 度ずれた信号を拾う例が出たので 35 度まで絞る。
         max_heading_diff: float = math.radians(35.0),
     ) -> list[tuple[float, int]]:
-        """経路が通過する信号を (弧長, MapData.signals の添字) で返す。
-
-        信号の座標は道路中心線上にあり、経路は車線へ寄っているので数メートル離れる。
-        そこで「経路への最短距離が近い」かつ「進入方向が経路の向きと揃っている」
-        ものだけを採る。向きを見ないと、同じ交差点の別方向の信号を拾ってしまう。
-        """
+        """経路が通過する信号を (弧長, MapData.signals の添字) で返す。"""
         if self._signal_tree is None or len(points) < 2:
             return []
 
@@ -346,29 +277,16 @@ class MapIndexImpl:
     def speed_limits_on_route(
         self,
         points: Sequence[tuple[float, float]],
-        # 標識は路端（中心線から width/2 + 0.8m）に立ち、経路は左端の車線を通るので
-        # 実測でおよそ 2.4m 離れる。反対方向の標識は道路幅ぶん向こうにあるが、
-        # 狭い道では 8m 以内に入りうるので、向きでも絞る。
         max_lateral: float = 8.0,
         max_heading_diff: float = math.radians(35.0),
     ) -> list[tuple[float, float]]:
-        """経路に適用される規制速度を (弧長 [m], 規制速度 [m/s]) の区切りで返す。
-
-        先頭は必ず `(0.0, 出発地点の規制速度)`。以降は標識を通過するたびに 1 件。
-        同じ速度が続く区切りは畳む（弧長 a の規制速度は
-        「a 以下で最後の区切り」の速度なので、重複しても結果は同じだが無駄）。
-
-        標識の位置と向きの合わせ方は `signals_on_route()` と同じ約束にしてある。
-        向きを見ないと、対向車線側や交差道路の標識まで拾ってしまう。
-        """
+        """経路に適用される規制速度を (弧長 [m], 規制速度 [m/s]) の区切りで返す。"""
         if len(points) < 2:
             return []
 
         pts = np.asarray(points, dtype=np.float64)
         cum, tang = _arc_and_tangent(pts)
 
-        # 出発地点に適用されている速度。経路の途中からスポーンしても、
-        # 最初の標識に出会うまで規制が分からない状態にはしない。
         start_limit = self._edge_speed_limit_at(float(pts[0, 0]), float(pts[0, 1]))
         breaks: list[tuple[float, float]] = []
         if start_limit is not None:
@@ -392,7 +310,6 @@ class MapIndexImpl:
         if not breaks:
             return []
 
-        # 同じ速度が続く区切りを畳む
         out: list[tuple[float, float]] = [breaks[0]]
         for arc, limit in breaks[1:]:
             if abs(limit - out[-1][1]) < 1e-6:
@@ -404,26 +321,13 @@ class MapIndexImpl:
     def _near_route(
         tree: "shapely.STRtree | None", pts: np.ndarray, max_lateral: float
     ) -> np.ndarray:
-        """経路の周り `max_lateral` [m] にある点の添字を返す。
-
-        木が返すのは「経路の**線**までの距離」で判定した集合で、呼び出し側が
-        本当に欲しい「経路上の**サンプル点**までの距離」の集合を必ず含む
-        （線までの距離 ≦ 最寄りの点までの距離）。**絞り込みは超集合なので、
-        絞る前とまったく同じ結果になる。** 距離の判定はこのあとで厳密に行う。
-
-        ★ 返す添字は必ず昇順にする。呼び出し側は弧長で安定ソートするので、
-          同じ弧長に複数の地物が乗ったとき（重複した標識など。code_review M-02）
-          並びが添字順で決まる。木が返す順のまま使うと、絞り込みの有無だけで
-          結果の並びが変わってしまう。
-        """
+        """経路の周り `max_lateral` [m] にある点の添字を返す。"""
         if tree is None or pts.shape[0] < 2:
             return np.zeros(0, dtype=np.int64)
         try:
             line = LineString(pts)
             found = tree.query(line, predicate="dwithin", distance=float(max_lateral))
         except Exception:
-            # GEOS が dwithin を持たない等。全件を候補にすれば結果は変わらない
-            # （遅くなるだけ）ので、ここで走行を止めない。
             logger.exception("経路の近傍検索に失敗しました。全件を候補にします")
             return np.arange(int(tree.geometries.size), dtype=np.int64)
         return np.sort(np.asarray(found, dtype=np.int64).reshape(-1))
@@ -433,6 +337,11 @@ class MapIndexImpl:
         try:
             _sx, _sy, edge_id, _heading = self.nearest_road_point(x, y)
         except Exception:
+            _warn_once(
+                "edge_speed_limit",
+                "規制速度の引き当てに失敗しました。速度不明として扱うため、"
+                "その区間の速度超過は計上されません（初回のみ記録）",
+            )
             return None
         edge = self._edges_by_id.get(int(edge_id))
         return float(edge.speed_limit) if edge is not None else None
@@ -446,11 +355,7 @@ class MapIndexImpl:
     def random_node_pair(
         self, rng: np.random.Generator, min_distance_m: float = 150.0
     ) -> tuple[int, int]:
-        """経路が存在し、十分離れた出発／目的ノードの組を返す。
-
-        50 回試して見つからなければ距離条件を捨て、到達可能な中で最も遠いノードを
-        目的地に選ぶ。どんな場合でも例外は投げない（学習ループを止めないため）。
-        """
+        """経路が存在し、十分離れた出発／目的ノードの組を返す。"""
         n = self._node_xy.shape[0]
         if n == 0:
             return 0, 0
@@ -459,7 +364,6 @@ class MapIndexImpl:
 
         threshold = float(min_distance_m)
 
-        # --- 通常経路: 出発点を引き、そこから threshold 以上離れた候補を試す ---
         for _ in range(50):
             src = int(rng.integers(0, n))
             dx = self._node_xy[:, 0] - self._node_xy[src, 0]
@@ -473,7 +377,6 @@ class MapIndexImpl:
             if self.shortest_path(src, dst) is not None:
                 return src, dst
 
-        # --- 緩和: 距離条件を捨てて到達可能な最遠点を選ぶ ---
         for _ in range(min(n, 20)):
             src = int(rng.integers(0, n))
             if not self.graph.has_node(src):
@@ -485,12 +388,7 @@ class MapIndexImpl:
             dst = int(max(lengths, key=lengths.__getitem__))
             return src, dst
 
-        # --- 最終手段: 到達可能性を問わず適当な 2 点 ---
         return 0, min(1, n - 1)
-
-    # ------------------------------------------------------------------
-    # 知覚
-    # ------------------------------------------------------------------
 
     def raycast(
         self,
@@ -500,11 +398,7 @@ class MapIndexImpl:
         max_distance: float,
         step: float = 1.0,
     ) -> np.ndarray:
-        """占有グリッドの building レイヤを step 刻みでサンプリングして距離を測る。
-
-        完全ベクトル化。shape (N,), (N,), (N, R) -> (N, R)。
-        何にも当たらなければ max_distance を返す。
-        """
+        """占有グリッドの building レイヤを step 刻みでサンプリングして距離を測る。"""
         ox_arr = np.asarray(origin_x, dtype=np.float64).reshape(-1)
         oy_arr = np.asarray(origin_y, dtype=np.float64).reshape(-1)
         ang = np.asarray(angles, dtype=np.float64)
@@ -519,39 +413,28 @@ class MapIndexImpl:
         max_d = float(max_distance)
         step_m = max(float(step), 1e-3)
 
-        # サンプル距離列（0 は自車位置なので step から始める）
         samples = np.arange(step_m, max_d + step_m * 0.5, step_m, dtype=np.float64)
         if samples.size == 0:
             samples = np.array([max_d], dtype=np.float64)
 
-        cos_a = np.cos(ang)[:, :, None]           # (N, R, 1)
-        sin_a = np.sin(ang)[:, :, None]           # (N, R, 1)
-        t = samples[None, None, :]                # (1, 1, S)
+        cos_a = np.cos(ang)[:, :, None]
+        sin_a = np.sin(ang)[:, :, None]
+        t = samples[None, None, :]
 
-        xs = ox_arr[:, None, None] + cos_a * t    # (N, R, S)
+        xs = ox_arr[:, None, None] + cos_a * t
         ys = oy_arr[:, None, None] + sin_a * t
 
-        hits = self.occupancy.sample_building(xs, ys)   # (N, R, S) bool
+        hits = self.occupancy.sample_building(xs, ys)
 
         any_hit = hits.any(axis=2)
-        first = np.argmax(hits, axis=2)                 # ヒットが無い行は 0 になる
+        first = np.argmax(hits, axis=2)
         distances = np.where(any_hit, samples[np.clip(first, 0, samples.size - 1)], max_d)
         return np.minimum(distances, max_d).astype(np.float32)
 
     def collides_with_buildings(
         self, corners: np.ndarray, mask: np.ndarray
     ) -> np.ndarray:
-        """複数車両ぶんの外接矩形をまとめて判定する。shape (N,) bool。
-
-        1 台ずつ `collides_with_building()` を呼ぶと、Shapely の `Polygon` 生成と
-        木の検索が Python レベルで N 回走る。64 台では 1 ステップ 4.5ms かかり、
-        高倍速では予算（8 倍で 6.25ms）をこれだけで使い切ってしまう。
-        shapely 2.x のバッチ API を使うと同じ結果が約 20 分の 1 の時間で出る。
-
-        Args:
-            corners: shape (N, 4, 2) の外接矩形
-            mask: shape (N,) bool。True のスロットだけ判定する
-        """
+        """複数車両ぶんの外接矩形をまとめて判定する。shape (N,) bool。"""
         n = int(corners.shape[0])
         out = np.zeros(n, dtype=bool)
         if self._building_tree is None:
@@ -560,18 +443,12 @@ class MapIndexImpl:
         if idx.size == 0:
             return out
         try:
-            # (K, 4, 2) から K 個の四角形をまとめて作る（shapely が自動で閉じる）
             polys = shapely.polygons(np.asarray(corners[idx], dtype=np.float64))
-            # 戻りは (2, M) の [入力添字, 木の添字] ペア
             pairs = self._building_tree.query(polys, predicate="intersects")
             found = np.asarray(pairs)
             if found.size:
                 out[idx[np.unique(found[0])]] = True
         except Exception:
-            # マップ側の想定外エラーで学習ループを止めない（衝突なし扱い）。
-            # ★ ただし黙ってはいけない（code_review B-15）。ここが失敗し続けると
-            #   「建物に当たらない世界」になり、症状が**成績が良くなる方向**に
-            #   出るため外からは絶対に気づけない。初回だけ理由を残す。
             if not self._batch_collision_failed:
                 self._batch_collision_failed = True
                 logger.exception(
@@ -589,26 +466,27 @@ class MapIndexImpl:
         try:
             rect = Polygon(pts)
         except Exception:
+            _warn_once(
+                "collision_polygon",
+                "車両の外接矩形を作れませんでした。衝突なしとして扱います（初回のみ記録）",
+            )
             return False
         if rect.is_empty:
+            return False
+        if not rect.is_valid:
+            _warn_once(
+                "collision_polygon_invalid",
+                "車両の外接矩形が不正です（角に NaN / inf が入った可能性）。"
+                "衝突判定の結果は保証されません（初回のみ記録）",
+            )
             return False
         found = self._building_tree.query(rect, predicate="intersects")
         return int(np.asarray(found).size) > 0
 
 
-# ---------------------------------------------------------------------------
-# 構築関数
-# ---------------------------------------------------------------------------
-
-
 def build_map_index(data: MapData) -> MapIndexImpl:
     """`MapData` から実行時インデックスを組み立てる。"""
     return MapIndexImpl(data)
-
-
-# ---------------------------------------------------------------------------
-# 内部ユーティリティ
-# ---------------------------------------------------------------------------
 
 
 def _sq_dist(a: Sequence[float], b: Sequence[float]) -> float:
@@ -618,10 +496,7 @@ def _sq_dist(a: Sequence[float], b: Sequence[float]) -> float:
 
 
 def _point_layer(items: Sequence) -> tuple[np.ndarray, np.ndarray, "shapely.STRtree | None"]:
-    """`x` / `y` / `heading` を持つ地物の列から、座標・方位・STRtree を作る。
-
-    信号と標識で同じ形なので 1 か所にまとめてある。空なら木は None。
-    """
+    """`x` / `y` / `heading` を持つ地物の列から、座標・方位・STRtree を作る。"""
     n = len(items)
     if n == 0:
         return (
@@ -634,16 +509,11 @@ def _point_layer(items: Sequence) -> tuple[np.ndarray, np.ndarray, "shapely.STRt
     return xy, heading, shapely.STRtree(shapely.points(xy))
 
 
-#: `_nearest_on_route()` が一度に確保してよい一時配列の大きさ [byte]。
-#: 経路点が多いマップでも、候補をこの単位に切って回すことで使用量を抑える。
-_NEAREST_CHUNK_BYTES = 8 << 20  # 8 MiB
+_NEAREST_CHUNK_BYTES = 8 << 20
 
 
 def _arc_and_tangent(pts: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """経路点列から「始点からの弧長」と「各点での進行方位」を返す。
-
-    最後の点の方位は直前の区間のものを使う（区間が 1 つ足りないため）。
-    """
+    """経路点列から「始点からの弧長」と「各点での進行方位」を返す。"""
     seg = np.diff(pts, axis=0)
     cum = np.concatenate([[0.0], np.cumsum(np.hypot(seg[:, 0], seg[:, 1]))])
     tang = np.empty(pts.shape[0], dtype=np.float64)
@@ -653,12 +523,7 @@ def _arc_and_tangent(pts: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 
 def _nearest_on_route(pts: np.ndarray, xy: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """各地物 `xy` (K, 2) に最も近い経路点の添字と、その距離を返す。
-
-    (K, P) の float64 行列を一度に作ると、K も P も大きいときに数百 MB になる
-    （code_review M-01）。呼び出し側が STRtree で K を絞っているうえで、
-    さらに K を `_NEAREST_CHUNK_BYTES` 単位に切って上限を固定する。
-    """
+    """各地物 `xy` (K, 2) に最も近い経路点の添字と、その距離を返す。"""
     k = int(xy.shape[0])
     nearest = np.empty(k, dtype=np.int64)
     dist = np.empty(k, dtype=np.float64)
@@ -710,12 +575,7 @@ def _resample_polyline(
 
 
 def _rasterize_into(layer: np.ndarray, polygons: Sequence, grid: OccupancyGrid) -> None:
-    """ポリゴン群をブール配列へ焼き込む。
-
-    rasterio 等の追加依存を入れず、shapely 2.x のベクトル化関数
-    `shapely.contains_xy` を **ポリゴンごとの bbox に限定して** 呼ぶ方式。
-    セル中心が内部にあるセルを True にする（world_to_cell と同じ丸め規約）。
-    """
+    """ポリゴン群をブール配列へ焼き込む。"""
     if not polygons:
         return
 
@@ -744,7 +604,6 @@ def _rasterize_into(layer: np.ndarray, polygons: Sequence, grid: OccupancyGrid) 
         ys = oy_g + np.arange(r0, r1 + 1, dtype=np.float64) * cell
         gx, gy = np.meshgrid(xs, ys)
 
-        # prepare しておくと点内外判定が大幅に速くなる
         shapely.prepare(poly)
         mask = shapely.contains_xy(poly, gx, gy)
         if mask.any():

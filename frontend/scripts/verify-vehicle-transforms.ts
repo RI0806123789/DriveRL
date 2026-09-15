@@ -1,22 +1,4 @@
-/**
- * 車両の姿勢と部品の取り付け位置を検証する（ブラウザ不要）。
- *
- *     cd frontend
- *     node scripts/verify-vehicle-transforms.ts
- *
- * Vehicles.tsx を InstancedMesh 化したとき（code_review F-02）、
- * それまで three のシーングラフが面倒を見ていた
- * 「車体からの取り付け位置」「前輪の舵角」「車輪の転がり」を
- * すべて自前の行列計算に置き換えた。掛け順を 1 か所間違えても
- * 型チェックもビルドも通ってしまうので、ここで数値で確かめる。
- *
- * 基準は **InstancedMesh 化する前の親子構成**。
- *   <group position=(x,0,-y) rotation.y=heading>
- *     <mesh position=BODY_OFFSET />
- *     <group position=前輪位置 rotation.y=steer><mesh rotation.z=roll /></group>
- *   </group>
- * これと同じワールド行列になることを確認する。
- */
+/** 車両の姿勢と部品の取り付け位置を検証する（ブラウザ不要）。 */
 
 import * as THREE from 'three'
 import {
@@ -67,7 +49,6 @@ const scratch = createTransformScratch()
 const out = new THREE.Matrix4()
 const base = new THREE.Matrix4()
 
-// 極端な値も混ぜる（方位は 1 周ぶん、舵角は最大付近、転がりは 1 周を超える値）
 const POSES: Array<{ x: number; y: number; heading: number; steer: number; roll: number }> = [
   { x: 0, y: 0, heading: 0, steer: 0, roll: 0 },
   { x: 12.5, y: -30.25, heading: Math.PI / 2, steer: 0.35, roll: 1.2 },
@@ -80,7 +61,6 @@ console.log('='.repeat(70))
 console.log('車両の姿勢（InstancedMesh 化の前後で一致するか）')
 console.log('='.repeat(70))
 
-// --- 1. 車両そのもののワールド行列 ---
 let worstBody = 0
 for (const p of POSES) {
   composeVehicleMatrix(scratch, p.x, p.y, p.heading, base)
@@ -89,7 +69,6 @@ for (const p of POSES) {
 }
 check('車両のワールド行列が旧実装と一致する', worstBody < 1e-9, `最大差 ${worstBody.toExponential(1)}`)
 
-// --- 2. ENU -> three の規約（protocol.md 1.3） ---
 {
   composeVehicleMatrix(scratch, 10, 20, 0, base)
   const pos = new THREE.Vector3().setFromMatrixPosition(base)
@@ -98,11 +77,9 @@ check('車両のワールド行列が旧実装と一致する', worstBody < 1e-9
     Math.abs(pos.x - 10) < 1e-9 && Math.abs(pos.z + 20) < 1e-9,
     `(${pos.x.toFixed(2)}, ${pos.y.toFixed(2)}, ${pos.z.toFixed(2)})`,
   )
-  // heading = 0 のとき前方（+X）が ENU の +x を向く
   composeVehicleMatrix(scratch, 0, 0, 0, base)
   const fwd = new THREE.Vector3(1, 0, 0).applyMatrix4(base)
   check('heading=0 で前方が ENU +x', Math.abs(fwd.x - 1) < 1e-9 && Math.abs(fwd.z) < 1e-9)
-  // heading = +90 度で前方が ENU の +y（three では -z）
   composeVehicleMatrix(scratch, 0, 0, Math.PI / 2, base)
   const left = new THREE.Vector3(1, 0, 0).applyMatrix4(base)
   check(
@@ -112,7 +89,6 @@ check('車両のワールド行列が旧実装と一致する', worstBody < 1e-9
   )
 }
 
-// --- 3. 車輪 4 本のワールド行列 ---
 let worstWheel = 0
 for (const p of POSES) {
   composeVehicleMatrix(scratch, p.x, p.y, p.heading, base)
@@ -120,7 +96,6 @@ for (const p of POSES) {
     const spec = WHEEL_OFFSETS[k]
     composeWheelMatrix(scratch, base, k, p.steer, p.roll, out)
     const legacy = legacyWorld(p.x, p.y, p.heading, (root) => {
-      // 旧実装: 親 group に rotation.y = steer、子 mesh に rotation.z = roll
       const holder = new THREE.Group()
       holder.position.set(spec.position[0], spec.position[1], spec.position[2])
       if (spec.steered) holder.rotation.y = p.steer
@@ -135,7 +110,6 @@ for (const p of POSES) {
 }
 check('車輪のワールド行列が旧実装と一致する', worstWheel < 1e-9, `最大差 ${worstWheel.toExponential(1)}`)
 
-// --- 4. 舵角は前輪だけに効く ---
 {
   composeVehicleMatrix(scratch, 0, 0, 0, base)
   const noSteer: THREE.Matrix4[] = []
@@ -154,7 +128,6 @@ check('車輪のワールド行列が旧実装と一致する', worstWheel < 1e-
   )
 }
 
-// --- 5. 車輪の左右対称と接地 ---
 {
   composeVehicleMatrix(scratch, 0, 0, 0, base)
   const ys: number[] = []
@@ -177,7 +150,6 @@ check('車輪のワールド行列が旧実装と一致する', worstWheel < 1e-
   check('前輪が後輪より前にある', xs[0] > 0 && xs[1] > 0 && xs[2] < 0 && xs[3] < 0)
 }
 
-// --- 6. 焼き込んだオフセットが元の mesh position と一致する ---
 console.log()
 console.log('='.repeat(70))
 console.log('ジオメトリに焼き込んだ取り付け位置')
@@ -207,7 +179,6 @@ for (const [name, geom, offset] of cases) {
   )
 }
 
-// 車体は地面に埋まっていないか（車高より下に出ていないか）
 {
   const geom = makeBodyGeometry()
   geom.computeBoundingBox()
@@ -218,13 +189,10 @@ for (const [name, geom, offset] of cases) {
   )
 }
 
-// 車輪は +Z 軸まわりの回転で転がる形になっているか
 {
   const geom = makeWheelGeometry()
   geom.computeBoundingBox()
   const size = geom.boundingBox!.getSize(new THREE.Vector3())
-  // 円柱は 14 角柱で近似しているので、外形は外接円ちょうどにはならない。
-  // 内接（2R·cos(π/14)）以上・外接（2R）以下に収まっていればよい
   const RADIAL_SEGMENTS = 14
   const minSpan = 2 * WHEEL_RADIUS * Math.cos(Math.PI / RADIAL_SEGMENTS)
   const maxSpan = 2 * WHEEL_RADIUS
@@ -237,7 +205,6 @@ for (const [name, geom, offset] of cases) {
   )
 }
 
-// --- 7. 非表示スロットの行列（スケール 0）が何も描かないこと ---
 {
   const hidden = new THREE.Matrix4().makeScale(0, 0, 0)
   const p = new THREE.Vector3(1, 1, 1).applyMatrix4(hidden)

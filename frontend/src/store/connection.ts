@@ -1,15 +1,4 @@
-/**
- * WebSocket クライアント（自動再接続つき）。
- *
- * 接続先は `ws://${location.host}/ws`。
- * Vite の dev server が /ws を 8000 番（FastAPI）へプロキシするので、
- * フロントは同一オリジンの相対パスだけを見ればよい。
- *
- * 開発用モック:
- *   `?mock=1` を付けて DEV ビルドを開くと、実サーバーの代わりに
- *   store/mockServer.ts の内蔵フェイクサーバーに接続する。
- *   ★ これはあくまで開発補助。本番では必ず実サーバーに繋ぐこと。
- */
+/** WebSocket クライアント（自動再接続つき）。 */
 
 import type { ClientMessage, ServerMessage } from '../types/protocol'
 import { useSimStore } from './simStore'
@@ -63,7 +52,6 @@ function scheduleReconnect(): void {
     reconnectTimer = null
     openSocket()
   }, delay)
-  // 指数バックオフ（上限 5 秒）
   reconnectDelay = Math.min(RECONNECT_MAX_MS, Math.round(reconnectDelay * 1.8))
 }
 
@@ -79,7 +67,6 @@ function openSocket(): void {
   try {
     ws = new WebSocket(url)
   } catch (e) {
-    // コンストラクタ自体が投げるケース（不正な URL など）
     console.warn('[connection] WebSocket を作成できませんでした', e)
     useSimStore.getState().setConnection('closed')
     scheduleReconnect()
@@ -103,18 +90,7 @@ function openSocket(): void {
     if (typeof ev.data === 'string') handleRaw(ev.data)
   }
 
-  ws.onerror = () => {
-    // onerror の直後には必ず onclose が来るので、ここでは何もしない。
-    // （バックエンド未起動時にコンソールを汚さないため console.error を出さない）
-  }
-
   ws.onclose = () => {
-    // このソケットがいま module 全体で「現在の」接続でなければ何もしない。
-    // WebSocket.close() は onclose を非同期に発火するため、
-    // stopConnection() → startConnection() が同じページ内で連続すると、
-    // 古いソケットの onclose が新しいソケットの確立後に届くことがある。
-    // 素通しにすると新しい接続の transport を null にし、
-    // 「繋がっているのに closed 表示」＋余計な再接続が起きる。
     if (transport !== socketTransport) return
     transport = null
     useSimStore.getState().setConnection('closed')
@@ -132,8 +108,6 @@ export function startConnection(): void {
     mockMode = true
     useSimStore.getState().setUsingMock(true)
     useSimStore.getState().setConnection('connecting')
-    // 動的 import にしておくと、本番ビルドでは別チャンクに切り出され
-    // （かつ isMockRequested() が常に false なので）読み込まれない。
     void import('./mockServer')
       .then((m) => {
         if (disposed) return
@@ -163,10 +137,7 @@ export function stopConnection(): void {
   useSimStore.getState().setConnection('closed')
 }
 
-/**
- * サーバーへ送信する。未接続なら黙って捨てる（例外にしない）。
- * @returns 実際に送れたら true
- */
+/** サーバーへ送信する。未接続なら黙って捨てる（例外にしない）。 */
 export function send(msg: ClientMessage): boolean {
   if (!transport) return false
   if (useSimStore.getState().connection !== 'open') return false
@@ -179,7 +150,6 @@ export function send(msg: ClientMessage): boolean {
   }
 }
 
-// Vite の HMR で二重接続にならないようにする
 if (import.meta.hot) {
   import.meta.hot.dispose(() => {
     stopConnection()

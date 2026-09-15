@@ -1,8 +1,4 @@
-/**
- * インライン SVG アイコン。
- * アイコンライブラリは導入していないので、必要なものを自前で書いている。
- * currentColor を使うので、親の color がそのまま効く。
- */
+/** インライン SVG アイコン。 */
 
 import type { ReactNode } from 'react'
 

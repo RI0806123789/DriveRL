@@ -1,15 +1,6 @@
-/**
- * 「学習」タブ。
- *
- * memo F-02「学習の進捗や試行錯誤の様子をリアルタイムに可視化する」に対応。
- * メトリクスは 1Hz で届き、simStore がリングバッファ（最大 300 点）に溜める。
- *
- * 「ポリシーを初期化」は破壊的なので確認を挟む。ただし window.confirm は
- * ブラウザのモーダルで、開いている間このタブの JS が止まってしまうため使わない
- * （自前のインライン確認 UI にしている）。
- */
+/** 「学習」タブ。 */
 
-import { useMemo, useRef, useState } from 'react'
+import { useRef, useState } from 'react'
 import { send } from '../store/connection'
 import { downloadModel, formatBytes, importModel } from '../store/exportModel'
 import type { ExportKind, ExportOutcome, ImportOutcome } from '../store/exportModel'
@@ -34,13 +25,13 @@ import {
 } from '../ui/Icons'
 
 export function LearningTab() {
-  const metrics = useSimStore((s) => s.metrics)
+  const series = useSimStore((s) => s.metricsSeries)
+  const revision = useSimStore((s) => s.metricsRevision)
+  const metricsMarks = useSimStore((s) => s.metricsMarks)
   const latest = useSimStore((s) => s.latestMetrics)
   const params = useSimStore((s) => s.params)
   const patchParamsLocal = useSimStore((s) => s.patchParamsLocal)
   const learning = useSimStore((s) => s.status.learning)
-  // 認識器の学習中は PPO も止まる（docs/protocol.md 2.9）。
-  // 「マップを読み込むと始まります」と出してしまうと理由が食い違う
   const suspended = useSimStore((s) => s.status.simSuspended ?? false)
 
   const usingMock = useSimStore((s) => s.usingMock)
@@ -79,21 +70,8 @@ export function LearningTab() {
     }
   }
 
-  // モックには実物のモデルが無いので書き出しも読み込みもできない
   const exportDisabled = usingMock || connection !== 'open'
 
-  const series = useMemo(
-    () => ({
-      reward: metrics.map((m) => m.meanEpisodeReward),
-      policyLoss: metrics.map((m) => m.policyLoss),
-      valueLoss: metrics.map((m) => m.valueLoss),
-      entropy: metrics.map((m) => m.entropy),
-      goalRate: metrics.map((m) => m.goalRate),
-      violations: metrics.map((m) => m.signalViolations),
-      laneDeviation: metrics.map((m) => m.laneDeviation),
-    }),
-    [metrics],
-  )
 
   return (
     <>
@@ -177,6 +155,8 @@ export function LearningTab() {
         <MetricsChart
           title="平均エピソード報酬"
           values={series.reward}
+          revision={revision}
+          marks={metricsMarks}
           color="var(--m3-secondary)"
           format={(v) => v.toFixed(1)}
           showZero
@@ -184,6 +164,8 @@ export function LearningTab() {
         <MetricsChart
           title="目的地到達率"
           values={series.goalRate}
+          revision={revision}
+          marks={metricsMarks}
           color="var(--m3-tertiary)"
           format={(v) => `${(v * 100).toFixed(0)}%`}
           height={48}
@@ -191,6 +173,8 @@ export function LearningTab() {
         <MetricsChart
           title="信号無視（1 エピソードあたり）"
           values={series.violations}
+          revision={revision}
+          marks={metricsMarks}
           color="var(--m3-error)"
           format={(v) => v.toFixed(2)}
           height={48}
@@ -198,6 +182,8 @@ export function LearningTab() {
         <MetricsChart
           title="車線逸脱（車線中心からの平均ずれ）"
           values={series.laneDeviation}
+          revision={revision}
+          marks={metricsMarks}
           color="var(--m3-warning)"
           format={(v) => `${v.toFixed(2)} m`}
           height={48}
@@ -205,6 +191,8 @@ export function LearningTab() {
         <MetricsChart
           title="ポリシー損失"
           values={series.policyLoss}
+          revision={revision}
+          marks={metricsMarks}
           color="var(--m3-primary)"
           format={(v) => v.toFixed(4)}
           height={48}
@@ -213,6 +201,8 @@ export function LearningTab() {
         <MetricsChart
           title="価値損失"
           values={series.valueLoss}
+          revision={revision}
+          marks={metricsMarks}
           color="var(--m3-primary)"
           format={(v) => v.toFixed(3)}
           height={48}
@@ -220,6 +210,8 @@ export function LearningTab() {
         <MetricsChart
           title="エントロピー"
           values={series.entropy}
+          revision={revision}
+          marks={metricsMarks}
           color="var(--m3-outline)"
           format={(v) => v.toFixed(3)}
           height={48}
@@ -329,9 +321,9 @@ export function LearningTab() {
           label="速度超過"
           hint="規制速度を超え始めたとき"
           value={params.rewardOverspeed}
-          min={-1000}
+          min={-100}
           max={0}
-          step={5}
+          step={1}
           onChange={(v) => patchParamsLocal({ rewardOverspeed: v })}
           onCommit={(v) => send({ type: 'set_params', params: { rewardOverspeed: v } })}
         />
@@ -517,7 +509,6 @@ export function LearningTab() {
           style={{ display: 'none' }}
           onChange={(e) => {
             const file = e.target.files?.[0]
-            // 同じファイルを続けて選べるように値を空にしておく
             e.target.value = ''
             if (file) void handleImportFile(file)
           }}

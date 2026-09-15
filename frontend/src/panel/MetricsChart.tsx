@@ -1,43 +1,43 @@
-/**
- * 学習指標の折れ線グラフ。
- *
- * グラフ描画ライブラリを追加せず、SVG を自前で組み立てている
- * （依存を増やさない方針のため）。
- *
- * パスと目盛りの計算は metricsChartMath.ts（純粋モジュール）にある。
- * ここには置かないこと——間引きの間違いは型チェックもビルドも通るので、
- * 数値で検査できる場所に置いておく必要がある。
- */
+/** 学習指標の折れ線グラフ。 */
 
 import { useId, useMemo } from 'react'
-import { buildChart, VIEW_W } from './metricsChartMath'
+import { buildChart, VIEW_W, xForIndex } from './metricsChartMath'
 
 export interface MetricsChartProps {
   title: string
-  values: number[]
+  /**
+   * 値の列。**その場で追記される配列を渡してよい**（code_review E-03）。
+   * その場合は `revision` を一緒に渡して、再計算の契機にすること。
+   */
+  values: readonly number[]
+  /** `values` を書き換えたときに増やす番号。省略時は配列の同一性で判断する */
+  revision?: number
   color?: string
   /** 値の表示形式 */
   format?: (v: number) => string
   height?: number
   /** 0 の基準線を引く（報酬など正負をまたぐ指標で有効） */
   showZero?: boolean
+  /** 縦線を引く添字（マップを切り替えた位置。code_review E-04） */
+  marks?: readonly number[]
 }
 
 export function MetricsChart({
   title,
   values,
+  revision,
   color = 'var(--m3-primary)',
   format = (v) => v.toFixed(3),
   height = 64,
   showZero = false,
+  marks,
 }: MetricsChartProps) {
   const chart = useMemo(
     () => buildChart(values, { height, showZero }),
-    [values, height, showZero],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [values, revision, height, showZero],
   )
 
-  // React 19 の useId は «r0» のように SVG の url(#...) では使えない文字を
-  // 含むので、英数字とハイフンだけに正規化してから id にする
   const rawId = useId()
   const gradientId = useMemo(
     () => `m3-chart-grad-${rawId.replace(/[^a-zA-Z0-9-]/g, '')}`,
@@ -69,6 +69,22 @@ export function MetricsChart({
               <stop offset="100%" stopColor={color} stopOpacity="0" />
             </linearGradient>
           </defs>
+
+          {marks?.map((i) =>
+            i > 0 && i < values.length ? (
+              <line
+                key={i}
+                x1={xForIndex(i, values.length)}
+                x2={xForIndex(i, values.length)}
+                y1="0"
+                y2={height}
+                stroke="var(--m3-outline)"
+                strokeWidth="1"
+                strokeDasharray="2 3"
+                vectorEffect="non-scaling-stroke"
+              />
+            ) : null,
+          )}
 
           {chart.zeroY !== null && (
             <line

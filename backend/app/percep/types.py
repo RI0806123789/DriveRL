@@ -1,16 +1,4 @@
-"""画像認識パイプラインの共有型。
-
-`percep` パッケージは「擬似カメラ画像 → CNN 認識器 → 検出結果」を担う。
-検出結果は 2 か所で使われるので、この型が両者の**唯一の契約**になる:
-
-- `percep/encoder.py` が観測ベクトルへ変換して PPO へ渡す（学習入力）
-- `contracts.FrameSnapshot.detections` に載って WebSocket でフロントへ届き、
-  運転席カメラのバウンディングボックスとして描かれる（可視化）
-
-**学習が見ているものと画面に出るものが同じ**であることがこの設計の要点で、
-片方だけを変えてはいけない。ここを分けると「画面では信号を認識できているのに
-学習は別の値を見ている」という、外から絶対に気づけない食い違いが生まれる。
-"""
+"""画像認識パイプラインの共有型。"""
 
 from __future__ import annotations
 
@@ -50,47 +38,22 @@ __all__ = [
 ]
 
 
-# ---------------------------------------------------------------------------
-# カメラ
-# ---------------------------------------------------------------------------
-
-
 @dataclass(frozen=True)
 class CameraSpec:
-    """擬似カメラの内部パラメータ。
+    """擬似カメラの内部パラメータ。"""
 
-    **フロントエンドの運転席カメラ（`frontend/src/scene/cameraMath.ts`）と
-    必ず一致させること。** 一致していないと、バックエンドが検出した
-    バウンディングボックスを Three.js の映像へ重ねたときにずれる。
-    可視化は「学習が見ているもの」を映すのが目的なので、ずれると意味を成さない。
-
-    対応する定数:
-        forward   <-> DRIVER_FORWARD    = 0.35
-        right     <-> DRIVER_RIGHT      = 0.36
-        eye_height<-> DRIVER_EYE_HEIGHT = 1.22
-        pitch     <-> DRIVER_LOOK_AHEAD = 30 / DRIVER_LOOK_DROP = 1.1 から決まる
-        fov_deg   <-> 運転席カメラの視野角 68 度
-    """
-
-    # 認識器へ渡す画像の大きさ [px]。
-    # ★ 小さくしすぎると信号の灯色も標識の数字も原理的に読めない。
-    #   水平画角 68 度・幅 W px のとき、距離 d [m] にある幅 w [m] の物体は
-    #       画素幅 ≈ W * w / (2 * d * tan(34°))
-    #   に写る。幅 192px なら 1.2m の灯器が 15m 先で約 11px、0.6m の標識が
-    #   10m 先で約 8px。これが読み取れる下限で、これ以上落とすと
-    #   「認識できないのはモデルのせい」ではなく**入力に情報が無い**状態になる。
     width: int = 192
     height: int = 144
 
-    fov_deg: float = 68.0          # 水平画角。運転席カメラと同じ
-    forward: float = 0.35          # 車体中心からの前方オフセット [m]
-    right: float = 0.36            # 右方向オフセット [m]（日本車の右ハンドル）
-    eye_height: float = 1.22       # 路面からの視点高さ [m]
-    look_ahead: float = 30.0       # 注視点までの水平距離 [m]
-    look_drop: float = 1.1         # 注視点の下がり [m]
+    fov_deg: float = 68.0
+    forward: float = 0.35
+    right: float = 0.36
+    eye_height: float = 1.22
+    look_ahead: float = 30.0
+    look_drop: float = 1.1
 
-    near: float = 0.5              # これより近い物は描かない [m]
-    far: float = 120.0             # これより遠い物は描かない [m]
+    near: float = 0.5
+    far: float = 120.0
 
     @property
     def pitch(self) -> float:
@@ -123,38 +86,24 @@ class CameraSpec:
 DEFAULT_CAMERA = CameraSpec()
 
 
-# ---------------------------------------------------------------------------
-# 検出
-# ---------------------------------------------------------------------------
-
-
 class DetClass(IntEnum):
-    """認識器が出すクラス。
+    """認識器が出すクラス。"""
 
-    **並び順は学習済みモデルの出力チャンネルと直結している。**
-    途中に挿入すると既存の認識器の重みが全部ずれるので、追加は末尾に足すこと。
-    """
-
-    TRAFFIC_LIGHT = 0   # 信号機（灯色を phase に持つ）
-    SPEED_SIGN = 1      # 最高速度標識（規制速度を speed_limit に持つ）
-    VEHICLE = 2         # 他車両
-    OBSTACLE = 3        # パイロン
-    LANE = 4            # 走行車線（横方向偏差を lateral に持つ）
+    TRAFFIC_LIGHT = 0
+    SPEED_SIGN = 1
+    VEHICLE = 2
+    OBSTACLE = 3
+    LANE = 4
 
 
 NUM_CLASSES = len(DetClass)
 
-# 灯色の表示名。protocol の signals と同じ並び（0=青 / 1=黄 / 2=赤）
 SIGNAL_PHASE_NAMES = ("青", "黄", "赤")
 
 
 @dataclass
 class Detection:
-    """1 個の検出結果。
-
-    座標は**画像の正規化座標**（左上 0,0 / 右下 1,1）で持つ。画素で持つと
-    解像度を変えたときに全部の利用側を直すことになるため。
-    """
+    """1 個の検出結果。"""
 
     cls: DetClass
     x0: float
@@ -163,41 +112,18 @@ class Detection:
     y1: float
     confidence: float
 
-    # --- クラスごとの属性（該当しないクラスでは None）---
-    phase: int | None = None          # 信号: 0=青 / 1=黄 / 2=赤
-    speed_limit: float | None = None  # 標識: 規制速度 [m/s]
+    phase: int | None = None
+    speed_limit: float | None = None
 
-    #: 推定距離 [m]。**クラスによって測っているものが違う**ので、
-    #: 「対象までの距離」として一律に扱わないこと（code_review Q-07）:
-    #:
-    #:   - 信号         : **停止線までの水平距離**（灯器までの距離ではない。
-    #:                    観測が要求するのが停止線までの距離だから）
-    #:   - 車線         : **認識できた車線の前方距離**（＝線の長さ。
-    #:                    `detector._lane_polyline()` はこれを長さとして読む）
-    #:   - 標識・車両・障害物: 対象そのものまでの距離
-    #:
-    #: `encoder._distance()` はこの 3 種を区別せず距離として扱い `near`〜`far` へ
-    #: クランプする。いま車線がそこを通る経路は無いが、`_pick()` や freespace の
-    #: 対象に車線を足すと**線の長さが静かに距離として使われる**。足すときは
-    #: 先に `lane_length` のような別フィールドへ分けること。
     distance: float | None = None
 
-    lateral: float | None = None      # 車線: 車線中心からの横方向偏差 [m]
+    lateral: float | None = None
 
-    #: 車線: 認識した車線中心線（**自車座標系** 前方 +x / 左 +y [m]）。
-    #: ★ 車線は矩形で囲んでも「正しく認識できているか」が分からない
-    #:   （細長い曲線なので、ボックスは道の形をまったく表さない）。
-    #:   路面へ直接重ねて描くために点列で持つ。画面ではこれを実際の車線標示の上に
-    #:   重ねるので、**ずれていればそのままずれて見える**。
     lane_points: list[tuple[float, float]] | None = None
 
     @property
     def label(self) -> str:
-        """画面に出す日本語名。ログとデバッグにも使う。
-
-        フロントも同じ規則で組み立てる（転送量を減らすため文字列は送らない）。
-        **変えるときは `frontend/src/scene/detectionLabels.ts` と両方直すこと。**
-        """
+        """画面に出す日本語名。ログとデバッグにも使う。"""
         if self.cls is DetClass.TRAFFIC_LIGHT:
             if self.phase is not None and 0 <= self.phase < len(SIGNAL_PHASE_NAMES):
                 return f"信号機：{SIGNAL_PHASE_NAMES[self.phase]}"
@@ -213,11 +139,7 @@ class Detection:
         return "障害物"
 
     def to_wire(self) -> dict[str, Any]:
-        """WebSocket へ載せる形。**ラベル文字列は送らない**（フロントで組む）。
-
-        20Hz で全車両分を流すので、桁を落として量を抑える。
-        正規化座標は 3 桁あれば 192px 幅で 1px を切る精度になる。
-        """
+        """WebSocket へ載せる形。**ラベル文字列は送らない**（フロントで組む）。"""
         out: dict[str, Any] = {
             "cls": int(self.cls),
             "box": [
@@ -237,8 +159,6 @@ class Detection:
         if self.lateral is not None:
             out["lateral"] = round(self.lateral, 2)
         if self.lane_points:
-            # 前方距離は 10cm、横位置は 1cm の精度があれば路面へ重ねるには足りる。
-            # 20Hz で全車両ぶん流すので、これ以上の桁は量に見合わない。
             out["lanePoints"] = [
                 [round(px, 1), round(py, 2)] for px, py in self.lane_points
             ]
@@ -247,20 +167,12 @@ class Detection:
 
 @dataclass
 class PerceptionResult:
-    """1 台ぶんの認識結果。
-
-    `detections` は信頼度の降順。観測ベクトル化も可視化もこの順を前提にする
-    （上位 N 件だけを使う箇所があるため）。
-    """
+    """1 台ぶんの認識結果。"""
 
     slot: int
     detections: list[Detection] = field(default_factory=list)
 
     def by_class(self, cls: DetClass) -> list[Detection]:
-        # ★ `is` ではなく `==` で比べる（code_review Q-09）。DetClass は IntEnum
-        #   なので `2 is DetClass.VEHICLE` は False になり、`cls` に素の int が
-        #   入ってくると**静かに空を返す**。同じ契約型の中で 2 つの比較規則が
-        #   同居しないよう `encoder._iter_class()` の側へ揃えてある。
         return [d for d in self.detections if d.cls == cls]
 
     def best(self, cls: DetClass) -> Detection | None:
@@ -274,53 +186,18 @@ class PerceptionResult:
         return [d.to_wire() for d in self.detections]
 
 
-# ---------------------------------------------------------------------------
-# 信号機・標識の実寸（描く側・ラベルを付ける側・3D シーンで共通）
-# ---------------------------------------------------------------------------
-#
-# ★ **ここが唯一の出典。** `percep/camera.py`（描く）と `percep/groundtruth.py`
-#   （ラベルを付ける）が同じ値を別々に持っていて、片方だけ直す事故が起こりうる
-#   状態だった（code_review C-03）。標識に至っては camera が `config` 由来・
-#   groundtruth がハードコードで、**`config` を触ると黙ってずれる**形だった。
-#   ずれても型でもビルドでも捕まらず、「描いた板と正解の箱の大きさが違う」
-#   という形でしか症状が出ない。`LANE_LOOKAHEAD_M` を集約した Q-10 と同じ置き方。
-#
-# 値は `frontend/src/scene/signalGeometry.ts` / `signGeometry.ts` と一致させること。
-# **片方だけ変えると、画面の見た目と検出枠がずれる。**
-
-# --- 信号機（signalGeometry.ts）---
-#: 灯器下端の路面からの高さ [m]
 SIGNAL_MOUNT_HEIGHT = 5.0
-#: 灯器筐体の幅 [m]（横型 3 灯 + 縁）
 SIGNAL_HOUSING_W = 1.16
-#: 灯器筐体の高さ [m]
 SIGNAL_HOUSING_H = 0.44
-#: 灯火の間隔 [m]
 SIGNAL_LAMP_PITCH = 0.35
-#: 灯火の半径 [m]（灯火径 300mm）
 SIGNAL_LAMP_RADIUS = 0.15
-#: 筐体中心の高さ [m]
 SIGNAL_HEAD_Z = SIGNAL_MOUNT_HEIGHT + SIGNAL_HOUSING_H * 0.5
-#: 交差点中心から灯器までの余白 [m]（対面側へこれだけ進んだ位置に置く）
 SIGNAL_BEYOND_MARGIN = 2.0
 
-# --- 最高速度標識（signGeometry.ts / config.SPEED_SIGN_*）---
-#: 標示板の半径 [m]
 SIGN_RADIUS = config.SPEED_SIGN_DIAMETER * 0.5
-#: 標示板下端の高さ [m]
 SIGN_BOTTOM_HEIGHT = config.SPEED_SIGN_BOTTOM_HEIGHT
-#: 標示板中心の高さ [m]
 SIGN_BOARD_Z = SIGN_BOTTOM_HEIGHT + SIGN_RADIUS
 
-
-# ---------------------------------------------------------------------------
-# 正対判定（擬似カメラの描画と真値のラベルで共通）
-# ---------------------------------------------------------------------------
-
-#: 灯器・標示板が運転者に正対していると認める角度差 [rad]。
-#: これを超えると裏側や真横を見ていることになり、灯色も数字も読めない。
-#: **「箱は見えるが色は読めない」を検出扱いにしない**のは、
-#: `Detection.phase` が必ず埋まっている契約にするため。
 FACING_TOLERANCE = math.radians(75.0)
 
 
@@ -333,38 +210,7 @@ def facing_viewer(
     viewer_heading: Any,
     tolerance: float = FACING_TOLERANCE,
 ) -> np.ndarray:
-    """信号・標識が視点に正対しているかを返す（bool の ndarray）。
-
-    ★ **`percep/camera.py`（描く側）と `percep/groundtruth.py`（ラベルを付ける側）が
-      必ずこの 1 つを使うこと。** かつては前者が「位置の半空間」だけ、後者が
-      「方位差 ±75 度」だけを見ており、比べている量そのものが違っていた
-      （code_review C-01）。交差点には進入方向ごとに灯器が立つので、交差方向
-      （方位差 90 度）の灯器は**必ず描かれるのに必ずラベルが付かない**という
-      構造的な食い違いになっていた。銀座の実測で、描いた灯器の 57.4% に
-      ラベルが無く、逆に 2,700 件は画像に無いのに箱だけ付いていた。
-      画像に写っているものと教師データが食い違うと、認識器から見て
-      タスクが定義できていない状態になる（症状は「精度が上がらない」としか出ない）。
-
-    判定は 2 つの AND:
-
-    1. **方位** — 視点の進行方位が、その地物が向いている進入方位と `tolerance`
-       以内。「その信号・標識が自分に適用されるか」を決めるのはこちら。
-    2. **位置** — 視点が地物の前面側の半空間にある。通り過ぎた灯器を
-       残さないための条件で、方位だけでは落ちない。
-
-    角度差は `cos(a - b) >= cos(tolerance)` で見る（`|angle_diff| <= tolerance`
-    と同値。tolerance は 0〜pi）。atan2 を通さないぶん速い。
-
-    Args:
-        obj_x, obj_y: 地物の位置。`camera.py` の灯器中心と `groundtruth.py` の
-            `signal_head` は同じ式で置いてあるので、同じ点を渡すこと。
-        obj_heading: 地物が規制する進行方位 [rad]（`MapSignal.heading` 等）。
-            板や灯器の面はこの逆を向く。
-        eye_x, eye_y, viewer_heading: 視点の位置と進行方位。
-        tolerance: 正対と認める角度差 [rad]。
-
-    すべて numpy のブロードキャスト規則で組み合わせられる（スカラーでもよい）。
-    """
+    """信号・標識が視点に正対しているかを返す（bool の ndarray）。"""
     cos_o = np.cos(obj_heading)
     sin_o = np.sin(obj_heading)
     aligned = (
@@ -375,24 +221,10 @@ def facing_viewer(
     return np.asarray(aligned & ahead, dtype=bool)
 
 
-# ---------------------------------------------------------------------------
-# 検出の切り詰め方（真値と認識器で共通）
-# ---------------------------------------------------------------------------
-
-#: 車線として前方何メートルまでを 1 つの検出として扱うか [m]。
-#: 真値（`groundtruth`）はここまで経路をたどって帯を作り、
-#: 認識器（`detector`）は描く中心線の長さの上限に使う。
-#: ★ 認識器の車線は直線近似なので、長く伸ばすほどカーブで実際の車線から離れる。
-#:   未学習のモデルが 57m まで伸ばした実例があるので上限として効かせている。
 LANE_LOOKAHEAD_M = 25.0
 
-#: 路面へ重ねて描くために送る車線中心線の点数。
-#: **20Hz で全車両ぶん流すので、増やすと配信量にそのまま効く。**
 LANE_POLYLINE_POINTS = 6
 
-#: クラスごとに残す上限。`config.PERCEP_MAX_DETECTIONS`（12）へ詰めるとき、
-#: 観測化で必要な内訳（車線 1 / 信号 1 / 標識 1 / 車両 3 / 障害物 3）が
-#: 必ず生き残るようにするための枠。合計はちょうど 12。
 CLASS_QUOTA: dict[DetClass, int] = {
     DetClass.LANE: 1,
     DetClass.TRAFFIC_LIGHT: 2,
@@ -401,7 +233,6 @@ CLASS_QUOTA: dict[DetClass, int] = {
     DetClass.OBSTACLE: 4,
 }
 
-#: 枠で詰めるときの優先順位（ラウンドロビンで先に置く順）。
 CLASS_PRIORITY: tuple[DetClass, ...] = (
     DetClass.LANE,
     DetClass.TRAFFIC_LIGHT,
@@ -414,22 +245,7 @@ CLASS_PRIORITY: tuple[DetClass, ...] = (
 def pack_by_class_quota(
     per_class: dict[DetClass, list[Detection]], limit: int
 ) -> list[Detection]:
-    """クラス枠つきの優先度ラウンドロビンで `limit` 件へ詰める。
-
-    ★ **真値（`groundtruth`）と認識器（`detector`）の両方がこれを呼ぶこと**
-      （code_review Q-01）。片方だけ「信頼度の上位から一括で 12 件」にすると、
-      発火したセルが車両で埋まったときに信号・標識・車線が 1 件も残らず、
-      `encoder` が「見えなかった」既定値で埋めるため
-      **目の前に赤信号があっても観測は「信号は無い」**になる。
-      報酬と終了判定は world の真値なので、そのとき**罰だけが入る**。
-      実測では未学習のモデルで 16.4% の画像から信号が丸ごと消えた。
-      画面のボックスも同じ検出から描くので、症状は「成績が伸びない」という
-      形でしか出ない。`encode_targets` / `decode_detections` を対で扱うのと
-      同じ理由で、詰め方は 1 か所にまとめてある。
-
-    各クラスは `CLASS_QUOTA` の件数まで。渡す時点で**各クラス内は残したい順**
-    （真値なら近い順、認識器なら信頼度の降順）に並べておくこと。
-    """
+    """クラス枠つきの優先度ラウンドロビンで `limit` 件へ詰める。"""
     cursor: dict[DetClass, int] = {cls: 0 for cls in CLASS_PRIORITY}
     picked: list[Detection] = []
     while len(picked) < limit:

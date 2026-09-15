@@ -1,36 +1,4 @@
-"""擬似カメラ画像から信号・標識・車線・車両・障害物を検出する CNN を学習する。
-
-    cd backend
-    .venv\\Scripts\\python.exe train_detector.py --samples 2400 --epochs 12
-
-★ **中身は `app/percep/trainer.py` にある。ここはその CLI の皮でしかない。**
-  同じ処理を Web アプリの操作パネル「モデル作成」タブからも走らせるため、
-  収集・損失・学習・検証の実装は両方から呼べる場所へ移してある。
-  **アルゴリズムを直すときは `app/percep/trainer.py` を直すこと。**
-  ここに書き足すと、画面から回したときにだけ効かない変更になる。
-
-流れ:
-
-    1. マップを読み込んで `SimulationEnv` を走らせる
-    2. 各ステップで擬似カメラ画像と「理想の検出結果」（world の真値）を集める
-    3. データセットを `data/detector/dataset/` へ保存する
-    4. `build_detector()` を学習して `data/detector/detector.keras` へ保存する
-
-学習が終わると、次回サーバーを起動したときに `SimulationEnv` が自動で
-このモデルを読み込み、**観測が真値フォールバックから実際の CNN の出力へ切り替わる**
-（`app/sim/env.py` の `_ensure_percep()`）。画面から回した場合は、その場で
-載せ替えるので再起動は要らない（`runtime/detector_job.py`）。
-
-★ 教師データは `percep/groundtruth.py` が world の真値から作る。これは
-  認識器が未学習のときのフォールバックと**同じ関数**で、だからこそ
-  「まず走らせる → 教師データを集める → 学習する → 差し替える」という
-  順序で立ち上げられる。
-
-★ **CLI から学習を回している間はサーバーを止めておくこと。** どちらも CPU を
-  使い切るので、同時に動かすと学習ループのステップ時間が跳ね上がる。
-  「モデル作成」タブから回す場合は、サーバー側が自分でシミュレーションを
-  止めてから始めるので気にしなくてよい。
-"""
+"""擬似カメラ画像から信号・標識・車線・車両・障害物を検出する CNN を学習する。"""
 
 from __future__ import annotations
 
@@ -46,7 +14,27 @@ from app.map import build_map_index, get_preset, list_presets, load_map
 from app.percep import trainer
 from app.percep.trainer import DATASET_FILE
 
+from app.runtime.detector_job import (
+    BATCH_MAX,
+    BATCH_MIN,
+    EPOCHS_MAX,
+    EPOCHS_MIN,
+    SAMPLES_MAX,
+    SAMPLES_MIN,
+    SEED_MAX,
+    SEED_MIN,
+    WIDTH_MAX,
+    WIDTH_MIN,
+)
+
 __all__ = ["DATASET_FILE", "main"]
+
+
+def _out_of_range(name: str, value: float, lo: float, hi: float) -> str:
+    """値域外なら理由を返す（`parse_request` と同じ文面）。合っていれば空文字。"""
+    if lo <= value <= hi:
+        return ""
+    return f"{name} は {lo}〜{hi} の範囲で指定してください（受け取った値: {value}）"
 
 
 def _print_collect_progress(collected: int, samples: int, elapsed: float) -> None:
@@ -72,8 +60,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--width", type=float, default=1.0, help="モデルのチャンネル倍率（速度が足りなければ 0.5）"
     )
-    parser.add_argument("--collect-only", action="store_true", help="収集だけして終わる")
-    parser.add_argument("--train-only", action="store_true", help="保存済みデータで学習だけする")
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="収集の乱数種。変えると別の教師データが集まる（同じ種なら毎回同じ）",
+    )
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument("--collect-only", action="store_true", help="収集だけして終わる")
+    mode_group.add_argument("--train-only", action="store_true", help="保存済みデータで学習だけする")
     parser.add_argument(
         "--dataset",
         type=Path,
@@ -87,20 +82,37 @@ def main(argv: list[str] | None = None) -> int:
         print(f"未知のプリセットです: {args.preset}（{presets}）")
         return 2
 
+    for why in (
+        _out_of_range("--samples", int(args.samples), SAMPLES_MIN, SAMPLES_MAX),
+        _out_of_range("--epochs", int(args.epochs), EPOCHS_MIN, EPOCHS_MAX),
+        _out_of_range("--batch-size", int(args.batch_size), BATCH_MIN, BATCH_MAX),
+        _out_of_range("--width", float(args.width), WIDTH_MIN, WIDTH_MAX),
+        _out_of_range("--seed", int(args.seed), SEED_MIN, SEED_MAX),
+    ):
+        if why:
+            print(why)
+            return 2
+
     dataset_path = Path(args.dataset)
     if args.train_only:
         if not dataset_path.exists():
             print(f"データセットがありません: {dataset_path}")
             return 2
         print(f"[読込] {dataset_path}")
-        with np.load(dataset_path) as npz:
-            data = {k: npz[k] for k in npz.files}
+        try:
+            data = trainer.load_dataset(dataset_path)
+        except ValueError as exc:
+            print(f"！ {exc}")
+            return 2
     else:
         print(f"[収集] マップ {args.preset} を読み込みます")
         index = build_map_index(load_map(get_preset(args.preset)))
         started = time.perf_counter()
         data = trainer.collect_dataset(
-            index, int(args.samples), on_progress=_print_collect_progress
+            index,
+            int(args.samples),
+            seed=int(args.seed),
+            on_progress=_print_collect_progress,
         )
         print(
             f"\n[収集] 完了: {data['images'].shape[0]} 枚"
