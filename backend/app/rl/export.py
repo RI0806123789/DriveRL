@@ -1,22 +1,4 @@
-"""学習済みモデルの書き出し。
-
-3 つの形式を用意する。
-
-- **checkpoint (.pt)**: `PPOTrainer.save()` と同じ中身（重み＋オプティマイザ状態）に、
-  人が読めるメタデータを足したもの。このプロジェクトに読み戻せる、いわば「続きから学習できる」形式。
-- **TorchScript (.torchscript.pt)**: 推論だけを切り出した自己完結の形式。
-  このリポジトリのコードが無くても `torch.jit.load()` だけで動く。
-- **Keras (.keras)**: 同じネットワークを Keras 3 のモデルとして組み直し、重みを移したもの。
-  `keras.saving.load_model()` で読める。PyTorch の外（Keras/TensorFlow 系の資産）で
-  扱いたい場合向け。標準の Dense 層だけで構成しているので custom_objects は不要。
-
-どちらにもメタデータ（観測ベクトルの構成、行動のスケール、学習の進み具合）を必ず埋め込む。
-これが無いと、書き出したモデルを受け取った側が「54 次元の入力に何を入れればよいか」を
-再現できず、ファイルとしては読めても実際には使えない。
-
-**観測の構成を変えたら `_observation_layout()` も必ず直すこと。**
-ここがずれると、次元数だけ合っていて中身の説明が嘘になる。
-"""
+"""学習済みモデルの書き出し。"""
 
 from __future__ import annotations
 
@@ -52,14 +34,8 @@ logger = logging.getLogger(__name__)
 
 EXPORT_KINDS = ("checkpoint", "torchscript", "keras")
 
-# メタデータのスキーマ版。中身の意味を変えたら上げること。
-# 2: 観測を画像認識ベースへ移行。`observation.layout` の各項に `source` が付き、
-#    値の意味が「真値」から「CNN 認識器の出力」へ変わった。
 METADATA_VERSION = 2
 
-# `data/exports/` に残す世代数（1 ファイル = 1 世代）。
-# 読み込みのたびに `before-import` の退避が増えるので、上限が無いと際限なく貯まる
-# （実測で 48 ファイル 21MB）。古いものから消す。
 MAX_EXPORT_FILES = 20
 
 
@@ -76,34 +52,15 @@ class ExportResult:
     kind: str
 
 
-# ---------------------------------------------------------------------------
-# 推論専用ラッパー（TorchScript 用）
-# ---------------------------------------------------------------------------
-
-
 class InferencePolicy(nn.Module):
-    """観測から決定論的な行動を出すだけのモジュール。
-
-    学習時の方策は対角ガウス分布からサンプリングするが、書き出し先で欲しいのは
-    普通「一番よいと思っている行動」なので、分布の平均を採用して [-1, 1] に
-    クリップする。探索用のノイズを再現したい場合のために log_std も同梱する。
-    """
+    """観測から決定論的な行動を出すだけのモジュール。"""
 
     def __init__(self, policy: ActorCritic) -> None:
         super().__init__()
-        # 学習中のモジュールを共有すると、書き出した後の重み更新が
-        # TorchScript 側にも影響してしまう。必ず複製してから固める。
         self.policy_trunk = copy.deepcopy(policy.policy_trunk)
         self.mu_head = copy.deepcopy(policy.mu_head)
         self.value_trunk = copy.deepcopy(policy.value_trunk)
         self.value_head = copy.deepcopy(policy.value_head)
-        # 学習時と同じクランプを掛けた値を定数として持たせる。
-        # ★ 可動域は必ず `config` から引くこと（code_review L-02）。
-        #   ここに -5.0 / 1.0 を直書きしていたとき、上限の 1.0 は
-        #   CLAUDE.md が「log_std = 1.0013 / std = 2.72 で 8,925 更新ぶん固着した」と
-        #   記録している**旧値そのもの**だった。std 2.72 は行動範囲 [-1, 1] の
-        #   全幅 2 より大きく、受け取った側が README のとおり
-        #   Normal(action, exp(logStd)) からサンプリングすると**実質ランダム**になる。
         log_std = torch.clamp(
             policy.log_std.detach().clone(),
             float(config.PPO_LOG_STD_MIN),
@@ -111,8 +68,6 @@ class InferencePolicy(nn.Module):
         )
         self.register_buffer("log_std", log_std)
 
-        # 推論専用なので勾配追跡を外す。付けたままだと、受け取った側が
-        # 出力を float() するだけで警告が出るなど、使い勝手が悪くなる。
         for param in self.parameters():
             param.requires_grad_(False)
         self.eval()
@@ -125,21 +80,8 @@ class InferencePolicy(nn.Module):
         return action, value
 
 
-# ---------------------------------------------------------------------------
-# メタデータ
-# ---------------------------------------------------------------------------
-
-
 def _observation_layout() -> list[dict[str, Any]]:
-    """観測ベクトルの構成。app/percep/encoder.py の連結順と一致していること。
-
-    ★ **この観測は CNN 認識器の出力でできている**（`app/percep/`）。
-      受け取った側が同じ入力を再現するには、車載カメラ相当の画像を同じ認識器に
-      通す必要がある。真値をそのまま入れると学習時と分布が変わる
-      （学習時の観測は**誤認識と見落としを含んでいる**）。
-      `source` がその区別で、"camera" は認識結果、それ以外は
-      カメラを通さずに得られる値（速度計・ナビ）。
-    """
+    """観測ベクトルの構成。app/percep/encoder.py の連結順と一致していること。"""
     return [
         {
             "name": "self",
@@ -226,23 +168,13 @@ def build_metadata(
     metrics: dict[str, Any] | None,
     params: Any | None = None,
 ) -> dict[str, Any]:
-    """書き出しに同梱するメタデータを組み立てる。
-
-    `params` は書き出し時点の `SimParams`。**観測の正規化に使った `max_speed` は
-    定数ではなく実行時パラメータ**（`set_params` で 1.0〜40.0 に変更できる）なので、
-    ここへ入れないと受け取った側は観測の 3 要素（自車速度比・規制速度比・超過量）を
-    再現できない（code_review L-04）。省略時は既定値を書く。
-    """
+    """書き出しに同梱するメタデータを組み立てる。"""
     max_speed = float(getattr(params, "max_speed", config.MAX_SPEED))
     return {
         "metadataVersion": METADATA_VERSION,
         "application": "DriveRL",
         "kind": kind,
         "exportedAt": datetime.now().astimezone().isoformat(timespec="seconds"),
-        # ★ str() で包むこと。torch.__version__ は str のサブクラス TorchVersion であり、
-        #   そのまま保存すると torch.load(weights_only=True) が
-        #   「Unsupported global: torch.torch_version.TorchVersion」で読み込みを拒否する。
-        #   読み込み側を安全モードで動かすために、素の str に落とす。
         "torchVersion": str(torch.__version__),
         "model": {
             "type": "shared ActorCritic (parameter sharing)",
@@ -282,11 +214,6 @@ def build_metadata(
             "policy.logStd を使って Normal(action, exp(logStd)) からサンプリングすること。",
         },
         "policy": {
-            # 探索用のノイズ。決定論的な行動が欲しいだけなら使わなくてよい。
-            # 学習時と同じ確率的な行動を再現するときに Normal(action, exp(log_std)) とする。
-            # ★ TorchScript に埋める buffer と**同じクランプ**を掛ける（L-02）。
-            #   生値のまま書くと、1 つの書き出しの中で「埋め込みバッファ」
-            #   「メタデータ JSON」「学習時に実際に使われる値」の 3 つが食い違う。
             "logStd": [
                 float(
                     min(
@@ -309,12 +236,7 @@ def build_metadata(
             "maxAccel": config.MAX_ACCEL,
             "maxDecel": config.MAX_DECEL,
             "dt": config.DT,
-            # ★ 観測の正規化に使う最高速度。**実行時に変えられる値**なので、
-            #   受け取った側は推測できない（code_review L-04）
             "maxSpeed": max_speed,
-            # ★ 舵角は `maxSteer` だけでは再現できない。変化率の上限と
-            #   曲率速度制限（steer_max = atan(a_lat * L / v^2)）がセットで
-            #   初めて同じ車両になる（CLAUDE.md「セットでなければ意味がない」）
             "steerRate": config.STEER_RATE,
             "maxLateralAccel": config.MAX_LATERAL_ACCEL,
         },
@@ -332,29 +254,13 @@ def build_metadata(
     }
 
 
-
-# ---------------------------------------------------------------------------
-# Keras 形式
-# ---------------------------------------------------------------------------
-
-
 def preload_keras() -> None:
-    """Keras を先に読み込んでおく。
-
-    `import keras` は数秒かかる。書き出し自体はシミュレーションスレッドの
-    ステップ境界で行うので、そこでインポートすると学習が数秒止まってしまう。
-    HTTP ハンドラ側から別スレッドで先に呼んでおくためのフック。
-    """
+    """Keras を先に読み込んでおく。"""
     _import_keras()
 
 
 def _import_keras():
-    """Keras 3 を torch バックエンドで読み込む。
-
-    Keras 3 は既定で TensorFlow を探すが、この環境には入れていない。
-    torch は学習で既に使っているので、それをバックエンドにする。
-    環境変数は `import keras` より前に設定しなければ効かない。
-    """
+    """Keras 3 を torch バックエンドで読み込む。"""
     os.environ.setdefault("KERAS_BACKEND", "torch")
     try:
         import keras  # noqa: PLC0415
@@ -367,12 +273,7 @@ def _import_keras():
 
 
 def _build_keras_model(trainer: Any):
-    """PyTorch の ActorCritic と同じ構造の Keras モデルを作り、重みを移す。
-
-    層は標準の Dense だけで組む。カスタム層を使うと読み込み側にこのコードが
-    必要になり、「Keras だけで読める」という利点が消えてしまうため。
-    行動のクリップ [-1, 1] は `hard_tanh` 活性で表す（clip と厳密に一致する）。
-    """
+    """PyTorch の ActorCritic と同じ構造の Keras モデルを作り、重みを移す。"""
     keras = _import_keras()
 
     policy = trainer.policy
@@ -392,19 +293,12 @@ def _build_keras_model(trainer: Any):
         action_dim, activation="hard_tanh", name="action"
     )(trunk(inputs, "policy"))
     value_dense = keras.layers.Dense(1, activation=None, name="value")(trunk(inputs, "value"))
-    # ★ TorchScript 版（InferencePolicy.forward、上の squeeze(-1)）は value を
-    #   (B,) で返すのに、Keras の Dense(1) は素の出力が (B, 1)。揃えないと
-    #   3 形式のうち Keras だけ shape が違う成果物になる（code_review L-09）。
-    #   重みを積む Dense 層の名前は "value" のまま保ち、その上に無名の
-    #   Reshape を重ねて出力だけ (B,) に落とす。
     value = keras.layers.Reshape((), name="value_squeezed")(value_dense)
 
     model = keras.Model(
         inputs=inputs, outputs=[action, value], name="autoware_sim_policy"
     )
 
-    # --- 重みの移植 ---
-    # PyTorch の Linear は (out, in)、Keras の Dense カーネルは (in, out) なので転置する。
     def weight(name: str):
         return state[f"{name}.weight"].detach().cpu().numpy()
 
@@ -412,7 +306,6 @@ def _build_keras_model(trainer: Any):
         return state[f"{name}.bias"].detach().cpu().numpy()
 
     for i in range(len(hidden)):
-        # trunk は Linear と Tanh の交互なので、i 番目の Linear は添字 2i
         for prefix, source in (("policy", "policy_trunk"), ("value", "value_trunk")):
             model.get_layer(f"{prefix}_dense_{i}").set_weights(
                 [weight(f"{source}.{2 * i}").T, bias(f"{source}.{2 * i}")]
@@ -424,12 +317,7 @@ def _build_keras_model(trainer: Any):
 
 
 def _attach_metadata(path: Path, metadata: dict[str, Any]) -> None:
-    """.keras（zip）へ独自のメタデータを追記する。
-
-    Keras は自分が知っているエントリしか読まないので、追記しても
-    `keras.saving.load_model()` はそのまま通る。モデル単体で
-    「観測に何を入れるか」が分かるようにするための同梱。
-    """
+    """.keras（zip）へ独自のメタデータを追記する。"""
     with zipfile.ZipFile(path, "a", zipfile.ZIP_DEFLATED) as archive:
         archive.writestr(
             KERAS_METADATA_ENTRY,
@@ -437,13 +325,7 @@ def _attach_metadata(path: Path, metadata: dict[str, Any]) -> None:
         )
 
 
-#: .keras の中に入れる独自メタデータのファイル名
 KERAS_METADATA_ENTRY = "autoware_sim_metadata.json"
-
-
-# ---------------------------------------------------------------------------
-# 書き出し
-# ---------------------------------------------------------------------------
 
 
 def _safe_slug(text: str | None, fallback: str = "nomap") -> str:
@@ -468,17 +350,7 @@ def prune_exports(
     keep: int = MAX_EXPORT_FILES,
     protect: Path | None = None,
 ) -> list[str]:
-    """書き出しディレクトリを新しい順に `keep` 件だけ残し、古いものを消す。
-
-    書き出しと読み込み前の自動退避で増え続けるため、書き出しのたびに呼ぶ。
-    消せなかったファイル（ダウンロード中で掴まれている等）は黙って飛ばす。
-    削除に失敗しても書き出し自体は成功しているので、例外は外へ出さない。
-
-    Args:
-        protect: 何があっても消さないファイル（いま書き出したもの）
-    Returns:
-        実際に消したファイル名。
-    """
+    """書き出しディレクトリを新しい順に `keep` 件だけ残し、古いものを消す。"""
     directory = Path(directory) if directory is not None else config.EXPORT_DIR
     if not directory.is_dir():
         return []
@@ -490,7 +362,6 @@ def prune_exports(
     for path in directory.iterdir():
         if not path.is_file():
             continue
-        # 書き出し途中の一時ファイルは世代に数えない（掴まれている可能性がある）
         if path.name.endswith(".tmp") or path.name.endswith(".partial.keras"):
             continue
         try:
@@ -528,15 +399,7 @@ def export_model(
     label: str | None = None,
     params: Any | None = None,
 ) -> ExportResult:
-    """モデルを書き出してファイルの情報を返す。
-
-    Args:
-        trainer: `PPOTrainer`
-        kind: "checkpoint" か "torchscript"
-        label: ファイル名に挟む目印（例: "before-import"）。あとから探しやすくするため
-    Raises:
-        ExportError: 未知の形式、または書き出しに失敗したとき
-    """
+    """モデルを書き出してファイルの情報を返す。"""
     if kind not in EXPORT_KINDS:
         raise ExportError(f"未知の書き出し形式です: {kind}")
 
@@ -558,8 +421,6 @@ def export_model(
         if kind == "checkpoint":
             path = directory / f"{base}.pt"
             payload = {
-                # PPOTrainer.load() が読める形を保つ（続きから学習できるようにするため）。
-                # 形式の識別子は save() と同じ定数を使う（経路によって型が違わないように）
                 "format": CHECKPOINT_FORMAT,
                 "obs_dim": int(trainer.obs_dim),
                 "action_dim": int(trainer.action_dim),
@@ -567,7 +428,6 @@ def export_model(
                 "updates": int(trainer.updates),
                 "policy": trainer.policy.state_dict(),
                 "optimizer": trainer.optimizer.state_dict(),
-                # 書き出し版だけの追加情報
                 "metadata": metadata,
             }
             _atomic_save(lambda p: torch.save(payload, p), path)
@@ -576,21 +436,18 @@ def export_model(
         elif kind == "keras":
             path = directory / f"{base}.keras"
             model = _build_keras_model(trainer)
-            # Keras は保存先の拡張子を見て形式を決めるので、.tmp では保存できない。
-            # 一度別名の .keras に書いてから差し替える。
             tmp_path = path.with_name(path.stem + ".partial.keras")
             model.save(tmp_path)
             _attach_metadata(tmp_path, metadata)
             os.replace(tmp_path, path)
             media_type = "application/octet-stream"
 
-        else:  # torchscript
+        else:
             path = directory / f"{base}.torchscript.pt"
             module = InferencePolicy(trainer.policy)
             try:
                 scripted = torch.jit.script(module)
             except Exception:
-                # script が通らない環境向けの保険。バッチ次元は動的のままにする。
                 example = torch.zeros(1, int(trainer.obs_dim), dtype=torch.float32)
                 scripted = torch.jit.trace(module, example, check_trace=False)
 
@@ -603,9 +460,6 @@ def export_model(
     except Exception as exc:  # noqa: BLE001 - 失敗理由をそのまま画面に出したい
         raise ExportError(f"モデルの書き出しに失敗しました: {exc}") from exc
 
-    # 世代上限を超えたぶんを片付ける。失敗しても書き出しは成功しているので握る。
-    # 掃除するのは既定の書き出し先だけ。out_dir を指定された場合は、呼び出し側の
-    # ディレクトリに関係の無いファイルが入っていることがあるので触らない。
     if directory == config.EXPORT_DIR:
         try:
             prune_exports(directory, protect=path)

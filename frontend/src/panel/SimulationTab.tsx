@@ -1,11 +1,4 @@
-/**
- * 「シミュレーション」タブ。
- *
- * 再生／一時停止、車両数、シミュレーション速度、介入モード、車両ごとの状態を扱う。
- *
- * ★ 一時停止は「描画のみ」を止める（memo 5章の決定事項）。
- *   ユーザーが「学習も止まった」と誤解しないよう、UI 上で必ず明示する。
- */
+/** 「シミュレーション」タブ。 */
 
 import { useEffect, useState } from 'react'
 import { send } from '../store/connection'
@@ -48,11 +41,7 @@ interface VehicleRow {
   reachedGoal: boolean
 }
 
-/**
- * 一覧の表示に関わる値が変わったかどうか。
- * 速度と距離は表示桁（小数 1 桁 / 整数）で比べる。桁より細かい変化で
- * 再レンダリングしても画面は 1 ドットも変わらない。
- */
+/** 一覧の表示に関わる値が変わったかどうか。 */
 function sameRows(a: VehicleRow[], b: VehicleRow[]): boolean {
   if (a.length !== b.length) return false
   for (let i = 0; i < a.length; i++) {
@@ -95,19 +84,11 @@ export function SimulationTab() {
   const panelOpen = useSimStore((s) => s.panelOpen)
 
   const paused = status.renderPaused
-  // ★ `renderPaused`（描画だけ止める）とは別物。認識器の学習中は物理も PPO も
-  //   止まっている。ここに出さないと「一時停止していないのに車が動かない」に見える
   const suspended = status.simSuspended ?? false
 
-  // 車両一覧と障害物数は 4Hz で frameBuffer から取る（20Hz で React を回さない）
   const [rows, setRows] = useState<VehicleRow[]>([])
   const [obstacleCount, setObstacleCount] = useState(0)
 
-  // パネルを畳んでいる間はポーリングごと止める（code_review F-10）。
-  // 3D を全画面で見たいときにこそ、隠れた 64 行の再レンダリングが乗ってしまう。
-  // 中身が変わっていなければ setRows しない（code_review F-11）。
-  // 毎回新しい配列を返すと Object.is が必ず外れ、停車中でも毎秒 4 回
-  // 64 行 + Card + Slider を丸ごと差分計算することになる。
   useEffect(() => {
     if (!panelOpen) return
     const timer = window.setInterval(() => {
@@ -134,7 +115,6 @@ export function SimulationTab() {
     return () => window.clearInterval(timer)
   }, [panelOpen])
 
-  // クリックで選んだ車両（追従カメラの対象と同じもの）
   const tracked = rows.find((r) => r.id === followTarget && r.active) ?? null
 
   return (

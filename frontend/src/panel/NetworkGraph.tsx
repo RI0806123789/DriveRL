@@ -1,17 +1,4 @@
-/**
- * 方策・価値ネットワークのノード図。
- *
- * 「学習しているように見えない」に画面から答えるためのもの。
- * 図そのものは飾りではなく、**サーバーから 1Hz で届く実測値**で描いている。
- *
- * - 線の太さ  … その層の重みの大きさ（|w| の平均）
- * - 線の流れ  … 直近の更新で流れた勾配。**止まっていれば学習は進んでいない**
- * - Δ の数値  … 直前の 1 更新で重みがどれだけ動いたか
- *
- * 隠れ層の構成もここから変えられる（変えると学習は 0 からやり直し）。
- *
- * 実測値が無い（マップ未読込・学習器が未初期化）ときは何も描かない。
- */
+/** 方策・価値ネットワークのノード図。 */
 
 import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import { send } from '../store/connection'
@@ -20,24 +7,13 @@ import { Button } from '../ui/Button'
 import { Chip } from '../ui/Chip'
 import type { NetworkLayer, NetworkMessage } from '../types/protocol'
 
-// ---------------------------------------------------------------------------
-// 図の寸法
-// ---------------------------------------------------------------------------
-
 const VIEW_W = 420
 const VIEW_H = 250
-/** 図の左右の端（観測の列と出力の列の中心）*/
+/** 図の左右の端（観測の列と出力の列の中心） */
 const X_FIRST = 42
 const X_LAST = 392
 
-/**
- * 列の x 座標。**隠れ層の数に応じて本数が変わる。**
- *
- * 以前は 4 本に決め打ちしていたので、隠れ層を 3 層・4 層にしても
- * 図は 2 列のままで 3 層目以降が描かれなかった。
- *
- * @param columns 観測 + 隠れ層 + 出力 の合計本数
- */
+/** 列の x 座標。**隠れ層の数に応じて本数が変わる。** */
 function columnXs(columns: number): number[] {
   const n = Math.max(2, columns)
   const step = (X_LAST - X_FIRST) / (n - 1)
@@ -46,7 +22,7 @@ function columnXs(columns: number): number[] {
 /** 方策の枝と価値の枝の中心 y */
 const POLICY_Y = 74
 const VALUE_Y = 182
-/** 1 列に描く円の数（実際の次元数はラベルで出す）*/
+/** 1 列に描く円の数（実際の次元数はラベルで出す） */
 const DOTS = 5
 const DOT_GAP = 17
 const R = 5.2
@@ -64,12 +40,10 @@ function dotYs(cy: number, n: number): number[] {
   return Array.from({ length: n }, (_, i) => cy - span / 2 + i * DOT_GAP)
 }
 
-/** 実際の次元数に応じて描く円の数（少ない層はそのまま描く）*/
+/** 実際の次元数に応じて描く円の数（少ない層はそのまま描く） */
 function dotCount(dim: number): number {
   return Math.min(DOTS, Math.max(1, dim))
 }
-
-// ---------------------------------------------------------------------------
 
 /** 層を名前で引く */
 function findLayer(layers: NetworkLayer[], name: string): NetworkLayer | undefined {
@@ -89,15 +63,11 @@ function fmt(value: number, digits = 4): string {
   return value.toFixed(digits)
 }
 
-// ---------------------------------------------------------------------------
-// 層と層をつなぐ線の束
-// ---------------------------------------------------------------------------
-
 interface BundleProps {
   from: Column
   to: Column
   layer: NetworkLayer | undefined
-  /** 同じ図の中での相対的な強さ（線の太さに使う）*/
+  /** 同じ図の中での相対的な強さ（線の太さに使う） */
   weightScale: number
   gradScale: number
   accent: string
@@ -117,7 +87,6 @@ const Bundle = memo(function Bundle({
   const weight = layer ? normalize(layer.weightAbsMean, weightScale) : 0
   const grad = layer ? normalize(layer.gradNorm, gradScale) : 0
 
-  // 勾配が流れている層ほど速く流す。0 なら止める（＝学習していない）
   const dur = grad > 0 ? Math.max(0.6, 2.6 - grad * 2.0) : 0
 
   return (
@@ -138,7 +107,6 @@ const Bundle = memo(function Bundle({
           )
         }),
       )}
-      {/* 勾配の流れ。動いていれば学習が回っている */}
       {dur > 0 &&
         fromYs.map((y1, i) => {
           const y2 = toYs[i % toYs.length]
@@ -168,10 +136,6 @@ const Bundle = memo(function Bundle({
     </g>
   )
 })
-
-// ---------------------------------------------------------------------------
-// 列（ノードの並び）
-// ---------------------------------------------------------------------------
 
 const NodeColumn = memo(function NodeColumn({
   col,
@@ -232,8 +196,6 @@ const NodeColumn = memo(function NodeColumn({
   )
 })
 
-// ---------------------------------------------------------------------------
-
 /** 探索ノイズのゲージ。上限に張り付いていたら方策が潰れているサイン */
 function NoiseGauge({ net }: { net: NetworkMessage }) {
   const lo = net.logStdMin
@@ -273,23 +235,11 @@ function NoiseGauge({ net }: { net: NetworkMessage }) {
   )
 }
 
-// ---------------------------------------------------------------------------
-// 隠れ層の構成
-// ---------------------------------------------------------------------------
-
 /** 選べる層の数と幅。サーバー側の許容範囲（1〜4 層 / 16〜512）に収めてある */
 const LAYER_CHOICES = [1, 2, 3, 4] as const
 const WIDTH_CHOICES = [32, 64, 128, 256] as const
 
-/**
- * 隠れ層の構成を変える。
- *
- * **重みは引き継げない。** 層の形が変わると `load_state_dict` が通らないので、
- * 学習は 0 からやり直しになる。取り返しがつかないので 2 段階で確認する。
- *
- * 幅は全層そろえる。バラバラにしたい場合は `set_network` を直接送れば
- * 任意の配列を渡せる（サーバー側は配列で受けている）。
- */
+/** 隠れ層の構成を変える。 */
 function Architecture({ net }: { net: NetworkMessage }) {
   const current = net.hiddenSizes
   const currentKey = current.join(',')
@@ -298,12 +248,10 @@ function Architecture({ net }: { net: NetworkMessage }) {
   const [width, setWidth] = useState(current[0] ?? 128)
   const [confirming, setConfirming] = useState(false)
 
-  // サーバー側で構成が変わったら選択もそこへ戻す
   useEffect(() => {
     setLayers(current.length || 1)
     setWidth(current[0] ?? 128)
     setConfirming(false)
-    // currentKey を見ているので配列の同一性には依存しない
   }, [currentKey])
 
   const wanted = useMemo(
@@ -404,15 +352,9 @@ function Architecture({ net }: { net: NetworkMessage }) {
   )
 }
 
-// ---------------------------------------------------------------------------
-
 export function NetworkGraph() {
   const net = useSimStore((s) => s.network)
 
-  // 更新の頻度を出す。
-  // ★ PPO の更新はロールアウトが溜まるたびで、実測 2〜3 秒に 1 回しか起きない。
-  //   直近 2 サンプルの差で見ると「更新が無かった秒」が多発して
-  //   止まっているように見えるので、**20 秒の窓で判定する**。
   const historyRef = useRef<Array<{ updates: number; at: number }>>([])
   const [rate, setRate] = useState(0)
   const [recentlyUpdated, setRecentlyUpdated] = useState(false)
@@ -420,7 +362,6 @@ export function NetworkGraph() {
     if (!net) return
     const now = performance.now()
     const hist = historyRef.current
-    // 初期化や構成変更で更新回数が巻き戻ったら履歴を捨てる
     if (hist.length > 0 && net.updates < hist[hist.length - 1].updates) hist.length = 0
     hist.push({ updates: net.updates, at: now })
     while (hist.length > 2 && now - hist[0].at > 20_000) hist.shift()
@@ -440,7 +381,6 @@ export function NetworkGraph() {
     const weightScale = Math.max(...layers.map((l) => l.weightAbsMean), 1e-6)
     const gradScale = Math.max(...layers.map((l) => l.gradNorm), 1e-9)
 
-    // 観測 + 隠れ層 + 出力
     const xs = columnXs(hidden.length + 2)
 
     const obs: Column = {
@@ -469,12 +409,7 @@ export function NetworkGraph() {
     }
     const val: Column = { x: xs[xs.length - 1], cy: VALUE_Y, count: 1, label: '価値' }
 
-    /**
-     * 列と列の「つなぎ」を作る。
-     *
-     * 重み行列の名前は `policy_trunk.0` / `.2` / `.4` …（間に活性化が挟まるので偶数）で、
-     * 最後の出力層だけ `mu_head` / `value_head` になる。
-     */
+    /** 列と列の「つなぎ」を作る。 */
     const linksFor = (role: 'policy' | 'value', hiddenCols: Column[], out: Column) => {
       const trunk = role === 'policy' ? 'policy_trunk' : 'value_trunk'
       const head = role === 'policy' ? 'mu_head' : 'value_head'
@@ -487,7 +422,6 @@ export function NetworkGraph() {
       }))
     }
 
-    const totalDelta = layers.reduce((a, l) => a + l.deltaNorm, 0)
     const totalGrad = layers.reduce((a, l) => a + l.gradNorm, 0)
 
     return {
@@ -501,7 +435,6 @@ export function NetworkGraph() {
       val,
       policyLinks: linksFor('policy', policyHidden, act),
       valueLinks: linksFor('value', valueHidden, val),
-      totalDelta,
       totalGrad,
     }
   }, [net])
@@ -517,8 +450,6 @@ export function NetworkGraph() {
   const POLICY = 'var(--m3-primary)'
   const VALUE = 'var(--m3-tertiary)'
 
-  // 「動いている」判定は直近 20 秒で更新回数が増えたかで見る。
-  // 1 サンプルの Δ で見ると、更新が無かった秒に止まったと誤表示する。
   const alive = recentlyUpdated && view.totalGrad > 0
 
   return (
@@ -542,12 +473,10 @@ export function NetworkGraph() {
         role="img"
         aria-label="方策ネットワークと価値ネットワークの構成図"
       >
-        {/* 方策側。隠れ層の数だけつなぎが増える */}
         {view.policyLinks.map((link) => (
           <Bundle key={link.key} from={link.from} to={link.to} layer={link.layer}
                   weightScale={view.weightScale} gradScale={view.gradScale} accent={POLICY} />
         ))}
-        {/* 価値側 */}
         {view.valueLinks.map((link) => (
           <Bundle key={link.key} from={link.from} to={link.to} layer={link.layer}
                   weightScale={view.weightScale} gradScale={view.gradScale} accent={VALUE} />

@@ -1,8 +1,4 @@
-"""共有 Actor-Critic（対角ガウス方策）。
-
-memo 5章「全車両が同一の共有ポリシーを使用する（parameter sharing）」に従い、
-全スロットの観測をバッチ次元に積んで 1 つのネットワークで処理する。
-"""
+"""共有 Actor-Critic（対角ガウス方策）。"""
 
 from __future__ import annotations
 
@@ -14,9 +10,6 @@ from torch.distributions import Normal
 
 from app import config
 
-# log_std を可動域の境界ぴったりに置くと torch.clamp の勾配が 0 になるので、
-# これだけ内側へ寄せる。exp(1e-3) は std にして 0.1% の差でしかなく、
-# 探索の広さには実質影響しない。
 _LOG_STD_EPS = 1e-3
 
 __all__ = ["ActorCritic"]
@@ -41,11 +34,7 @@ def _build_trunk(in_dim: int, hidden_sizes: Sequence[int]) -> tuple[nn.Sequentia
 
 
 class ActorCritic(nn.Module):
-    """方策（平均のみ NN・対数標準偏差は状態非依存）と価値関数。
-
-    行動は環境側で [-1, 1] にクリップされる前提で、ここではクリップしない
-    （クリップすると log_prob が実際のサンプル分布と食い違うため）。
-    """
+    """方策（平均のみ NN・対数標準偏差は状態非依存）と価値関数。"""
 
     def __init__(
         self,
@@ -60,38 +49,23 @@ class ActorCritic(nn.Module):
 
         self.policy_trunk, policy_out = _build_trunk(self.obs_dim, self.hidden_sizes)
         self.value_trunk, value_out = _build_trunk(self.obs_dim, self.hidden_sizes)
-        # 出力層の gain: 方策は小さく（初期行動をほぼゼロに）、価値は 1.0
         self.mu_head = _init_linear(nn.Linear(policy_out, self.action_dim), gain=0.01)
         self.value_head = _init_linear(nn.Linear(value_out, 1), gain=1.0)
 
-        # 対数標準偏差は状態非依存の学習パラメータ
         self.log_std = nn.Parameter(
             torch.full((self.action_dim,), float(config.PPO_LOG_STD_INIT))
         )
         self.clamp_log_std()
 
-    # ------------------------------------------------------------------
-
     def _distribution(self, obs: torch.Tensor) -> Normal:
         mu = self.mu_head(self.policy_trunk(obs))
-        # 保険のクランプ。**これだけに頼ってはいけない。**
-        # torch.clamp は範囲外の入力に対する勾配を 0 にするので、一度でも外へ
-        # 出ると上げることも下げることもできなくなる（実際にそれで方策が死んだ）。
-        # 実効的な歯止めは clamp_log_std() が optimizer.step() の後に掛ける。
         log_std = torch.clamp(self.log_std, config.PPO_LOG_STD_MIN, config.PPO_LOG_STD_MAX)
         std = torch.exp(log_std).expand_as(mu)
         return Normal(mu, std)
 
     @torch.no_grad()
     def clamp_log_std(self) -> None:
-        """log_std を可動域の**内側**へ丸める。**optimizer.step() の直後に呼ぶこと。**
-
-        境界ちょうどに置いてはいけない。torch.clamp の逆伝播は
-         のときだけ勾配を通すので、**上限ぴったりでも勾配が 0** になり
-        結局そこから動けなくなる（検証スクリプトで実測した）。
-        そこで境界より _EPS だけ内側へ寄せる。こうすると常に勾配が流れ、
-        エントロピー報酬が押し上げても毎回押し戻される「壁」として機能する。
-        """
+        """log_std を可動域の**内側**へ丸める。**optimizer.step() の直後に呼ぶこと。**"""
         self.log_std.clamp_(
             config.PPO_LOG_STD_MIN + _LOG_STD_EPS,
             config.PPO_LOG_STD_MAX - _LOG_STD_EPS,

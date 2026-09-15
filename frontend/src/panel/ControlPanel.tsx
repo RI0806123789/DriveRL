@@ -1,16 +1,6 @@
-/**
- * 右側の操作パネル（memo 4章）。
- *
- * ・設定セクションはタブ方式で切り替える。
- * ・バックエンド未接続のときは操作できないようにし、その理由を明示する
- *   （押しても何も起きないのに操作できてしまう、という状態を避ける）。
- *
- * タブの中身はタブの並び順に合わせた向きから滑り込ませる（TABS の左隣なら左から）。
- * 4 つのタブはどれも縦に長いカードの列で見分けが付きにくく、切り替えが一瞬だと
- * 「切り替わったのか、同じものが再描画されただけなのか」が読めないため。
- */
+/** 右側の操作パネル（memo 4章）。 */
 
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useSimStore } from '../store/simStore'
 import type { PanelTab } from '../store/simStore'
 import { prefersReducedMotion } from '../ui/motion'
@@ -61,9 +51,6 @@ export function ControlPanel() {
 
   const disabled = connection !== 'open'
 
-  // 直前のタブと比べて、右へ移ったのか左へ移ったのかを覚えておく。
-  // 描画中に ref を書き換えているが、同じ tab で 2 度描画されても
-  // prevTab.current === tab になって向きは変わらない（StrictMode でも安定）
   const prevTab = useRef<PanelTab>(tab)
   const paneDir = useRef<'next' | 'prev'>('next')
   if (prevTab.current !== tab) {
@@ -72,16 +59,23 @@ export function ControlPanel() {
     prevTab.current = tab
   }
 
-  // 閉じるアニメーションを見せてから消すエラー（消えた実感を残す）。
-  // ここで消し損ねても simStore 側の一覧が正なので、表示が壊れることはない
   const [leaving, setLeaving] = useState<number | null>(null)
+  const leaveTimer = useRef<number | null>(null)
+  useEffect(
+    () => () => {
+      if (leaveTimer.current !== null) window.clearTimeout(leaveTimer.current)
+    },
+    [],
+  )
   const dismissWithExit = (id: number) => {
     if (prefersReducedMotion()) {
       dismissError(id)
       return
     }
     setLeaving(id)
-    window.setTimeout(() => {
+    if (leaveTimer.current !== null) window.clearTimeout(leaveTimer.current)
+    leaveTimer.current = window.setTimeout(() => {
+      leaveTimer.current = null
       setLeaving((curr) => (curr === id ? null : curr))
       dismissError(id)
     }, 180)
@@ -91,9 +85,6 @@ export function ControlPanel() {
     <div className="panel-wrap">
       <div className="panel">
         <header className="panel-header">
-          {/* 元はステージ左上に浮かせていた（.app-brand）。
-              3D を全画面で見るときに残っていても使い道が無いので、
-              パネルと一緒に出入りする位置（「操作パネル」の真上）へ移した */}
           <div className="panel-brand">
             <span className="panel-brand-mark" aria-hidden>
               🚗
@@ -104,15 +95,9 @@ export function ControlPanel() {
             </span>
           </div>
 
-          {/* ★ ここにあった「×（パネルを閉じる）」は外してある。
-              そのため**畳む手段は M キーだけ**。ハンバーガーは畳んだ後にしか出ないので、
-              閉じるボタンを戻すかハンバーガーを常時表示にしない限り、
-              マウスだけではパネルを閉じられない */}
           <div className="panel-header-row">
             <span className="panel-title">操作パネル</span>
             <span className="m3-conn" data-state={connection}>
-              {/* key で付け替えて、状態が変わった瞬間だけ入場アニメーションを流す。
-                  外すと「接続済み」への復帰が文字の差し替えだけになって気づけない */}
               <span key={usingMock ? 'mock' : connection} className="m3-conn-dot" />
               {usingMock ? 'モック接続' : CONNECTION_LABEL[connection]}
             </span>
@@ -167,9 +152,6 @@ export function ControlPanel() {
             </div>
           ))}
 
-          {/* key を tab にして、切り替えのたびにカードの列を入場させ直す。
-              元々タブごとにアンマウントしている（中身の状態は持ち越さない）ので
-              挙動は変わらない */}
           <div key={tab} className="panel-pane" data-dir={paneDir.current}>
             {tab === 'simulation' && <SimulationTab />}
             {tab === 'map' && <MapTab />}
@@ -180,8 +162,6 @@ export function ControlPanel() {
         </div>
       </div>
 
-      {/* 条件レンダリングにしない。接続できた瞬間にベールが消えるところを
-          見せたいので（「復帰した」という手応えがここにしかない） */}
       <div
         className="panel-disabled-veil"
         data-visible={disabled ? 'true' : 'false'}

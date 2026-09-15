@@ -1,16 +1,7 @@
-/**
- * docs/protocol.md v1 の TypeScript 表現。
- *
- * ここは「バックエンドとの唯一の契約」なので、フィールド名は protocol.md の
- * camelCase を厳密に守ること。勝手なフィールド追加・改名は禁止。
- */
+/** docs/protocol.md v1 の TypeScript 表現。 */
 
 /** プロトコルバージョン。init.protocolVersion がこれと違えば警告する */
 export const PROTOCOL_VERSION = 1
-
-// ---------------------------------------------------------------------------
-// 共通の小さな型
-// ---------------------------------------------------------------------------
 
 /** ENU 平面上の座標 [x（東）, y（北）]（メートル） */
 export type Vec2 = [number, number]
@@ -55,22 +46,11 @@ export interface SimParams {
   rewardTime: number
   /** 赤信号で停止線を越えたときの罰（道交法施行令 2 条） */
   rewardSignal: number
-  /**
-   * 最高速度標識の規制速度を超え始めたときの罰（道交法 22 条）。
-   * 超えている間ずっとではなく、超え「始めた」ステップに 1 回だけ入る。
-   */
+  /** 最高速度標識の規制速度を超え始めたときの罰（道交法 22 条）。 */
   rewardOverspeed: number
-  /**
-   * 信号に従わせるか。
-   * true なら赤・黄（安全に止まれる場合）で停止線の手前に止める制約が働く。
-   * false にすると罰だけになり、守るかどうかは学習しだいになる。
-   */
+  /** 信号に従わせるか。 */
   obeySignals: boolean
-  /**
-   * 最高速度標識に従わせるか。
-   * true なら規制速度を超えないよう、環境側が加速指令を抑える。
-   * false にすると罰だけになり、守るかどうかは学習しだいになる（信号と同じ約束）。
-   */
+  /** 最高速度標識に従わせるか。 */
   obeySpeedSigns: boolean
 }
 
@@ -85,20 +65,12 @@ export interface StatusPayload {
   /** 「一時停止」は描画のみ。学習は継続している */
   renderPaused: boolean
   learning: boolean
-  /**
-   * **物理と PPO ごと止まっているか。** `renderPaused` とは別物で、
-   * 認識器の学習（「モデル作成」タブ）の間だけ true になる。
-   * 古いサーバーだと入っていないことがある。
-   */
+  /** **物理と PPO ごと止まっているか。** `renderPaused` とは別物で、 */
   simSuspended?: boolean
   /** `simSuspended` が true のときの理由 */
   suspendReason?: string
   message?: string
 }
-
-// ---------------------------------------------------------------------------
-// 2. サーバー → クライアント
-// ---------------------------------------------------------------------------
 
 /** 2.1 init — 接続確立直後に 1 回だけ */
 export interface InitMessage {
@@ -147,12 +119,7 @@ export interface MapBuilding {
   outline: Vec2[]
 }
 
-/**
- * 交通信号機（車両用）。OSM の highway=traffic_signals から作られる。
- *
- * 交差点 1 か所につき、**進入路の数だけ**存在する。日本の信号機は進入する
- * 車両に正対して設置されるため、灯器の姿勢は進入方向で決まる。
- */
+/** 交通信号機（車両用）。OSM の highway=traffic_signals から作られる。 */
 export interface MapSignal {
   id: number
   /** 交差点ノード（MapNode.id）への参照 */
@@ -168,13 +135,7 @@ export interface MapSignal {
   roadWidth: number
 }
 
-/**
- * 最高速度標識（規制標識「最高速度」）。
- *
- * OSM の traffic_sign タグは日本ではほとんど付いていないので、**道路の maxspeed から
- * 生成される**。規制速度が手前の道路と変わる進入口にだけ立つ（規制が変わる地点に
- * 設置するという道路標識の運用に合わせたもの）。
- */
+/** 最高速度標識（規制標識「最高速度」）。 */
 export interface MapSign {
   id: number
   /** 標識が立つ交差点ノード（MapNode.id）への参照 */
@@ -184,7 +145,7 @@ export interface MapSign {
   /** 支柱の位置（ENU）。左側通行なので進行方向左側の路端に立つ */
   x: number
   y: number
-  /** **その標識が規制する側の進行方向** [rad]。標示板は heading + PI を向く */
+  /** *その標識が規制する側の進行方向** [rad]。標示板は heading + PI を向く */
   heading: number
   /** 規制速度 [m/s] */
   speedLimit: number
@@ -250,28 +211,14 @@ export interface ObstacleState {
   radius: number
 }
 
-/**
- * 画像認識の検出クラス。**バックエンドの `percep.DetClass` と同じ並び**。
- *
- * 並びは認識器の出力チャンネルと直結しているので、途中に挿入してはいけない
- * （追加は末尾に足す）。
- */
+/** 画像認識の検出クラス。**バックエンドの `percep.DetClass` と同じ並び**。 */
 export const DET_TRAFFIC_LIGHT = 0
 export const DET_SPEED_SIGN = 1
 export const DET_VEHICLE = 2
 export const DET_OBSTACLE = 3
 export const DET_LANE = 4
 
-/**
- * 擬似カメラ画像から認識器が見つけた物体 1 個（protocol.md 2.3）。
- *
- * **これは PPO が観測として受け取っているのと同じ検出結果**で、
- * 運転席カメラのバウンディングボックスはこれをそのまま描く。
- * 表示のために別経路で作り直すと、画面と学習が食い違っても誰も気づけない。
- *
- * 表示名（「信号機：青」など）は転送量を減らすため送られてこない。
- * 組み立て規則は `scene/detectionLabels.ts`（= backend の `Detection.label`）にある。
- */
+/** 擬似カメラ画像から認識器が見つけた物体 1 個（protocol.md 2.3）。 */
 export interface Detection {
   /** DET_* のいずれか */
   cls: number
@@ -287,11 +234,7 @@ export interface Detection {
   distance?: number
   /** 車線のみ: 車線中心からの横方向偏差 [m] */
   lateral?: number
-  /**
-   * 車線のみ: 認識した車線中心線の点列。**自車座標系**（前方 +x / 左 +y、単位 m）。
-   * 起点は自車の真横（前方 0m）で、そこから前方へ伸びる。車線幅は中心線から
-   * 左右 1.6m（計 3.2m）相当。路面へ直接重ねて描く（scene/LaneDetectionOverlay.tsx）。
-   */
+  /** 車線のみ: 認識した車線中心線の点列。**自車座標系**（前方 +x / 左 +y、単位 m）。 */
   lanePoints?: [number, number][]
 }
 
@@ -305,17 +248,9 @@ export interface FrameMessage {
   /** 常に全スロット分（maxVehicles 個） */
   vehicles: VehicleState[]
   obstacles: ObstacleState[]
-  /**
-   * 信号の現示。map.signals と同じ並びで 0=青 / 1=黄 / 2=赤。
-   * 信号が 1 基も無いマップでは省略される。
-   */
+  /** 信号の現示。map.signals と同じ並びで 0=青 / 1=黄 / 2=赤。 */
   signals?: number[]
-  /**
-   * 車両ごとの認識結果。**キーはスロット番号の文字列**（JSON のキーは文字列のため）。
-   * 非アクティブな車両はキーに含まれない。1 台もアクティブな車両がいない、または
-   * 認識パイプラインが結果を返せなかったフレームでは `detections` 自体が省略される。
-   * 並びは信頼度の降順。
-   */
+  /** 車両ごとの認識結果。**キーはスロット番号の文字列**（JSON のキーは文字列のため）。 */
   detections?: Record<string, Detection[]>
 }
 
@@ -353,16 +288,9 @@ export interface MetricsMessage {
   signalViolations: number
   /** 1 エピソードあたりの速度超過回数 */
   speedViolations: number
-  /**
-   * 車線中心からの横方向のずれの平均 [m]。
-   * 経路が車線中心線なので、そのまま「車線からどれだけはみ出しているか」を表す。
-   */
+  /** 車線中心からの横方向のずれの平均 [m]。 */
   laneDeviation: number
 }
-
-// ---------------------------------------------------------------------------
-// 2.9 detector — 認識器（CNN）の学習状況
-// ---------------------------------------------------------------------------
 
 /** 学習ジョブの段階 */
 export type DetectorState =
@@ -378,6 +306,13 @@ export type DetectorState =
 /** 何をするか。CLI の `--collect-only` / `--train-only` と同じ 3 通り */
 export type DetectorMode = 'full' | 'collect' | 'train'
 
+/** エポック 1 回ぶんの損失 */
+export interface DetectorHistoryPoint {
+  epoch: number
+  loss: number
+  valLoss: number
+}
+
 /** 学習の依頼内容（`start_detector_training` で送ったもののエコー） */
 export interface DetectorRequest {
   mode: DetectorMode
@@ -387,12 +322,11 @@ export interface DetectorRequest {
   batchSize: number
   /** モデルのチャンネル倍率 */
   width: number
+  /** 収集の乱数種。`SimulationEnv` と行動のランダム化の両方に渡るので、 */
+  seed: number
 }
 
-/**
- * 集めた教師データに何が写っているか。
- * **件数 0 のクラスは、学習しても検出できるようにならない。**
- */
+/** 集めた教師データに何が写っているか。 */
 export interface DetectorDataset {
   samples: number
   /** 物体があるセルの割合 0.0〜1.0 */
@@ -422,20 +356,18 @@ export interface DetectorLimits {
   batchMax: number
   widthMin: number
   widthMax: number
+  seedMin: number
+  seedMax: number
 }
 
-/**
- * 2.9 detector — 認識器の学習状況（進捗が動いたときだけ、最大 1Hz）。
- *
- * 接続直後にも 1 通届くので、学習中にページをリロードしても進行中のジョブが見える。
- */
+/** 2.9 detector — 認識器の学習状況（進捗が動いたときだけ、最大 1Hz）。 */
 export interface DetectorMessage {
   type: 'detector'
   state: DetectorState
   /** ジョブスレッドが走っているか */
   running: boolean
   message: string
-  /** **いまの段階の**進捗 0.0〜1.0（段階をまたいで通算しない） */
+  /** *いまの段階の**進捗 0.0〜1.0（段階をまたいで通算しない） */
   progress: number
   collected: number
   samples: number
@@ -443,7 +375,7 @@ export interface DetectorMessage {
   epochs: number
   batch: number
   batches: number
-  history: Array<{ epoch: number; loss: number; valLoss: number }>
+  history: DetectorHistoryPoint[]
   elapsedSec: number
   /** 気づいたこと（写っていないクラスがある、何も検出しない等）。空なら問題なし */
   warning: string
@@ -456,12 +388,15 @@ export interface DetectorMessage {
   limits: DetectorLimits
 }
 
+/**
+ * `docs/protocol.md` のエラーコード表が唯一の出典。**介入の失敗はここに足さない**
+ * （`status.message` で返す約束。code_review E-14）。
+ */
 export type ErrorCode =
   | 'MAP_LOAD_FAILED'
   | 'INVALID_MESSAGE'
-  | 'NO_MAP_LOADED'
-  | 'SPAWN_FAILED'
-  | 'INTERNAL'
+  /** 認識器の学習中に `load_map` が来た（学習が終わるまでエリアは変えられない） */
+  | 'DETECTOR_TRAINING'
 
 /** 2.7 error */
 export interface ErrorMessage {
@@ -491,20 +426,11 @@ export interface NetworkLayer {
   weightStd: number
   /** 直近の更新で流れた勾配の大きさ。0 なら学習していない */
   gradNorm: number
-  /**
-   * **直前の 1 更新で重みが動いた量。** 更新ごとに確定する。
-   * PPO の更新は数秒に 1 回しか起きないので、スナップショット間隔（1Hz）で
-   * 差を取ると「動いていない秒」が多発して学習が止まって見えてしまう。
-   */
+  /** **直前の 1 更新で重みが動いた量。** 更新ごとに確定する。 */
   deltaNorm: number
 }
 
-/**
- * ネットワークの状態（既定 1Hz）。
- *
- * 「学習しているように見えない」を画面から判断するためのもの。
- * 重みが動いているか（deltaNorm）、勾配が流れているか（gradNorm）が分かる。
- */
+/** ネットワークの状態（既定 1Hz）。 */
 export interface NetworkMessage {
   type: 'network'
   updates: number
@@ -531,10 +457,6 @@ export type ServerMessage =
   | DetectorMessage
   | ErrorMessage
   | PongMessage
-
-// ---------------------------------------------------------------------------
-// 3. クライアント → サーバー
-// ---------------------------------------------------------------------------
 
 export interface LoadMapMessage {
   type: 'load_map'
@@ -602,13 +524,7 @@ export interface PingMessage {
   type: 'ping'
 }
 
-/**
- * 認識器（CNN）の学習を始める（操作パネルの「モデル作成」タブ）。
- *
- * **実行中はシミュレーションが止まる**（物理も PPO も）。CPU と
- * `groundtruth` の静的キャッシュを学習と取り合わないようにするためで、
- * 完了・中断すると自動で再開する。
- */
+/** 認識器（CNN）の学習を始める（操作パネルの「モデル作成」タブ）。 */
 export interface StartDetectorTrainingMessage {
   type: 'start_detector_training'
   request: DetectorRequest
@@ -619,12 +535,7 @@ export interface CancelDetectorTrainingMessage {
   type: 'cancel_detector_training'
 }
 
-/**
- * 隠れ層の構成を変える。
- *
- * **重みは引き継げない。** 層の形が変わるので学習は 0 からやり直しになる。
- * 1〜4 層、各層 16〜512。範囲外はサーバーが `INVALID_MESSAGE` で弾く。
- */
+/** 隠れ層の構成を変える。 */
 export interface SetNetworkMessage {
   type: 'set_network'
   hiddenSizes: number[]
@@ -648,10 +559,6 @@ export type ClientMessage =
   | StartDetectorTrainingMessage
   | CancelDetectorTrainingMessage
   | PingMessage
-
-// ---------------------------------------------------------------------------
-// 補助
-// ---------------------------------------------------------------------------
 
 /** WebSocket の接続状態 */
 export type ConnectionState = 'connecting' | 'open' | 'closed'

@@ -1,21 +1,6 @@
-/**
- * 操作パネルのモーション共通処理。
- *
- * ここに置くのは「押した」「変わった」「移った」をユーザーに返すための仕掛けだけで、
- * 見せ場を作るためのものは置かない。装飾のためのアニメーションは、
- * 20Hz で届くフレームを読みながら操作する画面ではノイズにしかならない。
- *
- * ★ 動かしてよいのは transform と opacity だけ。操作パネルは 3D と同じ
- *   メインスレッドに乗っているので、幅・高さ・影を毎フレーム変える演出を足すと
- *   シミュレータ側のフレームが落ちる。
- *   例外はタブのインジケータ（絶対配置の 1 要素だけなのでレイアウトが波及しない）。
- */
+/** 操作パネルのモーション共通処理。 */
 
-/**
- * OS の「視差効果を減らす」設定。
- * 毎回 matchMedia を引くのは、設定変更を次の操作から拾えるようにするため
- * （起動時に 1 度だけ読むと、設定を変えてもリロードするまで効かない）。
- */
+/** OS の「視差効果を減らす」設定。 */
 export function prefersReducedMotion(): boolean {
   if (typeof window === 'undefined' || !window.matchMedia) return false
   return window.matchMedia('(prefers-reduced-motion: reduce)').matches
@@ -28,13 +13,7 @@ interface PointerLike {
   clientY: number
 }
 
-/**
- * 押した場所から広がる波紋（Material 3 の state layer）。pointerdown に挿す。
- *
- * ボタンが効いたかどうかを、色の変化ではなく「押した点」で返す。
- * 連打されても頭から再生されるよう、クラスを外してリフローを 1 度強制してから
- * 付け直している。
- */
+/** 押した場所から広がる波紋（Material 3 の state layer）。pointerdown に挿す。 */
 export function startRipple(e: PointerLike): void {
   const el = e.currentTarget
   if (!el) return
@@ -46,8 +25,6 @@ export function startRipple(e: PointerLike): void {
 
   const x = e.clientX - rect.left
   const y = e.clientY - rect.top
-  // 押した点から一番遠い角までを半径にすると、波紋が必ず要素を覆いきる。
-  // 端を押したときだけ途中で止まる、という見え方を避けるため
   const diameter = 2 * Math.hypot(Math.max(x, rect.width - x), Math.max(y, rect.height - y))
 
   el.style.setProperty('--m3-ripple-x', `${x}px`)
@@ -56,30 +33,14 @@ export function startRipple(e: PointerLike): void {
   restartAnimation(el, 'is-rippling')
 }
 
-/**
- * CSS アニメーションを頭から再生し直す。
- *
- * ★ void el.offsetWidth を消さないこと。クラスを外して付け直すだけでは
- *   ブラウザが 2 つの変更をまとめてしまい、2 回目以降が一切再生されない。
- */
+/** CSS アニメーションを頭から再生し直す。 */
 export function restartAnimation(el: HTMLElement, className: string): void {
   el.classList.remove(className)
   void el.offsetWidth
   el.classList.add(className)
 }
 
-/**
- * バネで目標値に追いつく 1 自由度のシミュレーション。
- *
- * タブのインジケータに使う。CSS の transition ではなくこれを使うのは、
- * 追う相手（選択中のタブ）自身が flex-grow のアニメーションで幅を変え続けており、
- * 目標が毎フレーム動くため。transition だと目標が変わるたびに再スタートがかかり、
- * 最後まで到達しないまま次に移ってずるずる遅れる。
- *
- * 係数は質量 1 とみなしたときの値。臨界減衰は c = 2√k（k=260 なら 32.2）で、
- * それより少し弱くして止まる直前にわずかに行き過ぎるようにしている
- * （M3 Expressive の「弾む」表現）。
- */
+/** バネで目標値に追いつく 1 自由度のシミュレーション。 */
 export const SPRING_K = 260
 export const SPRING_C = 28
 

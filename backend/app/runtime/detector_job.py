@@ -1,34 +1,5 @@
 # -*- coding: utf-8 -*-
-"""認識器（CNN）の学習を Web アプリから回すためのジョブ。
-
-操作パネルの「モデル作成」タブが投げる `start_detector_training` を受け、
-**専用の OS スレッド**で `app/percep/trainer.py` を回す。CLI
-（`backend/train_detector.py`）と同じ実装を呼ぶので、どちらから走らせても
-出来上がるモデルは同じである。
-
-やり取りの作法は `runtime/engine.py` と同じで、外からは
-
-- コマンド（`start()` / `cancel()`）
-- ロックで守られたスナップショット（`snapshot()`）
-
-の 2 つだけ。asyncio 側はスナップショットを 1Hz で拾って `detector` メッセージに
-して流す（`docs/protocol.md` 2.9）。
-
-★ **学習の間はシミュレーションを止める。**
-  `train_detector.py` の docstring がずっと言っていた「学習中はサーバーを止めて
-  おくこと」を、画面から回せるようにした以上コード側で守る必要がある。理由は 2 つ:
-
-  1. **CPU の取り合い。** 収集も学習もコアを使い切るので、同時に回すと 20Hz
-     （1 ステップ 50ms）の予算を守れない。学習が遅くなるだけでなく、
-     シミュレーション側のステップ時間が跳ね上がる。
-  2. **`percep/groundtruth.py` の `_STATIC_CACHE` の取り合い。** あれは
-     `map_index` の identity 比較 1 件だけのキャッシュで、別々のマップを持つ
-     2 つの `SimulationEnv` が交互に呼ぶと**毎回作り直しになる**
-     （金沢は標識 15,719 基。1 回の再構築が丸ごと乗る）。
-
-  止めるのは物理と PPO だけで、WebSocket の配信・コマンド処理・モデルの
-  書き出しは動いたままである（`engine._run_loop` が `_step_once()` を飛ばす）。
-"""
+"""認識器（CNN）の学習を Web アプリから回すためのジョブ。"""
 
 from __future__ import annotations
 
@@ -48,29 +19,23 @@ from app.percep.trainer import (
     TrainingCancelled,
     collect_dataset,
     fit_detector,
+    load_dataset,
     summarize_dataset,
 )
 
 if TYPE_CHECKING:
     from app.contracts import MapIndex
 
+
 logger = logging.getLogger(__name__)
 
-
-# ---------------------------------------------------------------------------
-# 依頼（`start_detector_training` のペイロード）
-# ---------------------------------------------------------------------------
-
-#: 何をするか。CLI の `--collect-only` / `--train-only` と同じ 3 通り。
 MODES = ("full", "collect", "train")
 
-#: 値域。**UI のスライダー（frontend/src/panel/ModelTab.tsx）と揃えること。**
-#: 上限が効いてくるのはメモリで、`fit_detector` が画像を float32 に変換するため
-#: 1 枚あたり 192x144x3x4B = 331KB 必要になる（4,800 枚で約 1.6GB）。
 SAMPLES_MIN, SAMPLES_MAX = 200, 4800
 EPOCHS_MIN, EPOCHS_MAX = 1, 60
 BATCH_MIN, BATCH_MAX = 8, 128
 WIDTH_MIN, WIDTH_MAX = 0.25, 2.0
+SEED_MIN, SEED_MAX = 0, 999_999
 
 
 @dataclass(frozen=True)
@@ -101,15 +66,12 @@ class DetectorTrainRequest:
             "epochs": int(self.epochs),
             "batchSize": int(self.batch_size),
             "width": float(self.width),
+            "seed": int(self.seed),
         }
 
 
-def _clamped_int(value: Any, lo: int, hi: int, name: str) -> tuple[int, str]:
-    """整数として読み、値域外なら理由を返す（丸めずに弾く）。
-
-    `set_params` は端へ丸める仕様だが、こちらは**押した瞬間に数十分動き出す**
-    操作なので、指定と違う値で走り出すほうが危ない。
-    """
+def _bounded_int(value: Any, lo: int, hi: int, name: str) -> tuple[int, str]:
+    """整数として読み、値域外なら理由を返す。**丸めずに弾く。**"""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return 0, f"{name} は数値で指定してください"
     number = int(value)
@@ -119,11 +81,7 @@ def _clamped_int(value: Any, lo: int, hi: int, name: str) -> tuple[int, str]:
 
 
 def parse_request(wire: Any) -> tuple[DetectorTrainRequest | None, str]:
-    """`start_detector_training` のペイロードを検証する。
-
-    Returns:
-        (依頼, 理由)。依頼が None のときだけ理由が入る。
-    """
+    """`start_detector_training` のペイロードを検証する。"""
     if not isinstance(wire, dict):
         return None, "オブジェクトを送ってください"
 
@@ -131,15 +89,15 @@ def parse_request(wire: Any) -> tuple[DetectorTrainRequest | None, str]:
     if mode not in MODES:
         return None, f"mode は {' / '.join(MODES)} のいずれかです（受け取った値: {mode!r}）"
 
-    samples, why = _clamped_int(
+    samples, why = _bounded_int(
         wire.get("samples", 2400), SAMPLES_MIN, SAMPLES_MAX, "samples"
     )
     if why:
         return None, why
-    epochs, why = _clamped_int(wire.get("epochs", 12), EPOCHS_MIN, EPOCHS_MAX, "epochs")
+    epochs, why = _bounded_int(wire.get("epochs", 12), EPOCHS_MIN, EPOCHS_MAX, "epochs")
     if why:
         return None, why
-    batch_size, why = _clamped_int(
+    batch_size, why = _bounded_int(
         wire.get("batchSize", 32), BATCH_MIN, BATCH_MAX, "batchSize"
     )
     if why:
@@ -151,6 +109,10 @@ def parse_request(wire: Any) -> tuple[DetectorTrainRequest | None, str]:
     width = float(raw_width)
     if not (WIDTH_MIN <= width <= WIDTH_MAX):
         return None, f"width は {WIDTH_MIN}〜{WIDTH_MAX} の範囲で指定してください"
+
+    seed, why = _bounded_int(wire.get("seed", 0), SEED_MIN, SEED_MAX, "seed")
+    if why:
+        return None, why
 
     preset_id = wire.get("presetId")
     if preset_id is not None and not isinstance(preset_id, str):
@@ -164,23 +126,14 @@ def parse_request(wire: Any) -> tuple[DetectorTrainRequest | None, str]:
             epochs=epochs,
             batch_size=batch_size,
             width=width,
+            seed=seed,
         ),
         "",
     )
 
 
-# ---------------------------------------------------------------------------
-# エンジンに頼むこと
-# ---------------------------------------------------------------------------
-
-
 class EngineHooks(Protocol):
-    """ジョブがエンジンへ頼む操作。
-
-    `runtime/engine.py` の `SimulationEngine` が実装する。ここで Protocol に
-    しておくのは、**ジョブ側から engine を import しない**ため
-    （engine -> detector_job の一方向にしておく）。
-    """
+    """ジョブがエンジンへ頼む操作。"""
 
     def current_map(self) -> tuple["MapIndex | None", str | None, str | None]:
         """(いま読み込んでいるマップ, プリセット ID, 表示名)。"""
@@ -200,11 +153,6 @@ class EngineHooks(Protocol):
         """いま観測が CNN 由来か（False なら真値フォールバック）。"""
 
 
-# ---------------------------------------------------------------------------
-# ジョブ本体
-# ---------------------------------------------------------------------------
-
-
 @dataclass
 class _Progress:
     """ロックで守る進捗。`snapshot()` がそのままワイヤ形式にする。"""
@@ -213,7 +161,6 @@ class _Progress:
     message: str = "認識器の学習はまだ実行していません"
     request: DetectorTrainRequest | None = None
     preset_name: str | None = None
-    #: いまの段階の進捗 0.0〜1.0（段階をまたいで通算しない）
     progress: float = 0.0
     collected: int = 0
     epoch: int = 0
@@ -224,16 +171,11 @@ class _Progress:
     started_at: float = 0.0
     finished_at: float = 0.0
     warning: str = ""
-    #: 最後に作ったモデルのパラメータ数（分かっているときだけ）
     param_count: int = 0
 
 
 class DetectorTrainingJob:
-    """認識器の学習を 1 本だけ走らせるジョブ。
-
-    同時に 2 本は走らせない（CPU も `_STATIC_CACHE` も 1 つしか無い）。
-    走っている間に `start()` を呼ばれたら断る。
-    """
+    """認識器の学習を 1 本だけ走らせるジョブ。"""
 
     def __init__(self, hooks: EngineHooks) -> None:
         self._hooks = hooks
@@ -241,12 +183,7 @@ class DetectorTrainingJob:
         self._cancel = threading.Event()
         self._thread: threading.Thread | None = None
         self._progress = _Progress()
-        #: 自前でマップを読んだか（ジョブスレッドだけが触る）
         self._own_index = False
-
-    # ------------------------------------------------------------------
-    # asyncio 側から呼ぶ API
-    # ------------------------------------------------------------------
 
     @property
     def running(self) -> bool:
@@ -259,7 +196,6 @@ class DetectorTrainingJob:
             return "すでに学習を実行中です。完了を待つか中止してください"
 
         if request.trains and not request.collects:
-            # 保存済みの教師データで学習だけする場合、そのファイルが要る
             if not self._dataset_path().exists():
                 return (
                     "保存された教師データがありません。"
@@ -326,7 +262,6 @@ class DetectorTrainingJob:
                 "request": p.request.to_wire() if p.request else None,
                 "dataset": p.dataset.to_wire() if p.dataset is not None else None,
             }
-        # ファイルの情報はロックの外で見る（I/O をロックの中でやらない）
         payload["model"] = self.model_info()
         payload["datasetFile"] = self._dataset_file_info()
         payload["limits"] = {
@@ -338,6 +273,8 @@ class DetectorTrainingJob:
             "batchMax": BATCH_MAX,
             "widthMin": WIDTH_MIN,
             "widthMax": WIDTH_MAX,
+            "seedMin": SEED_MIN,
+            "seedMax": SEED_MAX,
         }
         return payload
 
@@ -366,10 +303,6 @@ class DetectorTrainingJob:
             logger.exception("認識器の使用状況を取得できませんでした")
         return info
 
-    # ------------------------------------------------------------------
-    # 内部
-    # ------------------------------------------------------------------
-
     def _dataset_path(self) -> Path:
         return config.DETECTOR_DATASET_DIR / DATASET_FILE
 
@@ -396,13 +329,9 @@ class DetectorTrainingJob:
     def _should_cancel(self) -> bool:
         return self._cancel.is_set()
 
-    # ------------------------------------------------------------------
-
     def _run(self, request: DetectorTrainRequest) -> None:
         """ジョブスレッド本体。**何があっても最後に resume_sim() を通す。**"""
         suspended = False
-        # 自前でマップを読んだかどうか。**例外で抜けた場合も後片付けが要る**ので、
-        # 戻り値ではなく属性で持つ（`_resolve_map` が立てる）
         self._own_index = False
         try:
             self._hooks.suspend_sim("認識器の学習中はシミュレーションを止めています")
@@ -453,16 +382,11 @@ class DetectorTrainingJob:
             self._hooks.notify(f"認識器の学習に失敗しました: {exc}")
         finally:
             if self._own_index:
-                # ★ 自前で読んだマップの静的シーンを捨てる。エンジン側の env は
-                #   別の `map_index` を持っているので、残しても二度と当たらない
-                #   （金沢なら標識 15,719 基ぶんの配列がそのまま居座る）
                 from app.percep.groundtruth import clear_static_cache
 
                 clear_static_cache()
             if suspended:
                 self._hooks.resume_sim()
-
-    # ------------------------------------------------------------------
 
     def _prepare_dataset(self, request: DetectorTrainRequest) -> dict[str, np.ndarray]:
         """教師データを用意する（収集するか、保存済みを読む）。"""
@@ -470,8 +394,7 @@ class DetectorTrainingJob:
 
         if not request.collects:
             self._update(state="preparing", message="保存済みの教師データを読み込んでいます")
-            with np.load(dataset_path) as npz:
-                data = {k: npz[k] for k in npz.files}
+            data = load_dataset(dataset_path)
             summary = summarize_dataset(data)
             self._update(
                 dataset=summary,
@@ -517,9 +440,6 @@ class DetectorTrainingJob:
 
         empty = [name for name, count in summary.class_counts.items() if count == 0]
         if empty:
-            # ★ 黙って進めない。件数 0 のクラスは学習しても検出できるように
-            #   ならないが、症状は「走らせてみたら前の車を認識しない」という
-            #   形でしか出ず、外から原因にたどり着けない
             self._update(
                 warning=(
                     f"教師データに写っていないクラスがあります: {', '.join(empty)}。"
@@ -529,13 +449,7 @@ class DetectorTrainingJob:
         return data
 
     def _resolve_map(self, request: DetectorTrainRequest) -> tuple["MapIndex", str]:
-        """走らせるマップを決める。
-
-        ★ **読み込み済みのマップと同じなら、それをそのまま使う。**
-          同じエリアをもう一度読み直すと、時間がかかるうえに
-          `groundtruth._STATIC_CACHE` がエンジン側の `map_index` から外れる。
-          自前で読んだときは `_own_index` を立て、終わったらキャッシュを捨てる。
-        """
+        """走らせるマップを決める。"""
         current_index, current_id, current_name = self._hooks.current_map()
         wanted = request.preset_id or current_id
 
@@ -571,8 +485,6 @@ class DetectorTrainingJob:
             message=f"教師データを集めています（{collected} / {samples} 枚）",
         )
 
-    # ------------------------------------------------------------------
-
     def _train(self, request: DetectorTrainRequest, data: dict[str, np.ndarray]) -> None:
         self._update(
             state="training",
@@ -603,9 +515,6 @@ class DetectorTrainingJob:
             param_count=result.param_count,
         )
 
-        # ★ 載せ替えはエンジンスレッドのステップ境界で行う（`reload_detector`）。
-        #   ここから `env` を直接触ると、シミュレーション再開と同時に
-        #   差し替え途中の認識器を掴む可能性がある
         self._hooks.reload_detector()
 
         with self._lock:

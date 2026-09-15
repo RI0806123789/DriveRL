@@ -1,25 +1,10 @@
-/**
- * 「モデル作成」タブ。**画像認識の CNN（認識器）をここから学習する。**
- *
- * 以前は `backend/train_detector.py` をコマンドで叩くしかなく、
- * 「走らせる」と「認識器を作る」が別々の世界に分かれていた。中身は同じ実装
- * （`app/percep/trainer.py`）を呼んでいるので、ここから回してもコマンドから
- * 回しても出来上がるモデルは同じである。
- *
- * ★ **学習中はシミュレーションが止まる。**（docs/protocol.md 2.9）
- *   収集も学習も CPU を使い切るうえ、`percep/groundtruth.py` の静的キャッシュを
- *   走行側と取り合うため。止まるのは物理と PPO だけで、画面・通信は生きている。
- *   利用者が驚かないよう、開始前と実行中の両方で必ず明示すること。
- *
- * 進捗は `detector` メッセージ（進捗が動いたときだけ、最大 1Hz）で届く。
- * 押した直後だけはサーバーが即座に 1 通返すので、ボタンの反応が 1 秒遅れない。
- */
+/** 「モデル作成」タブ。**画像認識の CNN（認識器）をここから学習する。** */
 
 import { useEffect, useMemo, useState } from 'react'
 import { send } from '../store/connection'
 import { formatBytes } from '../store/exportModel'
 import { useSimStore } from '../store/simStore'
-import type { DetectorMessage, DetectorMode } from '../types/protocol'
+import type { DetectorHistoryPoint, DetectorMessage, DetectorMode } from '../types/protocol'
 import { MetricsChart } from './MetricsChart'
 import { Button } from '../ui/Button'
 import { Card } from '../ui/Card'
@@ -58,10 +43,7 @@ const STATE_LABEL: Record<DetectorMessage['state'], string> = {
   cancelled: '中断',
 }
 
-/**
- * 検出クラスの日本語名。**バックエンドの `percep.DetClass` のメンバ名がキー。**
- * 知らない名前が来たらそのまま出す（クラスが増えても表示は壊れない）。
- */
+/** 検出クラスの日本語名。**バックエンドの `percep.DetClass` のメンバ名がキー。** */
 const CLASS_LABEL: Record<string, string> = {
   TRAFFIC_LIGHT: '信号機',
   SPEED_SIGN: '速度標識',
@@ -70,12 +52,15 @@ const CLASS_LABEL: Record<string, string> = {
   LANE: '車線',
 }
 
-/** 集める枚数から、おおよその所要時間を見積もる（銀座での実測が元） */
-function estimateMinutes(samples: number, epochs: number, mode: DetectorMode): number {
-  // 収集は 8 台ぶんを 1 回で描くので、実測でおよそ 120 枚/秒。
-  // 学習は 2,400 枚 1 エポックがおよそ 15 秒。
+/** 集める枚数から、おおよその所要時間を見積もる（銀座での実測が元）。 */
+function estimateMinutes(
+  samples: number,
+  epochs: number,
+  mode: DetectorMode,
+  width: number,
+): number {
   const collect = mode === 'train' ? 0 : samples / 120
-  const train = mode === 'collect' ? 0 : (samples / 2400) * 15 * epochs
+  const train = mode === 'collect' ? 0 : (samples / 2400) * 15 * epochs * width * width
   return (collect + train) / 60
 }
 
@@ -84,6 +69,8 @@ function formatElapsed(seconds: number): string {
   const m = Math.floor(s / 60)
   return m > 0 ? `${m}分${String(s % 60).padStart(2, '0')}秒` : `${s}秒`
 }
+
+const EMPTY_HISTORY: DetectorHistoryPoint[] = []
 
 export function ModelTab() {
   const detector = useSimStore((s) => s.detector)
@@ -94,16 +81,15 @@ export function ModelTab() {
   const limits = detector?.limits
   const running = detector?.running ?? false
 
-  // ---- 入力。サーバーの値域に合わせるが、握るのはこのコンポーネント ----
-  const [mode, setMode] = useState<DetectorMode>('full')
-  const [samples, setSamples] = useState(2400)
-  const [epochs, setEpochs] = useState(12)
-  const [batchSize, setBatchSize] = useState(32)
-  const [width, setWidth] = useState(1)
-  const [presetId, setPresetId] = useState<string | null>(null)
+  const req = detector?.request
+  const [mode, setMode] = useState<DetectorMode>(req?.mode ?? 'full')
+  const [samples, setSamples] = useState(req?.samples ?? 2400)
+  const [epochs, setEpochs] = useState(req?.epochs ?? 12)
+  const [batchSize, setBatchSize] = useState(req?.batchSize ?? 32)
+  const [width, setWidth] = useState(req?.width ?? 1)
+  const [seed, setSeed] = useState(req?.seed ?? 0)
+  const [presetId, setPresetId] = useState<string | null>(req?.presetId ?? null)
 
-  // エリアの既定は「いま走らせているマップ」。読み込み済みのものと同じなら
-  // サーバーはそれをそのまま使うので、地図の読み直しが起きない
   useEffect(() => {
     if (presetId === null && status.presetId) setPresetId(status.presetId)
   }, [presetId, status.presetId])
@@ -124,22 +110,19 @@ export function ModelTab() {
         epochs,
         batchSize,
         width,
+        seed,
       },
     })
   }
 
-  const lossSeries = useMemo(
-    () => ({
-      loss: (detector?.history ?? []).map((h) => h.loss),
-      valLoss: (detector?.history ?? []).map((h) => h.valLoss),
-    }),
-    [detector?.history],
-  )
 
   const model = detector?.model
   const datasetFile = detector?.datasetFile
   const dataset = detector?.dataset
-  const estimate = estimateMinutes(samples, epochs, mode)
+  const seedMin = limits?.seedMin ?? 0
+  const seedMax = limits?.seedMax ?? 999999
+  const history = detector?.history ?? EMPTY_HISTORY
+  const estimate = estimateMinutes(samples, epochs, mode, width)
 
   return (
     <>
@@ -229,6 +212,41 @@ export function ModelTab() {
               format={(v) => `${v.toLocaleString()} 枚`}
               onChange={setSamples}
             />
+            <div className="m3-field">
+              <label className="m3-field-label" htmlFor="detector-seed">
+                乱数種
+                <span style={{ opacity: 0.7 }}>　変えると別の教師データが集まる</span>
+              </label>
+              <div className="m3-field-row">
+                <input
+                  id="detector-seed"
+                  className="m3-numberinput"
+                  type="number"
+                  inputMode="numeric"
+                  min={seedMin}
+                  max={seedMax}
+                  step={1}
+                  value={seed}
+                  disabled={disabled || running}
+                  onChange={(e) => {
+                    const v = Number(e.target.value)
+                    if (Number.isFinite(v)) setSeed(Math.max(seedMin, Math.min(seedMax, Math.round(v))))
+                  }}
+                />
+                <Button
+                  variant="tonal"
+                  size="sm"
+                  disabled={disabled || running}
+                  onClick={() => setSeed(Math.floor(Math.random() * (seedMax - seedMin + 1)) + seedMin)}
+                >
+                  ランダム
+                </Button>
+              </div>
+            </div>
+            <div className="m3-note">
+              同じ種なら何度回しても<strong>まったく同じ画</strong>が集まります。
+              クラス内訳が偏っていたら、種を変えてもう一度集めると散らばりが変わります。
+            </div>
           </div>
         </Collapse>
 
@@ -374,18 +392,18 @@ export function ModelTab() {
               </div>
             </div>
 
-            {lossSeries.loss.length >= 2 && (
+            {history.length >= 2 && (
               <>
                 <MetricsChart
                   title="損失（学習データ）"
-                  values={lossSeries.loss}
+                  values={history.map((h) => h.loss)}
                   color="var(--m3-primary)"
                   format={(v) => v.toFixed(4)}
                   height={48}
                 />
                 <MetricsChart
                   title="損失（検証データ）"
-                  values={lossSeries.valLoss}
+                  values={history.map((h) => h.valLoss)}
                   color="var(--m3-tertiary)"
                   format={(v) => v.toFixed(4)}
                   height={48}
@@ -450,7 +468,7 @@ export function ModelTab() {
               <div className="m3-stat" key={name}>
                 <span className="m3-stat-label">{CLASS_LABEL[name] ?? name}</span>
                 <ValueFlash
-                  className={`m3-stat-value${count === 0 ? '' : ' m3-stat-value--accent'}`}
+                  className={`m3-stat-value${count === 0 ? ' m3-stat-value--error' : ''}`}
                 >
                   {count.toLocaleString()}
                 </ValueFlash>
@@ -471,7 +489,12 @@ export function ModelTab() {
           <strong>サーバーを止めてから</strong>実行してください。
           <br />
           <code className="m3-mono">
-            .venv\Scripts\python.exe train_detector.py --samples {samples} --epochs {epochs}
+            .venv\Scripts\python.exe train_detector.py
+            {collects && ` --preset ${effectivePresetId ?? 'ginza'}`}
+            {collects && ` --samples ${samples} --seed ${seed}`}
+            {trains && ` --epochs ${epochs} --batch-size ${batchSize} --width ${width}`}
+            {mode === 'collect' && ' --collect-only'}
+            {mode === 'train' && ' --train-only'}
           </code>
         </div>
       </Card>

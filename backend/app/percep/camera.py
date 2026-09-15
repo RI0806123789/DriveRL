@@ -1,45 +1,4 @@
-"""擬似カメラ描画（運転席視点のラスタライズ）。
-
-学習ループはバックエンドのエンジンスレッドが回すので、認識器の入力になる画像も
-Python 側で作る必要がある。3D 描画はフロントエンド（Three.js）にしか無いため、
-ここで `world` と `MapIndex` から**同じ運転席視点**を numpy だけで描く。
-
-カメラの内部パラメータは `percep.types.CameraSpec` に従う。これは
-`frontend/src/scene/cameraMath.ts` の運転席カメラと同じ値なので、ここで描いた
-画像から得た検出結果は Three.js の映像にそのまま重ねられる。
-
-**この描画は「認識に必要な情報が写っていること」だけを目的にしている。**
-陰影・質感・アンチエイリアスは持たない。塗るのは次の 8 種類:
-
-    空 / 地面 / 路面 / 車線標示 / 信号機（灯色つき）/ 最高速度標識 /
-    他車両 / 障害物 / 建物
-
-方式は 3 つの層に分かれる。**どれも「1 台ずつの Python ループ」を持たない**
-（8 台 20Hz で回すので、ピクセル単位どころか物体単位のループでも予算を使い切る）。
-
-1. 空と地面
-   ロールが無いので地平線は水平な直線になる。行スライス 2 回で塗る。
-
-2. 路面と車線標示（地面レイヤ）
-   地平線より下の各画素から地面 z=0 への逆透視変換で世界座標を求め、
-   起動時に焼いた**道路ラスタ**を 1 回引くだけで路面・白線が決まる。
-   多角形の塗り分けではなく参照 1 回なので、道路の本数に依らず一定時間。
-   逆透視変換は行方向と列方向に分離できる（`_ground_g` / `_ground_q`）ので、
-   カメラごとに要るのは掛け算 2 回だけ。
-
-3. 立体物（建物・車両・信号機・標識・障害物）
-   すべて**画像座標の矩形／楕円のスパン**に落として、全カメラ・全物体を
-   1 本の配列にまとめ、奥行きの降順に並べてから一括で書き込む
-   （ペインターズアルゴリズム）。書き込みは ragged range 展開による
-   ファンシー代入 1 回で済む。
-
-   建物だけは面ではなく**画面の列ごとのレイキャスト**で描く。占有グリッドは
-   建物しか持たないので、列ごとに水平方向の距離を測って壁の上端・下端を
-   投影するほうが、全建物の壁面を投影するより桁違いに安い。
-
-描画は 1 バイトの**ラベル画像**へ行い、最後に一度だけパレットを引いて RGB にする。
-色を直接書くと画素あたりの転送量が 3 倍になり、この規模ではそれが支配項になる。
-"""
+"""擬似カメラ描画（運転席視点のラスタライズ）。"""
 
 from __future__ import annotations
 
@@ -65,18 +24,12 @@ from app.percep.types import (
     facing_viewer,
 )
 
-if TYPE_CHECKING:  # 実行時に import すると sim -> percep -> sim の循環になりうる
+if TYPE_CHECKING:
     from app.sim.world import World
+
 
 __all__ = ["PseudoCamera", "LABELS", "PALETTE"]
 
-
-# ---------------------------------------------------------------------------
-# ラベルとパレット
-# ---------------------------------------------------------------------------
-
-# ★ 地面を 0 にしてあるのは、道路ラスタの範囲外を clip で端へ丸めたときに
-#   そのまま「地面」になるようにするため。マスクを 1 枚省ける。
 LBL_GROUND = 0
 LBL_ROAD = 1
 LBL_MARKING = 2
@@ -115,124 +68,77 @@ LABELS = {
     "pole": LBL_POLE,
 }
 
-#: ラベル -> RGB。灯火の 3 色は互いに離して置く（認識器が灯色を分けられることが要件）。
 PALETTE = np.array(
     [
-        (86, 92, 78),      # 地面
-        (58, 60, 64),      # 路面
-        (232, 234, 230),   # 車線標示
-        (150, 178, 205),   # 空
-        (128, 122, 112),   # 建物
-        (52, 96, 168),     # 他車両
-        (26, 32, 44),      # 他車両（窓・影の帯）
-        (232, 108, 24),    # 障害物（パイロン）
-        (38, 42, 40),      # 灯器の筐体
-        (58, 60, 58),      # 消灯
-        (0, 190, 130),     # 青信号（日本の青は青緑）
-        (250, 200, 20),    # 黄信号
-        (235, 40, 35),     # 赤信号
-        (205, 35, 35),     # 標識の赤縁
-        (243, 243, 239),   # 標識の白地
-        (18, 18, 18),      # 標識の数字
-        (150, 150, 152),   # 支柱
+        (86, 92, 78),
+        (58, 60, 64),
+        (232, 234, 230),
+        (150, 178, 205),
+        (128, 122, 112),
+        (52, 96, 168),
+        (26, 32, 44),
+        (232, 108, 24),
+        (38, 42, 40),
+        (58, 60, 58),
+        (0, 190, 130),
+        (250, 200, 20),
+        (235, 40, 35),
+        (205, 35, 35),
+        (243, 243, 239),
+        (18, 18, 18),
+        (150, 150, 152),
     ],
     dtype=np.uint8,
 )
 
-#: 灯色（0=青 / 1=黄 / 2=赤）-> ラベル。`world.signal_phases` の並びに合わせる
 _PHASE_LABEL = np.array([LBL_LAMP_GREEN, LBL_LAMP_YELLOW, LBL_LAMP_RED], dtype=np.uint8)
 
-
-# ---------------------------------------------------------------------------
-# 実物の寸法
-# ---------------------------------------------------------------------------
-
-# ★ 信号機・標識の実寸（`SIGNAL_*` / `SIGN_*`）は `percep/types.py` にある
-#   （code_review C-03）。ここと `groundtruth.py` が同じ値を別々に持っていて、
-#   片方だけ直すと「描いた物と正解の箱の大きさが違う」状態になる。
-#   灯器の向き・高さ・灯火の並びは日本の車両用信号機
-#   （横型 3 灯・運転者から見て左から青黄赤）に合わせてある。
-
-#: 建物レイキャストの打ち切り距離 [m]（`CameraSpec.far` とは別）。
-#:
-#: ★ **`spec.far`（120m）より短いことに意味がある。** 建物だけは画面の列ごとに
-#:   1m 刻みでレイを飛ばすので、伸ばすとサンプル数が線形に増える（120m なら
-#:   96 列 × 120 点 × カメラ台数）。一方で 90m 先の壁は画面上 1〜2px にしかならず、
-#:   走行不能領域の手がかりとしての価値がほとんど無い。
-#:
-#: ★ **この値を変えると `groundtruth._line_of_sight()` との整合が崩れる**
-#:   （code_review C-05）。あちらは距離の上限を持たないので、ここで打ち切った
-#:   90〜120m の建物も遮蔽物として数える。つまり「画像では素通しに見える信号が、
-#:   遮蔽扱いでラベルから消える」ことが原理上ありうる。いまは実害が出ていない
-#:   （その距離の灯器は幅 1.38px で `MIN_BOX_PX = 1.5` に届かず、そもそも
-#:   ラベルが付かない）が、`CameraSpec` の解像度や画角を変えるとこの前提が崩れる。
-#:   **広げるなら `_line_of_sight()` にも同じ上限を入れること。**
 _BUILDING_RAY_MAX_M = 90.0
 
-#: 建物の高さ。占有グリッドは高さを持たないので既定値で描く。
-#: 銀座では 1,299 棟中 1,189 棟がこの既定値なので、実測との差は小さい。
-#: 走行不能領域としての手がかりに要るのは「壁の足元がどこか」であって
-#: 上端の高さではないため、ここで高さを持つ意味は薄い。
 _BUILDING_HEIGHT = config.DEFAULT_BUILDING_HEIGHT
 
-#: 7 セグメントの点灯表（数字 0〜9 × セグメント a,b,c,d,e,f,g）
 _SEVEN_SEG = np.array(
     [
-        [1, 1, 1, 1, 1, 1, 0],  # 0
-        [0, 1, 1, 0, 0, 0, 0],  # 1
-        [1, 1, 0, 1, 1, 0, 1],  # 2
-        [1, 1, 1, 1, 0, 0, 1],  # 3
-        [0, 1, 1, 0, 0, 1, 1],  # 4
-        [1, 0, 1, 1, 0, 1, 1],  # 5
-        [1, 0, 1, 1, 1, 1, 1],  # 6
-        [1, 1, 1, 0, 0, 0, 0],  # 7
-        [1, 1, 1, 1, 1, 1, 1],  # 8
-        [1, 1, 1, 1, 0, 1, 1],  # 9
+        [1, 1, 1, 1, 1, 1, 0],
+        [0, 1, 1, 0, 0, 0, 0],
+        [1, 1, 0, 1, 1, 0, 1],
+        [1, 1, 1, 1, 0, 0, 1],
+        [0, 1, 1, 0, 0, 1, 1],
+        [1, 0, 1, 1, 0, 1, 1],
+        [1, 0, 1, 1, 1, 1, 1],
+        [1, 1, 1, 0, 0, 0, 0],
+        [1, 1, 1, 1, 1, 1, 1],
+        [1, 1, 1, 1, 0, 1, 1],
     ],
     dtype=bool,
 )
 
-#: 各セグメントの正規化矩形 (cx, cy, hw, hh)。数字枠を [0,1]x[0,1]（下向き +y）とする
 _SEG_T = 0.20
 _SEG_RECT = np.array(
     [
-        (0.50, _SEG_T * 0.5, 0.50, _SEG_T * 0.5),                    # a 上
-        (1.0 - _SEG_T * 0.5, 0.25, _SEG_T * 0.5, 0.25),              # b 右上
-        (1.0 - _SEG_T * 0.5, 0.75, _SEG_T * 0.5, 0.25),              # c 右下
-        (0.50, 1.0 - _SEG_T * 0.5, 0.50, _SEG_T * 0.5),              # d 下
-        (_SEG_T * 0.5, 0.75, _SEG_T * 0.5, 0.25),                    # e 左下
-        (_SEG_T * 0.5, 0.25, _SEG_T * 0.5, 0.25),                    # f 左上
-        (0.50, 0.50, 0.50, _SEG_T * 0.5),                            # g 中
+        (0.50, _SEG_T * 0.5, 0.50, _SEG_T * 0.5),
+        (1.0 - _SEG_T * 0.5, 0.25, _SEG_T * 0.5, 0.25),
+        (1.0 - _SEG_T * 0.5, 0.75, _SEG_T * 0.5, 0.25),
+        (0.50, 1.0 - _SEG_T * 0.5, 0.50, _SEG_T * 0.5),
+        (_SEG_T * 0.5, 0.75, _SEG_T * 0.5, 0.25),
+        (_SEG_T * 0.5, 0.25, _SEG_T * 0.5, 0.25),
+        (0.50, 0.50, 0.50, _SEG_T * 0.5),
     ],
     dtype=np.float32,
 )
 
-#: 数字を描く最小の大きさ [px]。これ未満は潰れて読めないので描かない。
-#: 「小さいのに読める」嘘の画像を作らないための下限（types.py の解像度の議論と同じ）
 _DIGIT_MIN_HW = 0.45
 _DIGIT_MIN_HH = 1.2
 
-
-# ---------------------------------------------------------------------------
-# 道路ラスタ
-# ---------------------------------------------------------------------------
-
-#: ラスタの目標セル寸法 [m]。0.15m の区画線が 1 セルに乗る細かさ
 _RASTER_CELL_M = 0.25
-#: ラスタの一辺の最大セル数。広域プリセット（金沢は一辺 12.3km）で
-#: メモリが破裂しないよう、大きいマップではセルを粗くして総量を抑える
 _RASTER_MAX_SIDE = 6000
-#: ラスタ焼き込みの 1 チャンクあたり点数。中間配列のメモリを一定に保つ
 _RASTER_CHUNK_POINTS = 400_000
 
-#: 区画線の寸法（`frontend/src/scene/RoadMarkings.tsx` と同じ）
 _MARK_HALF_WIDTH = 0.075
 _MARK_EDGE_INSET = 0.35
 _MARK_DASH_ON = 5.0
 _MARK_DASH_PERIOD = 10.0
 
-#: 近傍検索のグリッドを使わずに全点を総当たりする上限。
-#: 銀座の信号 261 基程度なら総当たりのほうが速い
 _SMALL_POINT_SET = 1500
 
 
@@ -255,16 +161,7 @@ def _ragged_range(starts: np.ndarray, counts: np.ndarray) -> np.ndarray:
 
 
 class _NeighborIndex:
-    """点群を一様グリッドに入れて、半径内の候補を返す索引。
-
-    信号機・標識は広域プリセットでは万単位になる（金沢は標識 15,719 基）。
-    カメラ 8 台ぶん全点に投影計算を掛けると、それだけで 1 ステップの予算を
-    超えるので、視程 `radius` の範囲だけに絞る。
-
-    セル一辺を `2 * radius` にしてあるので、問い合わせ 1 回が触るセルは
-    最大 2x2 の 4 つ。結果はセル単位でキャッシュするので、車がセルを跨がない
-    限り 2 回目以降は辞書引き 1 回で済む。
-    """
+    """点群を一様グリッドに入れて、半径内の候補を返す索引。"""
 
     def __init__(self, xs: np.ndarray, ys: np.ndarray, radius: float) -> None:
         self._count = int(xs.size)
@@ -305,12 +202,7 @@ class _NeighborIndex:
 
 
 class PseudoCamera:
-    """運転席視点の擬似カメラ。
-
-    `render()` は指定スロットぶんの画像を (N, H, W, 3) uint8 で返す。
-    構築は 1 回・呼び出しは毎ステップという使われ方なので、カメラに依存しない
-    量（逆透視変換の係数・道路ラスタ・近傍索引）はここで全部作っておく。
-    """
+    """運転席視点の擬似カメラ。"""
 
     def __init__(self, map_index: MapIndex, spec: CameraSpec = DEFAULT_CAMERA) -> None:
         self.map_index = map_index
@@ -335,26 +227,11 @@ class PseudoCamera:
         self._prepare_signals()
         self._prepare_signs()
 
-    # ------------------------------------------------------------------
-    # 事前計算（カメラの姿勢に依存しない部分）
-    # ------------------------------------------------------------------
-
     def _prepare_ground(self) -> None:
-        """地平線と、地面画素の逆透視変換の係数を作る。
-
-        画素 (u, v) の視線は  d = f + a(u)*right + b(v)*up  で、
-        `right` は水平なので **d の鉛直成分は行 v だけで決まる**。
-        よって地面 z=0 までの距離 t も行だけの関数になり、地面上の点は
-
-            P = eye + g(v) * (cos h, sin h) + q(v, u) * (sin h, -cos h)
-
-        と書ける（g, q はカメラの向きに依らない）。カメラごとに要るのは
-        この 2 つを heading で回して足すだけになる。
-        """
+        """地平線と、地面画素の逆透視変換の係数を作る。"""
         w, h = self._w, self._h
         focal = self._focal
 
-        # 地平線: d の鉛直成分が 0 になる行。俯角ぶん画面中央より上に来る
         horizon = self._cy + focal * math.tan(math.atan2(self._sp, self._cp))
         self._horizon_row = int(np.clip(math.floor(horizon) + 1, 0, h))
 
@@ -366,7 +243,7 @@ class PseudoCamera:
             return
 
         b = (self._cy - (rows + 0.5)) / focal
-        dz = self._sp + b * self._cp          # 地平線より下なので必ず負
+        dz = self._sp + b * self._cp
         dz = np.minimum(dz, -1e-6)
         t = -self._eye_h / dz
         g = t * (self._cp - b * self._sp)
@@ -374,45 +251,25 @@ class PseudoCamera:
         a = ((np.arange(w, dtype=np.float64) + 0.5) - self._cx) / focal
         q = t[:, None] * a[None, :]
 
-        # 視程の外（spec.far より遠い）は地面のまま残す。
-        # (cos h, sin h) と (sin h, -cos h) は直交系なので距離は g, q だけで出る
         dist2 = g[:, None] ** 2 + q ** 2
         self._ground_ok = dist2 <= (self._far * self._far)
         self._ground_g = g.astype(np.float32)[:, None]
         self._ground_q = q.astype(np.float32)
 
     def _prepare_columns(self) -> None:
-        """建物レイキャストに使う、画面の列ごとの水平方向。
-
-        列の水平角は本来その画素の行にも僅かに依存するが、俯角が 2.12 度しか
-        無いので画面端でも 0.5 度未満しかずれない。**画面の高さ方向を無視して
-        列だけで決める**ことで、レイの本数を 1/144 に減らしている。
-        """
+        """建物レイキャストに使う、画面の列ごとの水平方向。"""
         step = self._column_step = 2
         centers = np.arange(0, self._w, step, dtype=np.float64) + step * 0.5
         a = (centers - self._cx) / self._focal
         length = np.sqrt(self._cp * self._cp + a * a)
         self._col_centers = centers.astype(np.float32)
-        self._col_a = (a / length).astype(np.float64)      # 進行方向右手の成分
-        self._col_f = (self._cp / length).astype(np.float64)  # 進行方向の成分
-        # レイの刻みと打ち切り。刻みは占有グリッドのセル（1m）に合わせる
+        self._col_a = (a / length).astype(np.float64)
+        self._col_f = (self._cp / length).astype(np.float64)
         ray_max = min(self._far, _BUILDING_RAY_MAX_M)
         self._ray_samples = np.arange(1.0, ray_max + 1e-6, 1.0, dtype=np.float64)
 
-    # ------------------------------------------------------------------
-    # 道路ラスタ
-    # ------------------------------------------------------------------
-
     def _build_road_raster(self) -> None:
-        """路面と車線標示を ENU 平面のラベルラスタへ焼く。
-
-        画面側では逆透視変換で世界座標を出して**参照 1 回**にしたいので、
-        道路の形はここで全部つぶしておく。多角形のまま持つと、画素ごとに
-        道路本数ぶんの内外判定が要り 20Hz には到底間に合わない。
-
-        セル寸法はマップの大きさで決める。広域プリセット（金沢は一辺 12.3km）を
-        0.25m で焼くと 24 億セルになるため、一辺のセル数に上限を設けて粗くする。
-        """
+        """路面と車線標示を ENU 平面のラベルラスタへ焼く。"""
         data = self.map_index.data
         bounds = data.bounds
         margin = float(config.GRID_MARGIN)
@@ -429,7 +286,7 @@ class PseudoCamera:
         self._roy = min_y
         self._rw = max(int(math.ceil(span_x / cell)) + 1, 1)
         self._rh = max(int(math.ceil(span_y / cell)) + 1, 1)
-        self._raster = np.zeros((self._rh, self._rw), dtype=np.uint8)  # 0 = 地面
+        self._raster = np.zeros((self._rh, self._rw), dtype=np.uint8)
 
         segments = self._collect_segments()
         if segments is None:
@@ -437,11 +294,9 @@ class PseudoCamera:
             return
         ax, ay, ux, uy, seg_len, half_w, oneway, arc0 = segments
 
-        step = cell * 0.6  # セルより細かく打って塗り残しを防ぐ
-        # --- 路面 ---
+        step = cell * 0.6
         self._stamp_band(ax, ay, ux, uy, seg_len, -half_w, half_w, LBL_ROAD, step)
 
-        # --- 車道外側線（両端の実線）---
         edge_off = np.maximum(half_w - _MARK_EDGE_INSET, half_w * 0.5)
         mark_hw = max(_MARK_HALF_WIDTH, cell * 0.6)
         for sign in (1.0, -1.0):
@@ -450,8 +305,6 @@ class PseudoCamera:
                 ax, ay, ux, uy, seg_len, off - mark_hw, off + mark_hw, LBL_MARKING, step
             )
 
-        # --- 車道中央線（対面通行のみ・破線）---
-        # 追越し禁止の黄色線は描かない（OSM から判別できないため。README 参照）
         two_way = ~oneway
         if bool(two_way.any()):
             self._stamp_band(
@@ -469,12 +322,7 @@ class PseudoCamera:
         self._raster_flat = self._raster.reshape(-1)
 
     def _collect_segments(self):
-        """全エッジのポリラインを 1 本の線分配列へ展開する。
-
-        線分ごとに (始点, 単位方向, 長さ, 道路半幅, 一方通行か, エッジ内弧長) を持つ。
-        弧長は破線の位相を決めるのに要る（線分ごとに 0 から数え直すと、
-        折れ点のたびに破線が途切れる）。
-        """
+        """全エッジのポリラインを 1 本の線分配列へ展開する。"""
         ax: list[float] = []
         ay: list[float] = []
         bx: list[float] = []
@@ -537,14 +385,7 @@ class PseudoCamera:
         step: float,
         arc0: np.ndarray | None = None,
     ) -> None:
-        """線分に沿った帯（横方向 lo〜hi）をラスタへ塗る。
-
-        線分ごとのループは持たず、「線分内の通し番号」を ragged 展開して
-        全線分ぶんを一度に世界座標へ直す。中間配列が膨らまないよう
-        点数でチャンクに切る（金沢は道路総延長 4,345km ある）。
-
-        `arc0` を渡すと破線（5m 実線 / 5m 空白）にする。
-        """
+        """線分に沿った帯（横方向 lo〜hi）をラスタへ塗る。"""
         n_along = np.ceil(seg_len / step).astype(np.int64) + 1
         n_across = np.ceil((hi - lo) / step).astype(np.int64) + 1
         counts = n_along * n_across
@@ -556,7 +397,6 @@ class PseudoCamera:
         if total == 0:
             return
 
-        # チャンク境界（線分の区切りで切る）
         chunk_starts = [0]
         pos = 0
         while pos < counts.size:
@@ -596,18 +436,8 @@ class PseudoCamera:
                 ri = ri[inside]
             raster[ri, ci] = value
 
-    # ------------------------------------------------------------------
-    # 信号機・標識の事前計算
-    # ------------------------------------------------------------------
-
     def _prepare_signals(self) -> None:
-        """灯器（3 灯のバー）の中心と向きを求めておく。
-
-        位置の決め方は `frontend/src/scene/signalGeometry.ts` と同じ。
-        交差点の対面側へ `roadWidth/2 + 2m` 進み、進行方向左へ `roadWidth/4`
-        寄せた位置に灯器が来る。ここを合わせておかないと、バックエンドの
-        検出結果を Three.js の映像へ重ねたときに灯器と箱がずれる。
-        """
+        """灯器（3 灯のバー）の中心と向きを求めておく。"""
         signals = self.map_index.data.signals
         n = len(signals)
         self._sig_count = n
@@ -634,11 +464,8 @@ class PseudoCamera:
         beyond = road_w * 0.5 + SIGNAL_BEYOND_MARGIN
         self._sig_x = cx + cos_h * beyond + left_x * (road_w * 0.25)
         self._sig_y = cy + sin_h * beyond + left_y * (road_w * 0.25)
-        # 灯器の並びは「運転者から見て左」= 進行方向左
         self._sig_ax = left_x
         self._sig_ay = left_y
-        # 進入車両の進行方位。正対の判定（`percep.types.facing_viewer`）に使う。
-        # 灯器の面はこの逆（heading + pi）を向く。
         self._sig_heading = heading
         self._sig_grid = _NeighborIndex(self._sig_x, self._sig_y, self._far)
 
@@ -656,26 +483,19 @@ class PseudoCamera:
         self._sign_y = np.array([s.y for s in signs], dtype=np.float64)
         cos_h = np.cos(heading)
         sin_h = np.sin(heading)
-        self._sign_ax = -sin_h   # 板の横方向（水平・法線に直交）
+        self._sign_ax = -sin_h
         self._sign_ay = cos_h
-        # 板が規制する進行方位（板そのものは heading + pi を向く）。
-        # 正対の判定（`percep.types.facing_viewer`）に使う。
         self._sign_heading = heading
 
         kph = np.rint(
             np.array([s.speed_limit for s in signs], dtype=np.float64) * 3.6
         ).astype(np.int32)
         kph = np.clip(kph, 0, 999)
-        # 右詰め 3 桁。先頭の 0 は「消灯」を意味する -1 にする
         digits = np.stack([kph // 100, (kph // 10) % 10, kph % 10], axis=1)
         digits[:, 0] = np.where(kph >= 100, digits[:, 0], -1)
         digits[:, 1] = np.where(kph >= 10, digits[:, 1], -1)
         self._sign_digits = digits.astype(np.int8)
         self._sign_grid = _NeighborIndex(self._sign_x, self._sign_y, self._far)
-
-    # ------------------------------------------------------------------
-    # 描画
-    # ------------------------------------------------------------------
 
     def render(self, world: "World", slots: np.ndarray) -> np.ndarray:
         """指定スロットの運転席視点を描く。戻り値 (len(slots), H, W, 3) uint8。"""
@@ -689,7 +509,6 @@ class PseudoCamera:
         heading = fleet.heading[slots].astype(np.float64)
         cos_h = np.cos(heading)
         sin_h = np.sin(heading)
-        # 運転席は車体中心から前へ forward、右へ right（日本車の右ハンドル）
         eye_x = fleet.x[slots].astype(np.float64) + cos_h * self.spec.forward + sin_h * self.spec.right
         eye_y = fleet.y[slots].astype(np.float64) + sin_h * self.spec.forward - cos_h * self.spec.right
 
@@ -736,8 +555,6 @@ class PseudoCamera:
 
         ci = ((px - self._rox) * self._rinv).astype(np.int32)
         ri = ((py - self._roy) * self._rinv).astype(np.int32)
-        # 範囲外はマスクを作らずに端へ丸める。ラスタの外周は余白（= 地面 0）なので
-        # 丸めた先も地面になり、結果は同じで配列を 1 枚減らせる
         np.clip(ci, 0, self._rw - 1, out=ci)
         np.clip(ri, 0, self._rh - 1, out=ri)
         ri *= self._rw
@@ -756,12 +573,7 @@ class PseudoCamera:
         cos_h: np.ndarray,
         sin_h: np.ndarray,
     ):
-        """画面の列ごとに建物までの距離を測り、壁の上端・下端を投影する。
-
-        占有グリッドは建物の有無しか持たないので、壁面を多角形として投影する
-        代わりに列ごとのレイキャストで距離を出す。列数は画面幅の半分に間引く
-        （建物の輪郭が 2px 単位になるが、走行不能領域の手がかりには十分）。
-        """
+        """画面の列ごとに建物までの距離を測り、壁の上端・下端を投影する。"""
         occ = self.map_index.occupancy
         grid = occ.building
         if grid.size == 0:
@@ -792,7 +604,6 @@ class PseudoCamera:
         first = hits.argmax(axis=2)
         dist = samples[first]
 
-        # 壁の足元（z=0）と上端（z=建物高さ）を投影する
         fwd = dist * self._col_f[None, :]
         z_bot = -self._eye_h
         z_top = _BUILDING_HEIGHT - self._eye_h
@@ -833,16 +644,7 @@ class PseudoCamera:
         cos_h: np.ndarray,
         sin_h: np.ndarray,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """世界座標を画像座標へ落とす。戻り値は (u, v, 奥行き Zc)。
-
-        `px` などは呼び出し側でカメラ添字に合わせて展開済みであること。
-        Zc <= near の点は呼び出し側で捨てる（**カメラの後ろの点を割ると
-        座標が反転して、画面に存在しない物体が現れる**）。
-
-        ★ 中身は `percep/geometry.py` の 1 本だけ（code_review C-06）。
-          `groundtruth.py` が同じ式を別に持っていたのをまとめたもので、
-          ずれると「画像に写っていない場所に正解の箱が付く」形で壊れる。
-        """
+        """世界座標を画像座標へ落とす。戻り値は (u, v, 奥行き Zc)。"""
         return project_components(
             px, py, pz,
             eye_x, eye_y, self._eye_h,
@@ -860,16 +662,12 @@ class PseudoCamera:
         cos_h: np.ndarray,
         sin_h: np.ndarray,
     ):
-        """他車両を、車体の外接直方体の投影から作った矩形で描く。
-
-        寸法を実車どおりにしてあるので、画面上の幅から既知の車幅を使った
-        単眼測距（`config.OBS_VEHICLE_*`）が成り立つ。
-        """
+        """他車両を、車体の外接直方体の投影から作った矩形で描く。"""
         active = np.flatnonzero(world.fleet.active)
         if active.size == 0:
             return None
         n = eye_x.size
-        corners = world.fleet.corners()[active].astype(np.float64)  # (K, 4, 2)
+        corners = world.fleet.corners()[active].astype(np.float64)
         k = active.size
 
         cxw = corners[None, :, :, 0]
@@ -880,20 +678,13 @@ class PseudoCamera:
         lat = rel_x * sin_h[:, None, None] - rel_y * cos_h[:, None, None]
 
         heights = np.array([0.0, config.VEHICLE_HEIGHT], dtype=np.float64) - self._eye_h
-        zc = self._cp * fwd[..., None] + self._sp * heights          # (n, k, 4, 2)
+        zc = self._cp * fwd[..., None] + self._sp * heights
         yc = -self._sp * fwd[..., None] + self._cp * heights
         xc = np.broadcast_to(lat[..., None], zc.shape)
 
         flat_zc = zc.reshape(n, k, -1)
-        # ★ 可視判定は「1 点でも近接平面より前なら描く」（code_review P-02）。
-        #   検出側の `groundtruth._detect_vehicles` が
-        #   `_box_from_points(require_all_in_front=False)` を使うので、そこへ揃える。
-        #   以前は 4 隅**すべて**が前方であることを要求していたため、近接平面
-        #   （0.5m）をまたぐ至近距離の他車が「学習には見えているのに画面には
-        #   描かれない」という食い違いを起こしていた。衝突直前がまさにそれ。
         in_front = flat_zc > self._near
         visible = in_front.any(axis=2) & (flat_zc.min(axis=2) < self._far)
-        # 自車は写さない（カメラは自分の運転席にある）
         visible &= active[None, :] != slots[:, None]
         if not visible.any():
             return None
@@ -901,20 +692,14 @@ class PseudoCamera:
         safe = np.maximum(flat_zc, 1e-3)
         u = self._cx + self._focal * xc.reshape(n, k, -1) / safe
         v = self._cy - self._focal * yc.reshape(n, k, -1) / safe
-        # 近接平面より後ろの点は投影が破綻する（符号が反転して端まで飛ぶ）ので、
-        # 枠の端を決める計算からは外す。groundtruth 側も `u[front]` で同じことをする。
         u0 = np.where(in_front, u, np.inf).min(axis=2)
         u1 = np.where(in_front, u, -np.inf).max(axis=2)
         v0 = np.where(in_front, v, np.inf).min(axis=2)
         v1 = np.where(in_front, v, -np.inf).max(axis=2)
-        # 深度（描画順）も前方の点だけで平均する。背後の負値を混ぜると
-        # 至近距離の車が「遠く」に見えて描画順が入れ替わる。
         front_count = in_front.sum(axis=2)
         depth = np.where(in_front, flat_zc, 0.0).sum(axis=2) / np.maximum(front_count, 1)
 
         cam = np.broadcast_to(np.arange(n, dtype=np.int32)[:, None], visible.shape)[visible]
-        # ★ 先に `visible` で絞ってから足し引きする。見えていない組は u0=+inf /
-        #   u1=-inf のままなので、絞る前に足すと inf + (-inf) = NaN の警告が出る
         u0v, u1v = u0[visible], u1[visible]
         v0v, v1v = v0[visible], v1[visible]
         cxf = ((u0v + u1v) * 0.5).astype(np.float32)
@@ -923,8 +708,6 @@ class PseudoCamera:
         hh = ((v1v - v0v) * 0.5).astype(np.float32)
         dep = depth[visible].astype(np.float32)
 
-        # 車体（明色）＋上半分の窓の帯（暗色）。上下 2 色にしておくと、
-        # 影も質感も無い画像でも「路面ではなく立体物」の手がかりになる
         m = cam.size
         return (
             np.concatenate([cam, cam]),
@@ -959,7 +742,7 @@ class PseudoCamera:
         radius = np.fromiter(
             (o.radius for o in world.obstacles), dtype=np.float64, count=len(world.obstacles)
         )
-        if radius.size != xy.shape[0]:  # 直前に増減した場合の保険
+        if radius.size != xy.shape[0]:
             radius = np.full(xy.shape[0], config.OBSTACLE_RADIUS, dtype=np.float64)
 
         ox = np.broadcast_to(xy[None, :, 0].astype(np.float64), (n, xy.shape[0]))
@@ -1022,13 +805,7 @@ class PseudoCamera:
         sin_h: np.ndarray,
         heading: np.ndarray,
     ):
-        """信号機を「灯器の筐体 + 3 灯」で描く。
-
-        **灯色が読めることが最優先**なので、点灯している灯だけを現示の色で塗り、
-        残り 2 灯は消灯色にする。灯火は 30cm しかなく遠方では 1px を割るが、
-        矩形は最低 1 画素を占めるようにしてあるので、遠くても色は残る
-        （実物の灯火も自発光なので、幾何的な大きさより見えるのが自然）。
-        """
+        """信号機を「灯器の筐体 + 3 灯」で描く。"""
         if self._sig_count == 0:
             return None
         pair = self._pairs(self._sig_grid, eye_x, eye_y)
@@ -1040,11 +817,6 @@ class PseudoCamera:
         hy = self._sig_y[sig]
         ex = eye_x[cam]
         ey = eye_y[cam]
-        # 自分に適用される灯器だけ（裏向き・交差方向・通り過ぎたものは除く）。
-        # ★ 判定は `percep.types.facing_viewer` に一本化してある。
-        #   ここが「位置の半空間」だけを見ていたころは、交差方向の灯器を
-        #   灯色まで塗っておきながら `groundtruth` 側がラベルを付けず、
-        #   認識器に矛盾した教師データを与えていた（code_review C-01）。
         facing = facing_viewer(
             hx, hy, self._sig_heading[sig], ex, ey, heading[cam]
         )
@@ -1063,14 +835,9 @@ class PseudoCamera:
         ay = self._sig_ay[sig]
         z = np.full(hx.shape, SIGNAL_HEAD_Z)
 
-        # 筐体の左右端（灯器は横型なので、横方向の見かけの幅は姿勢で変わる）
         half = SIGNAL_HOUSING_W * 0.5
         u_l, _v_l, zc = self._project(hx + ax * half, hy + ay * half, z, ex, ey, ch, sh)
         u_r, v_c, zc_r = self._project(hx - ax * half, hy - ay * half, z, ex, ey, ch, sh)
-        # ★ 左右**両端**が前方であることを要求する（code_review P-02）。
-        #   検出側の `groundtruth._detect_traffic_lights` は
-        #   `_box_from_points`（既定 `require_all_in_front=True`）なので、
-        #   片端だけで判定すると「描かれるのに検出されない」信号ができる。
         visible = (zc > self._near) & (zc_r > self._near) & (zc < self._far)
         if not visible.any():
             return None
@@ -1096,11 +863,6 @@ class PseudoCamera:
         body_hw = np.abs(u_r - u_l) * 0.5
         body_hh = SIGNAL_HOUSING_H * 0.5 * scale
 
-        # ★ 灯器数より短い `phases` が来ても落とさない（code_review C-04）。
-        #   `groundtruth.py` は `0 <= idx < len(phases)` を見て赤へ倒すのに、
-        #   ここは `phases.size` が 0 かどうかしか見ておらず、短いだけの配列では
-        #   IndexError で**描画ごと落ちていた**。防御の水準を揃える。
-        #   足りないぶんは赤（= 2）にする。安全側であり groundtruth の既定とも同じ。
         phases = np.asarray(world.signal_phases, dtype=np.int32)
         if phases.size < self._sig_count:
             phases = np.pad(
@@ -1108,7 +870,6 @@ class PseudoCamera:
             )
         phase = phases[sig]
 
-        # 3 灯。運転者から見て左（= 進行方向左）から 青・黄・赤
         lamp_cam = []
         lamp_cx = []
         lamp_cy = []
@@ -1140,7 +901,7 @@ class PseudoCamera:
             np.concatenate([body_hh] + lamp_hh).astype(np.float32),
             np.concatenate(
                 [np.zeros(m, dtype=bool), np.ones(m * 3, dtype=bool)]
-            ),  # 灯火は円板
+            ),
             np.concatenate(
                 [np.full(m, LBL_SIGNAL_BODY, dtype=np.uint8)] + lamp_lbl
             ),
@@ -1158,12 +919,7 @@ class PseudoCamera:
         sin_h: np.ndarray,
         heading: np.ndarray,
     ):
-        """最高速度標識を「支柱 + 赤縁の円 + 白地 + 7 セグの数字」で描く。
-
-        規制速度ごとに見分けがつく必要があるので、板の中に数字を描く。
-        ただし 1 画素を割る大きさになったら**描かない**。読めない距離で
-        読めるように描くと、認識器に「入力に無い情報」を学習させることになる。
-        """
+        """最高速度標識を「支柱 + 赤縁の円 + 白地 + 7 セグの数字」で描く。"""
         if self._sign_count == 0:
             return None
         pair = self._pairs(self._sign_grid, eye_x, eye_y)
@@ -1175,7 +931,6 @@ class PseudoCamera:
         sy = self._sign_y[sgn]
         ex = eye_x[cam]
         ey = eye_y[cam]
-        # 信号と同じ判定（code_review C-01）。裏向き・交差方向・通り過ぎた板は描かない
         facing = facing_viewer(
             sx, sy, self._sign_heading[sgn], ex, ey, heading[cam]
         )
@@ -1201,7 +956,6 @@ class PseudoCamera:
         u_r, _v, zc_r = self._project(
             sx - ax * SIGN_RADIUS, sy - ay * SIGN_RADIUS, zc_center, ex, ey, ch, sh
         )
-        # ★ 信号と同じ理由で左右両端を要求する（code_review P-02）。
         visible = (zc > self._near) & (zc_r > self._near) & (zc < self._far)
         if not visible.any():
             return None
@@ -1222,14 +976,12 @@ class PseudoCamera:
         board_hw = np.maximum(np.abs(u_r - u_l) * 0.5, 0.1)
         board_hh = SIGN_RADIUS * scale
 
-        # 支柱（路面から板の下端まで）
         _up, v_ground, _z2 = self._project(
             sx, sy, np.zeros_like(sx), ex, ey, ch, sh
         )
         v_bottom = v_c + board_hh
         pole_hw = np.maximum(config.SPEED_SIGN_POLE_RADIUS * scale, 0.05)
 
-        # 白地（赤縁は板の直径のおよそ 1 割）
         face_hw = board_hw * 0.78
         face_hh = board_hh * 0.78
 
@@ -1286,24 +1038,18 @@ class PseudoCamera:
         face_hh: np.ndarray,
         depth: np.ndarray,
     ):
-        """規制速度の数字を 7 セグメントの矩形群として作る。
-
-        矩形にしておくと、標識・車両・建物とまったく同じ塗りの経路に乗るので
-        文字専用の描画を持たずに済む。
-        """
-        digits = self._sign_digits[sgn]                    # (m, 3)
+        """規制速度の数字を 7 セグメントの矩形群として作る。"""
+        digits = self._sign_digits[sgn]
         used = digits >= 0
         n_used = used.sum(axis=1)
         m = cam.size
         if m == 0:
             return None
 
-        # 数字 1 文字ぶんの枠。白地の内側に横並びで詰める
         field_hw = face_hw * 0.80
         field_hh = face_hh * 0.72
         cell_hw = field_hw / np.maximum(n_used, 1)
-        # 右詰め: 使う桁だけを中央に寄せる
-        slot = np.cumsum(used, axis=1) - 1                 # 使う桁の通し番号
+        slot = np.cumsum(used, axis=1) - 1
         centre = (
             board_cx[:, None]
             - field_hw[:, None]
@@ -1323,7 +1069,6 @@ class PseudoCamera:
         valid = used
         if valid.any():
             lit[valid] = _SEVEN_SEG[digits[valid]]
-        # 潰れて読めない大きさの数字は描かない
         lit &= (seg_hw >= _DIGIT_MIN_HW * 0.5) & (seg_hh >= _DIGIT_MIN_HH * 0.5)
         lit &= (field_hh >= _DIGIT_MIN_HH)[:, None, None]
         if not lit.any():
@@ -1343,21 +1088,8 @@ class PseudoCamera:
             np.full(cam3.size, 3, dtype=np.int16),
         )
 
-    # ------------------------------------------------------------------
-    # スパン塗り（ペインターズアルゴリズム）
-    # ------------------------------------------------------------------
-
     def _draw_shapes(self, label: np.ndarray, specs: list) -> None:
-        """矩形／楕円のスパンを、奥から手前へ一括で塗る。
-
-        物体ごとのループは持たない。全カメラ・全物体を 1 本の配列にまとめ、
-        奥行きの降順（同じ奥行きなら部品の重ね順）に並べてから、
-        行の展開 → 画素添字の展開 → ファンシー代入 1 回で書き込む。
-
-        **同じ画素に複数回書くのは意図どおり**（手前の物体が後から上書きする）。
-        numpy のファンシー代入は添字配列の順に書くので、並べ替えた順序が
-        そのまま前後関係になる。
-        """
+        """矩形／楕円のスパンを、奥から手前へ一括で塗る。"""
         if not specs:
             return
         cam = np.concatenate([s[0] for s in specs]).astype(np.int32)
@@ -1382,8 +1114,6 @@ class PseudoCamera:
             return
 
         idx = np.flatnonzero(keep)
-        # 奥から手前へ。lexsort は最後のキーが優先されるので、
-        # 主キー = -depth（奥ほど先）、副キー = order（同じ物体の重ね順）
         idx = idx[np.lexsort((order[idx], -depth[idx]))]
 
         cam = cam[idx]
@@ -1402,7 +1132,6 @@ class PseudoCamera:
         if rows.size == 0:
             return
 
-        # 楕円は行ごとに横幅が変わる（信号の灯火・標識の円板がこれ）
         row_hw = hw[obj].astype(np.float64)
         is_ell = ell[obj]
         if is_ell.any():

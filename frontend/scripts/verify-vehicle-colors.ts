@@ -1,16 +1,4 @@
-/**
- * 車両の色が 64 台ぶん見分けられるかを検証する（ブラウザ不要）。
- *
- *     cd frontend
- *     node scripts/verify-vehicle-colors.ts
- *
- * 色は「同じ色が 2 台に出ない」だけでは足りない。
- * 追跡ピンや車両一覧で見分けるには、
- *   - どの 2 台も色が十分に離れていること
- *   - 番号が隣どうしの車両はとくに離れていること
- * が要る。ここでは実際に 64 台ぶんの色を作り、
- * 知覚に近い CIELAB 空間での距離を数値で確かめる。
- */
+/** 車両の色が 64 台ぶん見分けられるかを検証する（ブラウザ不要）。 */
 
 import { VEHICLE_COLORS, vehicleColor } from '../src/scene/vehicleColors.ts'
 
@@ -22,8 +10,6 @@ function check(label: string, ok: boolean, detail = ''): void {
   console.log(`  [${ok ? 'OK  ' : 'NG  '}] ${label}${detail ? ` — ${detail}` : ''}`)
   if (!ok) failures += 1
 }
-
-// ---- 色の解析（#rrggbb と hsl(h, s%, l%) の両方を受ける）----
 
 function parseColor(css: string): [number, number, number] {
   const hex = /^#([0-9a-f]{6})$/i.exec(css)
@@ -55,7 +41,6 @@ function parseColor(css: string): [number, number, number] {
 function toLab(rgb: [number, number, number]): [number, number, number] {
   const lin = rgb.map((c) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4))
   const [r, g, b] = lin
-  // D65 白色点
   const x = (0.4124 * r + 0.3576 * g + 0.1805 * b) / 0.95047
   const y = 0.2126 * r + 0.7152 * g + 0.0722 * b
   const z = (0.0193 * r + 0.1192 * g + 0.9505 * b) / 1.08883
@@ -72,15 +57,12 @@ function labDistance(a: string, b: string): number {
   return Math.hypot(la[0] - lb[0], la[1] - lb[1], la[2] - lb[2])
 }
 
-// ---- 検証 ----
-
 console.log('='.repeat(70))
 console.log(`車両の色（${MAX_VEHICLES} 台）`)
 console.log('='.repeat(70))
 
 const colors = Array.from({ length: MAX_VEHICLES }, (_, i) => vehicleColor(i))
 
-// 1. パレットが台数ぶん揃っていること（足りないと予備の色に落ちる）
 check(
   `パレットが ${MAX_VEHICLES} 色ある`,
   VEHICLE_COLORS.length >= MAX_VEHICLES,
@@ -91,11 +73,9 @@ check(
   VEHICLE_COLORS.every((c, i) => colors[i] === c),
 )
 
-// 2. 同じ色が 2 台に出ない
 const unique = new Set(colors)
 check(`${MAX_VEHICLES} 台すべて違う色`, unique.size === MAX_VEHICLES, `${unique.size} 色`)
 
-// 3. どの 2 台も知覚上まとまった距離だけ離れている
 let worst = Infinity
 let worstPair = [0, 0]
 for (let i = 0; i < MAX_VEHICLES; i += 1) {
@@ -107,14 +87,12 @@ for (let i = 0; i < MAX_VEHICLES; i += 1) {
     }
   }
 }
-// CIELAB で 10 あればパネル上の小さな色見本でも別の色として読める
 check(
   'どの 2 台も色が離れている（CIELAB 距離 >= 10）',
   worst >= 10,
   `最小 ${worst.toFixed(1)}（#${worstPair[0]} と #${worstPair[1]}）`,
 )
 
-// 4. 番号が隣どうしはとくに離れている（一覧で上下に並ぶため）
 let worstAdj = Infinity
 let worstAdjAt = 0
 for (let i = 0; i + 1 < MAX_VEHICLES; i += 1) {
@@ -130,7 +108,6 @@ check(
   `最小 ${worstAdj.toFixed(1)}（#${worstAdjAt} と #${worstAdjAt + 1}）`,
 )
 
-// 5. 暗すぎ・明るすぎない（3D の車体色としても、白背景の色見本としても使う）
 const lightness = colors.map((c) => toLab(parseColor(c))[0])
 const tooDark = lightness.filter((l) => l < 55).length
 const tooLight = lightness.filter((l) => l > 95).length
@@ -145,7 +122,6 @@ check(
   `最大 L* ${Math.max(...lightness).toFixed(0)}`,
 )
 
-// 6. 範囲外の id でも落ちない（欠番や再スポーンで飛び番になりうる）
 const odd = [-1, 0, 999, 1.5, Number.NaN]
 let oddOk = true
 for (const id of odd) {

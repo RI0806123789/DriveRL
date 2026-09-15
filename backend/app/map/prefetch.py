@@ -1,13 +1,4 @@
-"""全プリセットのマップを先読みして JSON キャッシュを温める CLI。
-
-使い方（backend ディレクトリで実行）::
-
-    .venv\\Scripts\\python.exe -m app.map.prefetch
-    .venv\\Scripts\\python.exe -m app.map.prefetch --force        # キャッシュを無視して取り直す
-    .venv\\Scripts\\python.exe -m app.map.prefetch ginza umeda    # 対象を絞る
-
-Overpass API は混雑時に数分かかることがある。1 件失敗しても残りは続行する。
-"""
+"""全プリセットのマップを先読みして JSON キャッシュを温める CLI。"""
 
 from __future__ import annotations
 
@@ -96,7 +87,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  [失敗] {exc}（{elapsed:.2f} 秒）\n")
             failed.append((preset.id, str(exc)))
             continue
-        except Exception as exc:  # 想定外の例外でも残りを続行する
+        except Exception as exc:
             elapsed = time.perf_counter() - started
             print(f"  [失敗] 想定外のエラー: {type(exc).__name__}: {exc}（{elapsed:.2f} 秒）\n")
             failed.append((preset.id, f"{type(exc).__name__}: {exc}"))

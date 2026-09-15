@@ -10,7 +10,7 @@
   "display": "fullscreen",
   "display_override": ["fullscreen", "standalone", "minimal-ui"],
   "background_color": "#101418",
-  "theme_color": "#101418",
+  "theme_color": "#83868a",
   "icons": [
     {
       "src": "/icon-192.png",

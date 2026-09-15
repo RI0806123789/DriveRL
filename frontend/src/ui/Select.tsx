@@ -1,7 +1,4 @@
-/**
- * ドロップダウン。
- * ネイティブの <select> をスタイルしている（キーボード操作をそのまま活かすため）。
- */
+/** ドロップダウン。 */
 
 import { useId } from 'react'
 import { ChevronDownIcon } from './Icons'

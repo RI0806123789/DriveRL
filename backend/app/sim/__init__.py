@@ -1,9 +1,4 @@
-"""シミュレーションコア（物理・世界・MARL 環境）。
-
-外部（runtime / rl）からはこのモジュールの re-export だけを使う想定::
-
-    from app.sim import SimulationEnv
-"""
+"""シミュレーションコア（物理・世界・MARL 環境）。"""
 
 from __future__ import annotations
 

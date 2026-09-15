@@ -1,15 +1,4 @@
-/**
- * 認識結果オーバーレイの座標変換を検証する（ブラウザ不要）。
- *
- *     cd frontend
- *     node scripts/verify-detections.ts
- *
- * バックエンドの擬似カメラと three のカメラは**画角の定義が違う**
- * （擬似カメラ = 水平 68 度・4:3 固定 / three = 垂直 68 度・可変比）。
- * ここがずれるとボックスが対象物の上に乗らず、「何を認識しているか見せる」
- * という目的そのものが果たせない。**しかも型チェックもビルドも通ってしまう**
- * ので、数値で確かめる。
- */
+/** 認識結果オーバーレイの座標変換を検証する（ブラウザ不要）。 */
 
 import {
   BACKEND_CAMERA,
@@ -84,8 +73,6 @@ console.log('\n単調性（並び順が入れ替わらない）')
 
 console.log('\n画角の違いが実際に効いていること（素通しとの差）')
 {
-  // 擬似カメラの垂直画角(53.7度)は three の垂直画角(68度)より狭いので、
-  // 画像の下端は画面の下端より内側に来なければならない。
   const bottom = projectToViewport(0.5, 1.0, WIDE)
   check(
     '画像下端は画面下端より内側',
@@ -98,7 +85,6 @@ console.log('\n画角の違いが実際に効いていること（素通しと�
     right.x < 0.999 && right.x > 0.5,
     `x=${right.x.toFixed(4)}（素通しなら 1.0、ずれ ${((1 - right.x) * 100).toFixed(1)}%）`,
   )
-  // ずれが無視できる大きさなら、そもそもこの変換は要らない。
   check(
     'ずれは丸め誤差では説明できない大きさ',
     1 - bottom.y > 0.05 || 1 - right.x > 0.05,
@@ -124,7 +110,6 @@ console.log('\nボックスの矩形化')
   )
   check('幅・高さが正', rect.width > 0 && rect.height > 0)
 
-  // 視野の外に出るボックスも 0〜1 に収まること（CSS の % に直接入れるため）
   const clipped = projectBox([-0.5, -0.5, 1.5, 1.5], WIDE)
   const inside =
     clipped.left >= 0 &&
@@ -133,7 +118,6 @@ console.log('\nボックスの矩形化')
     clipped.top + clipped.height <= 1 + 1e-9
   check('視野外のボックスも 0〜1 に丸められる', inside)
 
-  // 座標が逆順（x1 < x0）でも潰れないこと
   const flipped = projectBox([0.7, 0.7, 0.3, 0.3], WIDE)
   check('逆順の座標でも矩形になる', flipped.width > 0 && flipped.height > 0)
 }

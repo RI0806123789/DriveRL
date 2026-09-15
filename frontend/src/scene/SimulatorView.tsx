@@ -1,16 +1,4 @@
-/**
- * 左側のシミュレーター画面（memo 4章）。
- *
- * Canvas と、その上に重ねる案内表示（マップ未読込のプレースホルダ、
- * 介入モードのヒント）をまとめて持つ。
- * 走行状況の HUD はここではなく StageHud.tsx（操作パネルの列の一番下）。
- *
- * 3D の中身は zustand を極力読まない。20Hz の frame は frameBuffer から
- * useFrame で直接読むので、ここで再レンダリングされるのは
- * 「マップが変わった」「表示トグルを操作した」ときだけ。
- * カメラのモードと追従対象は CameraRig が自分で購読する（ここで購読すると、
- * 車両一覧をクリックするたびにシーン全体の差分計算が走ってしまうため）。
- */
+/** 左側のシミュレーター画面（memo 4章）。 */
 
 import { useEffect, useRef } from 'react'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
@@ -41,10 +29,7 @@ function shadowExtent(bounds: MapBounds | null): number {
   return Math.max(bounds.maxX - bounds.minX, bounds.maxY - bounds.minY) * 0.62 + 80
 }
 
-/**
- * フォグを調整する基準になるマップの一辺 [m]。
- * 400m プリセット（銀座・梅田・栄）の実測がおよそ 870〜990m なので、その付近。
- */
+/** フォグを調整する基準になるマップの一辺 [m]。 */
 const DESIGN_SPAN_M = 900
 
 /** マップの一辺（大きいほう）[m]。無ければ 400m プリセット相当 */
@@ -53,19 +38,7 @@ function mapSpan(bounds: MapBounds | null): number {
   return Math.max(bounds.maxX - bounds.minX, bounds.maxY - bounds.minY)
 }
 
-/**
- * カメラの far 面 [m]。
- *
- * ★ **固定値にしないこと。** `CameraRig.overviewFor()` は俯瞰位置を
- *   `span * 0.85` を基準に取るので、俯瞰から対角の隅までは **約 1.5 * span** ある。
- *   金沢（広域・一辺 12.3km）では約 11km 離れるので、固定の 8000 では
- *   **マップ全体がクリップされて何も映らない**。
- *
- * far を伸ばしても深度精度はほとんど落ちない。分解能は
- * `z^2 * (1/near - 1/far)` に比例し、far >> near では実質 `1/near` で決まるため
- * （near=0.5 のとき far 8000 で 1.99988、far 31000 でも 1.99997 とほぼ同じ）。
- * したがって路面の polygonOffset の重ね順には影響しない。
- */
+/** カメラの far 面 [m]。 */
 function cameraFarFor(span: number): number {
   return Math.max(8000, span * 2.5)
 }
@@ -88,30 +61,15 @@ export function SimulatorView() {
     <>
       <div className="stage-canvas">
         <Canvas
-          // ★ shadows は "percentage"（PCFShadowMap）で固定する。
-          //
-          // R3F の既定（shadows={true}）は PCFSoftShadowMap だが、three 0.185 では
-          // これが非推奨になっており、WebGLShadowMap.render() が毎回
-          //   「PCFSoftShadowMap has been deprecated」と警告 → 自分で PCFShadowMap に書き換え
-          // という動作をする。R3F 側が shadows を再適用するたびに PCFSoft に戻るため
-          // type が往復し、そのたびに **シーン全体のマテリアルが再コンパイル**される
-          // （建物が数千件あるので実害が大きい）。最初から PCFShadowMap を指定して断ち切る。
-          //
-          // 影の ON/OFF は enabled ではなく各オブジェクトの castShadow / receiveShadow と
-          // ライトの castShadow で行う。影を落とすライトが 0 本になれば three 側が
-          // シャドウパスを早期 return するので、無効化のコストも実質ゼロ。
           shadows="percentage"
           dpr={[1, 2]}
           camera={{ fov: 50, near: 0.5, far: 8000, position: [300, 320, 300] }}
           gl={{ antialias: true, powerPreference: 'high-performance' }}
           onCreated={({ gl, scene }) => {
-            // 実際の色は SceneAtmosphere が毎テーマ書き直す。
-            // ここは最初の 1 フレームが真っ黒に見えないようにするためだけの初期値。
             gl.setClearColor(new THREE.Color(DARK_SCENE.sky))
             scene.fog = new THREE.Fog(DARK_SCENE.sky, DARK_SCENE.fogNear, DARK_SCENE.fogFar)
           }}
         >
-          {/* 空と環境光。色は日の出・日の入りで切り替わる */}
           <SceneAtmosphere span={span} />
           <SceneLights />
           <SunLight cx={cx} cz={cz} extent={extent} castShadow={view.shadows} />
@@ -129,7 +87,6 @@ export function SimulatorView() {
               castShadow={view.shadows}
             />
           )}
-          {/* 最高速度標識。表示の可否と標識の一覧は SpeedSigns が自分で購読する */}
           <SpeedSigns />
           {map && view.buildings && (
             <Buildings
@@ -144,9 +101,6 @@ export function SimulatorView() {
             showGoals={view.goals}
             maxVehicles={maxVehicles}
           />
-          {/* 認識した車線を路面へ重ねる 3D オーバーレイ。表示トグル・追従対象は
-              DetectionOverlay と同じ理由で自分で購読する（ここで購読すると
-              車両切り替えのたびにシーン全体が差分計算されるため） */}
           <LaneDetectionOverlay />
           <Vehicles maxVehicles={maxVehicles} castShadow={view.shadows} />
           <Obstacles castShadow={view.shadows} />
@@ -203,16 +157,10 @@ export function SimulatorView() {
         </div>
       )}
 
-      {/* 認識結果のオーバーレイ。カメラモード・表示トグルは自分で購読する
-          （SimulatorView で購読すると車両切り替えのたびにシーン全体が差分計算されるため） */}
       <DetectionOverlay />
     </>
   )
 }
-
-// ---------------------------------------------------------------------------
-// 太陽光（影を落とす平行光）
-// ---------------------------------------------------------------------------
 
 interface SunLightProps {
   cx: number
@@ -221,25 +169,13 @@ interface SunLightProps {
   castShadow: boolean
 }
 
-/**
- * 背景色とフォグを配色に追従させる。
- *
- * `onCreated` は 1 回しか走らないので、そこで色を決めると日の出・日の入りで
- * 切り替わらない。**フォグは差し替えずに中身を書き換える。**
- * `scene.fog` を null と非 null の間で往復させるとシーン全体のマテリアルが
- * 再コンパイルされるが、色と距離はユニフォームなので書き換えるだけなら無料。
- */
+/** 背景色とフォグを配色に追従させる。 */
 function SceneAtmosphere({ span }: { span: number }) {
   const palette = usePalette()
   const gl = useThree((s) => s.gl)
   const scene = useThree((s) => s.scene)
   const camera = useThree((s) => s.camera)
 
-  // ★ フォグの距離は**マップの大きさに追従させる**。
-  //   配色に入っている 600m / 2600m は 400m プリセット（一辺およそ 900m）に
-  //   合わせた値で、金沢（広域・一辺 12.3km）にそのまま当てると
-  //   **俯瞰したとき画面全体が霧一色**になり何も見えない。
-  //   小さいマップでは k = 1 なので見た目は今までと変わらない。
   const k = Math.max(1, span / DESIGN_SPAN_M)
 
   useEffect(() => {
@@ -255,7 +191,6 @@ function SceneAtmosphere({ span }: { span: number }) {
     }
   }, [gl, scene, palette, k])
 
-  // カメラの far 面もマップに追従させる（Canvas の camera prop は生成時にしか効かない）
   useEffect(() => {
     const far = cameraFarFor(span)
     if (camera instanceof THREE.PerspectiveCamera && camera.far !== far) {
@@ -267,10 +202,7 @@ function SceneAtmosphere({ span }: { span: number }) {
   return null
 }
 
-/**
- * 環境光。`args` ではなく個別の props で渡す。
- * `args` は浅く比較されるので、配色が変わるたびにライトごと作り直されてしまう。
- */
+/** 環境光。`args` ではなく個別の props で渡す。 */
 function SceneLights() {
   const palette = usePalette()
   return (
@@ -285,13 +217,7 @@ function SceneLights() {
   )
 }
 
-/**
- * three の DirectionalLight は **target がシーングラフに入っていないと
- * matrixWorld が更新されない**（＝ target.position を書いても無視され、光も影カメラも
- * 常に原点を向く）。R3F の `target-position` は light.target.position に代入するだけで
- * target をシーンへ足さないので、そのままではデッドコードになる。
- * ここでは target 用の object3D を明示的にシーンへ置き、ref で light.target に差し込む。
- */
+/** three の DirectionalLight は **target がシーングラフに入っていないと */
 function SunLight({ cx, cz, extent, castShadow }: SunLightProps) {
   const palette = usePalette()
   const light = useRef<THREE.DirectionalLight>(null)
@@ -325,24 +251,10 @@ function SunLight({ cx, cz, extent, castShadow }: SunLightProps) {
   )
 }
 
-// ---------------------------------------------------------------------------
-// ドローコールの実測（HUD 用）
-// ---------------------------------------------------------------------------
-
-/**
- * gl.info.render.calls を毎フレーム拾って sceneStats へ書く。
- *
- * three は render() の先頭で info をリセットするので、useFrame（render の前）で
- * 読むと「直前フレームの実績」が取れる。
- * 描画の重さは台数を増やしたときに黙って悪化するため、数値で見えるようにしておく。
- */
+/** gl.info.render.calls を毎フレーム拾って sceneStats へ書く。 */
 function RenderStatsProbe() {
   const gl = useThree((s) => s.gl)
 
-  // three は render() の先頭で info をリセットする（autoReset）。
-  // R3F は useFrame を render() の前に回すので、そのままだと
-  // **リセット直後の 0 を読む**ことになり、HUD が常に「描画 0 call」になる。
-  // 自動リセットを切って、読んだ後に自分でリセットする。
   useEffect(() => {
     gl.info.autoReset = false
     return () => {

@@ -1,21 +1,4 @@
-/**
- * PWA のアイコン（PNG）を生成する。`npm run icons` で実行する。
- *
- * ★ **画像編集ソフトも画像ライブラリも使わない。** index.html のファビコン
- *   （32x32 の SVG データ URI）と**同じ図形・同じ色**を数式で塗り、
- *   Node 標準の zlib だけで PNG を書き出す。こうしておくと
- *   「ファビコンだけ直してアイコンが古いまま」という食い違いが起きない。
- *   図形を変えるときは index.html のデータ URI と**セットで**直すこと。
- *
- * 出力（`frontend/public/`）:
- *   icon-192.png           ホーム画面・タスクバー用
- *   icon-512.png           スプラッシュ用
- *   icon-maskable-512.png  Android のマスク対応（安全域 80% に収めた版）
- *
- * PNG は「フィルタ 0 の生スキャンライン -> deflate -> IDAT」で作る。
- * 透過を持つのは `any` の 2 枚だけで、maskable は角を丸めずに全面を塗る
- * （丸めるとマスクと二重になって角が欠ける）。
- */
+/** PWA のアイコン（PNG）を生成する。`npm run icons` で実行する。 */
 
 import { deflateSync } from 'node:zlib'
 import { mkdirSync, writeFileSync } from 'node:fs'
@@ -31,21 +14,17 @@ type RGB = [number, number, number]
 
 /** index.html のファビコンと同じ色 */
 const COLOR = {
-  bg: hex('#141a20'), // 背景（夜の路面に合わせた暗色）
-  road: hex('#3a4550'), // 路面のライン
-  body: hex('#9ecaff'), // 車体（tokens.css の primary 系）
-  glass: hex('#0f1b26'), // 窓
-  wheel: hex('#15181c'), // タイヤ
+  bg: hex('#141a20'),
+  road: hex('#3a4550'),
+  body: hex('#9ecaff'),
+  glass: hex('#0f1b26'),
+  wheel: hex('#15181c'),
 } satisfies Record<string, RGB>
 
 function hex(s: string): RGB {
   const n = Number.parseInt(s.slice(1), 16)
   return [(n >> 16) & 255, (n >> 8) & 255, n & 255]
 }
-
-// ---------------------------------------------------------------------------
-// 図形（すべて 32x32 のユーザー座標。ファビコンの SVG と同じ数値）
-// ---------------------------------------------------------------------------
 
 type Vec = [number, number]
 
@@ -107,32 +86,21 @@ const CAR_GLASS: Vec[] = [
   [7.9, 17.1],
 ]
 
-/**
- * 32x32 のユーザー座標 (x, y) を色に変える。手前の図形が勝つ。
- * 背景に当たらなければ null（透過）。
- */
+/** 32x32 のユーザー座標 (x, y) を色に変える。手前の図形が勝つ。 */
 function sample(x: number, y: number, rounded: boolean): RGB | null {
   if (inCircle(x, y, 10, 22, 2.4) || inCircle(x, y, 22, 22, 2.4)) return COLOR.wheel
   if (inPolygon(x, y, CAR_GLASS)) return COLOR.glass
   if (inPolygon(x, y, CAR_BODY)) return COLOR.body
   if (inCapsule(x, y, [4, 20], [28, 20], 2)) return COLOR.road
-  if (!rounded) return COLOR.bg // maskable は全面を塗る
+  if (!rounded) return COLOR.bg
   return inRoundRect(x, y, 32, 32, 8) ? COLOR.bg : null
 }
 
-/**
- * アイコンを 1 枚描く。
- *
- * @param size   出力の 1 辺 [px]
- * @param inset  図形を内側へ寄せる割合。maskable の安全域用（0.2 で 80% に縮む）
- * @param rounded 角を丸めるか。maskable では false（マスクと二重にしない）
- * @param lift   図形を上へ寄せるユーザー座標の量。車は 32x32 の中で下寄り
- *               （y 13.5〜24.4）なので、角丸の無い maskable では車自体を中央へ置く
- */
+/** アイコンを 1 枚描く。 */
 function render(size: number, { inset = 0, rounded = true, lift = 0 } = {}): Buffer {
   const rgba = Buffer.alloc(size * size * 4)
-  const scale = 32 / (size * (1 - inset * 2)) // 出力 px -> ユーザー座標
-  const offset = (size * inset * scale * -1) // 内側へ寄せた分の平行移動
+  const scale = 32 / (size * (1 - inset * 2))
+  const offset = (size * inset * scale * -1)
 
   for (let py = 0; py < size; py++) {
     for (let px = 0; px < size; px++) {
@@ -155,7 +123,6 @@ function render(size: number, { inset = 0, rounded = true, lift = 0 } = {}): Buf
       }
       const n = SS * SS
       const i = (py * size + px) * 4
-      // 透明部分を混ぜても色が黒へ寄らないよう、色は「塗られたサンプル」だけで平均する
       const covered = a / 255
       rgba[i] = covered > 0 ? Math.round(r / covered) : 0
       rgba[i + 1] = covered > 0 ? Math.round(g / covered) : 0
@@ -165,10 +132,6 @@ function render(size: number, { inset = 0, rounded = true, lift = 0 } = {}): Buf
   }
   return encodePng(size, size, rgba)
 }
-
-// ---------------------------------------------------------------------------
-// PNG エンコード（zlib だけで済ませる）
-// ---------------------------------------------------------------------------
 
 const CRC_TABLE = (() => {
   const table = new Uint32Array(256)
@@ -199,11 +162,9 @@ function encodePng(width: number, height: number, rgba: Buffer): Buffer {
   const ihdr = Buffer.alloc(13)
   ihdr.writeUInt32BE(width, 0)
   ihdr.writeUInt32BE(height, 4)
-  ihdr[8] = 8 // ビット深度
-  ihdr[9] = 6 // カラータイプ: RGBA
-  // 10..12 は圧縮・フィルタ・インタレース。いずれも 0（既定）
+  ihdr[8] = 8
+  ihdr[9] = 6
 
-  // 各スキャンラインの先頭にフィルタ種別 0 を置く
   const raw = Buffer.alloc(height * (width * 4 + 1))
   for (let y = 0; y < height; y++) {
     const src = y * width * 4
@@ -220,16 +181,12 @@ function encodePng(width: number, height: number, rgba: Buffer): Buffer {
   ])
 }
 
-// ---------------------------------------------------------------------------
-
 mkdirSync(OUT_DIR, { recursive: true })
 
 const files: Array<[string, Buffer]> = [
   ['icon-192.png', render(192)],
   ['icon-512.png', render(512)],
-  // Android はアイコンを円や角丸で切り抜く。外周 20% を捨てられても
-  // 車が欠けないよう、図形を内側へ寄せて背景を全面に塗る
-  ['icon-maskable-512.png', render(512, { inset: 0.2, rounded: false, lift: 3 })],
+  ['icon-maskable-512.png', render(512, { inset: 0.1, rounded: false, lift: 3 })],
 ]
 
 for (const [name, buf] of files) {

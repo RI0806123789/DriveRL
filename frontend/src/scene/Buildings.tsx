@@ -1,16 +1,4 @@
-/**
- * 建物メッシュ。
- *
- * 各建物の outline から THREE.Shape を作り、ExtrudeGeometry で height 分押し出す。
- * 建物は数千件になるため、必ず mergeGeometries でまとめること（統合しないと
- * ドローコールが爆発してフレームレートが落ちる）。
- *
- * ExtrudeGeometry は +Z 方向に押し出すので、rotateX(-PI/2) して
- *   (shape.x, shape.y, extrude.z) -> (x, height, -y)
- * すなわち protocol.md 1.3 の変換（three.x = enu.x, three.z = -enu.y）に一致させる。
- *
- * 高さに応じて頂点カラーを変え、街の起伏が分かるようにしている。
- */
+/** 建物メッシュ。 */
 
 import { useEffect, useMemo } from 'react'
 import { usePalette } from './usePalette'
@@ -21,14 +9,7 @@ import type { MapBuilding } from '../types/protocol'
 /** 1 メッシュにまとめる建物数。大きすぎると 1 回のマージが重くなる */
 const CHUNK_SIZE = 400
 
-/**
- * 低層 → 高層のグラデーション。
- *
- * 色は**頂点色として焼き込む**（建物ごとに高さが違うのでマテリアルでは表せない）。
- * そのため配色が変わったらジオメトリを作り直すことになる。
- * 切り替わるのは日の出と日の入りの 1 日 2 回だけなので、
- * マップ読み込みと同じ程度の一瞬の負荷は受け入れる。
- */
+/** 低層 → 高層のグラデーション。 */
 function buildingColor(
   height: number,
   low: THREE.Color,
@@ -38,6 +19,8 @@ function buildingColor(
   const t = Math.min(1, Math.max(0, (height - 6) / 60))
   return target.copy(low).lerp(high, t)
 }
+
+let warnedSkipped = false
 
 function buildChunks(
   buildings: MapBuilding[],
@@ -49,6 +32,7 @@ function buildChunks(
   const chunks: THREE.BufferGeometry[] = []
   let pending: THREE.BufferGeometry[] = []
   const tmpColor = new THREE.Color()
+  let skipped = 0
 
   const flush = () => {
     if (pending.length === 0) return
@@ -65,7 +49,6 @@ function buildChunks(
     const outline = b.outline
     if (!outline || outline.length < 3) continue
 
-    // 最後の点が始点と重なっていたら落とす（Shape は自動で閉じる）
     let count = outline.length
     const first = outline[0]
     const last = outline[count - 1]
@@ -87,11 +70,10 @@ function buildChunks(
         curveSegments: 1,
       })
     } catch {
-      // 自己交差など三角形分割に失敗する形状はスキップする
+      skipped += 1
       continue
     }
 
-    // 押し出し方向（+Z）を上（+Y）へ向ける
     geom.rotateX(-Math.PI / 2)
 
     const posAttr = geom.getAttribute('position')
@@ -103,7 +85,6 @@ function buildChunks(
     const colors = new Float32Array(vertexCount * 3)
     const c = buildingColor(height, low, high, tmpColor)
     for (let i = 0; i < vertexCount; i++) {
-      // 上に行くほどわずかに明るく（面の区別がつきやすい）
       const yv = posAttr.getY(i)
       const k = 0.82 + 0.28 * Math.min(1, yv / Math.max(1, height))
       colors[i * 3 + 0] = c.r * k
@@ -117,6 +98,14 @@ function buildChunks(
   }
 
   flush()
+  // 形を作れなかった建物は描かれないが、衝突判定はサーバー側の真値で行われる。
+  // 「何も無いところで止まった」に見えるので 1 度だけ知らせる（code_review E-11）
+  if (skipped > 0 && !warnedSkipped) {
+    warnedSkipped = true
+    console.warn(
+      `[Buildings] ${skipped} 件の建物を描けませんでした（衝突判定はサーバー側で有効なままです）`,
+    )
+  }
   return chunks
 }
 

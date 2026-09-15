@@ -1,17 +1,4 @@
-/**
- * カメラワーク（memo F-03「俯瞰や追従などのカメラワーク」）。
- *
- * - **俯瞰**: drei の OrbitControls。マップ全体が入る初期位置に置く。
- * - **追従**: 対象車両の斜め後方上空から追う。カメラを減衰させて滑らかにする。
- * - **運転席**: 対象車両の運転席から見た一人称視点。
- *   日本車は右ハンドルなので、視点は車体中心より**右側**に置く。
- *
- * 姿勢は補間済みの値（scene/interpolation.ts）を使うので、サーバーが 20Hz でも
- * 60fps で滑らかに動く。respawn などで大きく飛んだときだけ補間を切って瞬間移動させる。
- *
- * カメラモードと追従対象は**ここで購読する**。SimulatorView 側で購読すると、
- * 車両一覧をクリックするたびにシーン全体（車両・経路・建物）の差分計算が走る。
- */
+/** カメラワーク（memo F-03「俯瞰や追従などのカメラワーク」）。 */
 
 import { memo, useEffect, useMemo, useRef } from 'react'
 import { useFrame, useThree } from '@react-three/fiber'
@@ -36,10 +23,7 @@ const FOV_DRIVER = 68
 const NEAR_DEFAULT = 0.5
 const NEAR_DRIVER = 0.15
 
-/**
- * 追従対象が取れなくなってから乗り換えるまでの猶予 [ms]。
- * respawn の谷間や 1 フレームの取りこぼしで切り替わらないよう、少し待つ。
- */
+/** 追従対象が取れなくなってから乗り換えるまでの猶予 [ms]。 */
 const LOST_GRACE_MS = 600
 
 export interface CameraRigProps {
@@ -78,7 +62,6 @@ export const CameraRig = memo(function CameraRig({ bounds }: CameraRigProps) {
 
   const overview = useMemo(() => overviewFor(bounds), [bounds])
 
-  // 視野角とニアクリップはモードで切り替える
   useEffect(() => {
     const cam = camera as THREE.PerspectiveCamera
     if (!cam.isPerspectiveCamera) return
@@ -87,7 +70,6 @@ export const CameraRig = memo(function CameraRig({ bounds }: CameraRigProps) {
     cam.updateProjectionMatrix()
   }, [camera, mode])
 
-  // マップが変わったら俯瞰位置を取り直す
   useEffect(() => {
     if (mode !== 'orbit') return
     camera.position.copy(overview.position)
@@ -100,7 +82,6 @@ export const CameraRig = memo(function CameraRig({ bounds }: CameraRigProps) {
     }
   }, [overview, camera, mode])
 
-  // モードや対象を変えたら、次のフレームで一度だけ瞬間移動させる
   useEffect(() => {
     initialised.current = false
     lostSince.current = 0
@@ -113,9 +94,6 @@ export const CameraRig = memo(function CameraRig({ bounds }: CameraRigProps) {
     const alpha = computeAlpha(performance.now(), paused)
     const ok = sampleVehicle(followTarget, alpha, pose)
     if (!ok) {
-      // 追従対象が非アクティブになった（車両数を減らした・エピソードが終わった）。
-      // 何もしないとカメラが最後の位置で固まり、OrbitControls も無効なので
-      // マウス操作も効かなくなる。別の車へ乗り換えるか、俯瞰へ戻す。
       recoverLostTarget(followTarget, lostSince)
       return
     }
@@ -133,12 +111,10 @@ export const CameraRig = memo(function CameraRig({ bounds }: CameraRigProps) {
     desiredLook.set(look.x, look.y, look.z)
 
     if (!initialised.current || pose.teleported) {
-      // モード切替直後と respawn 直後は即座に合わせる（画面が滑って酔うのを防ぐ）
       camera.position.copy(desiredPos)
       currentLook.copy(desiredLook)
       initialised.current = true
     } else {
-      // フレームレートに依存しない減衰
       const rate = mode === 'driver' ? DRIVER_LERP : FOLLOW_LERP
       const t = 1 - Math.exp(-rate * delta)
       camera.position.lerp(desiredPos, t)
@@ -150,7 +126,6 @@ export const CameraRig = memo(function CameraRig({ bounds }: CameraRigProps) {
   return (
     <OrbitControls
       ref={controls}
-      // 追従・運転席では手動操作を無効化する（カメラを毎フレーム上書きするため）
       enabled={mode === 'orbit'}
       enableDamping
       dampingFactor={0.08}
@@ -162,16 +137,10 @@ export const CameraRig = memo(function CameraRig({ bounds }: CameraRigProps) {
   )
 })
 
-/**
- * 追従対象を見失ったときの復帰。
- *
- * 猶予を置いてから、最小のアクティブスロットへ乗り換える。
- * 1 台も走っていなければ俯瞰へ落として理由を HUD に出す
- * （黙って固まると「操作が効かない」としか見えないため）。
- */
+/** 追従対象を見失ったときの復帰。 */
 function recoverLostTarget(followTarget: number, lostSince: { current: number }): void {
   const curr = frameBuffer.curr
-  if (!curr) return // まだフレームが 1 枚も来ていない。切り替える根拠が無い
+  if (!curr) return
 
   const now = performance.now()
   if (lostSince.current === 0) {
@@ -179,7 +148,7 @@ function recoverLostTarget(followTarget: number, lostSince: { current: number })
     return
   }
   if (now - lostSince.current < LOST_GRACE_MS) return
-  lostSince.current = now // 復帰できなかったときのために、次の試行まで再び待つ
+  lostSince.current = now
 
   const next = firstActiveSlot(curr.vehicles)
   const store = useSimStore.getState()

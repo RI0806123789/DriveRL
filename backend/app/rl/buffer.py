@@ -1,9 +1,4 @@
-"""GAE 付きロールアウトバッファ（エージェントスロット次元あり）。
-
-配列は (capacity, num_agents, ...) の形で保持する。
-active=False のステップは GAE の計算からも学習からも完全に除外する
-（memo 5章「擬似固定エージェント数方式」の帰結）。
-"""
+"""GAE 付きロールアウトバッファ（エージェントスロット次元あり）。"""
 
 from __future__ import annotations
 
@@ -29,8 +24,6 @@ class RolloutBuffer:
         self.values = np.zeros(shape, dtype=np.float32)
         self.rewards = np.zeros(shape, dtype=np.float32)
         self.dones = np.zeros(shape, dtype=bool)
-        # `dones` のうち打ち切り（時間切れ）だったもの。GAE の連鎖は切るが
-        # ブートストラップは切らない（code_review L-08）
         self.truncated = np.zeros(shape, dtype=bool)
         self.active = np.zeros(shape, dtype=bool)
         self.advantages = np.zeros(shape, dtype=np.float32)
@@ -38,8 +31,6 @@ class RolloutBuffer:
 
         self.ptr = 0
         self._ready = False
-
-    # ------------------------------------------------------------------
 
     @property
     def full(self) -> bool:
@@ -83,8 +74,6 @@ class RolloutBuffer:
         self.active[i] = np.asarray(active, dtype=bool).reshape(n)
         self.ptr = i + 1
 
-    # ------------------------------------------------------------------
-
     def compute_returns_and_advantages(
         self,
         last_values: np.ndarray,
@@ -92,26 +81,7 @@ class RolloutBuffer:
         gamma: float,
         gae_lambda: float,
     ) -> None:
-        """スロットごとに独立に GAE を時間方向へ逆順計算する。
-
-        dones=True の位置でブートストラップを切り、active=False の位置で
-        アドバンテージの連鎖も切る。
-
-        ★ **打ち切り（`truncated`）はブートストラップを切らない**（code_review L-08）。
-          到達・衝突・道路外は本物の終端なので `V(s') = 0` でよいが、
-          `MAX_EPISODE_STEPS` による時間切れは truncation で、そこから先も
-          世界は続いている。切ると価値目標が `γV(s')` ぶん（走行中の V は
-          おおむね 6〜70 のオーダー）まるごとずれ、そのサンプルの advantage が
-          大きく負へ振れてバッチ全体の正規化統計まで引きずる。
-
-          ただし `env.step()` は同じステップの中で respawn するので、ここで
-          ブートストラップに使う `next_values` は**打ち切られた状態の価値ではなく
-          再スポーン直後の状態の価値**になる。厳密には終端観測の価値が要るが、
-          0 で切るより偏りは小さいのでこの近似を採る。
-          正確にやるなら `env` が打ち切りスロットの respawn 前の観測を返し、
-          その価値を別に評価する必要がある（1 更新あたり高々 1 サンプルなので
-          そこまでの複雑さに見合わないと判断した）。
-        """
+        """スロットごとに独立に GAE を時間方向へ逆順計算する。"""
         size = self.ptr
         if size == 0:
             self._ready = False
@@ -126,10 +96,7 @@ class RolloutBuffer:
         next_active = np.asarray(last_active, dtype=bool).reshape(n)
 
         for t in range(size - 1, -1, -1):
-            # GAE の連鎖は、エピソードが終わった位置で必ず切る（打ち切りも含む。
-            # 次の要素は respawn 後の別のエピソードなので繋げてはいけない）
             non_terminal = ((~self.dones[t]) & next_active).astype(np.float32)
-            # ブートストラップは「本物の終端」でだけ切る
             bootstrap = (
                 ((~self.dones[t]) | self.truncated[t]) & next_active
             ).astype(np.float32)
@@ -143,18 +110,8 @@ class RolloutBuffer:
         self.returns[:size] = self.advantages[:size] + self.values[:size]
         self._ready = True
 
-    # ------------------------------------------------------------------
-
     def flat_dataset(self) -> dict[str, torch.Tensor] | None:
-        """active=True のサンプルだけを平坦化した学習データを 1 つ返す。
-
-        バッファの中身をテンソルへコピーするので、**返したあとにバッファを
-        clear() して収集を再開してよい**。PPO 更新をステップ境界に分散させる
-        （app/rl/ppo.py の分割更新）ために必要な性質。
-
-        アドバンテージの正規化はミニバッチ単位ではなくバッチ全体で 1 回行う。
-        有効サンプルが無ければ None。
-        """
+        """active=True のサンプルだけを平坦化した学習データを 1 つ返す。"""
         size = self.ptr
         if size == 0 or not self._ready:
             return None
@@ -171,11 +128,8 @@ class RolloutBuffer:
         returns = self.returns[:size].reshape(-1)[idx]
         advantages = self.advantages[:size].reshape(-1)[idx]
 
-        # バッチ全体で 1 回だけ正規化する
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
-        # 上の fancy indexing で既にコピーができているので、
-        # from_numpy がバッファ本体を参照することはない
         return {
             "obs": torch.from_numpy(np.ascontiguousarray(obs)),
             "actions": torch.from_numpy(np.ascontiguousarray(actions)),

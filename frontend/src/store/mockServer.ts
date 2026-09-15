@@ -1,24 +1,4 @@
-/**
- * 開発用のモックサーバー（ブラウザ内で動く偽 WebSocket サーバー）。
- *
- * ★ これは開発補助です。本番では必ず実サーバー（FastAPI / ws://host/ws）に繋いでください。
- *   有効になるのは `import.meta.env.DEV` かつ URL に `?mock=1` が付いているときだけで、
- *   connection.ts から動的 import されるため本番バンドルには載りません。
- *
- * 目的:
- *   バックエンドが未完成でも、3D 描画・フレーム補間・パネル操作を目視確認できるようにする。
- *   docs/protocol.md v1 に準拠したメッセージだけを流す。
- *
- * 中身:
- *   - 100m 間隔の格子状道路網（9x9 ノード）と、街区に並べた建物
- *   - すべての交差点に信号機（backend の SIGNALS_AT_ALL_INTERSECTIONS = True と同じ扱い）
- *   - 車両は格子上を貪欲探索で目的地へ向かい、赤信号では停止線の手前で止まる
- *   - frame は 20Hz、metrics は 1Hz
- *
- * ★ 実バックエンドと**同じ形のメッセージ**しか作らないこと。
- *   台数・観測次元・信号のサイクルなどの数値も backend/app/config.py と
- *   docs/protocol.md に合わせる。ここがずれるとモックで確認した意味が無くなる。
- */
+/** 開発用のモックサーバー（ブラウザ内で動く偽 WebSocket サーバー）。 */
 
 import type {
   ClientMessage,
@@ -52,10 +32,6 @@ import {
 } from '../types/protocol'
 import type { Transport } from './connection'
 
-// ---------------------------------------------------------------------------
-// 決定的な擬似乱数（毎回同じ街ができるように）
-// ---------------------------------------------------------------------------
-
 function makeRng(seed: number) {
   let s = seed >>> 0
   return () => {
@@ -64,18 +40,12 @@ function makeRng(seed: number) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// 定数
-// ---------------------------------------------------------------------------
-
-const GRID_N = 9 // ノード数（片側）
-const GRID_SPACING = 100 // m
-const GRID_HALF = ((GRID_N - 1) * GRID_SPACING) / 2 // 400m
+const GRID_N = 9
+const GRID_SPACING = 100
+const GRID_HALF = ((GRID_N - 1) * GRID_SPACING) / 2
 const ROAD_WIDTH = 7.0
 const SIM_HZ = 20
 const FRAME_MS = 1000 / SIM_HZ
-
-// ---- 信号機（backend/app/map/loader.py・app/sim/signals.py と同じ値） ----
 
 /** 交差点とみなす最小の接続本数（loader.SIGNAL_MIN_STREETS） */
 const SIGNAL_MIN_STREETS = 3
@@ -85,10 +55,8 @@ const SIGNAL_SETBACK_EXTRA_M = 4.0 + 1.0
 const SIGNAL_GREEN_SEC = 25
 const SIGNAL_YELLOW_SEC = 3
 const SIGNAL_ALL_RED_SEC = 2
-const SIGNAL_HALF_CYCLE = SIGNAL_GREEN_SEC + SIGNAL_YELLOW_SEC + SIGNAL_ALL_RED_SEC // 30
-const SIGNAL_CYCLE = SIGNAL_HALF_CYCLE * 2 // 60
-
-// ---- 最高速度標識（backend/app/config.py・app/map/loader.py と同じ値） ----
+const SIGNAL_HALF_CYCLE = SIGNAL_GREEN_SEC + SIGNAL_YELLOW_SEC + SIGNAL_ALL_RED_SEC
+const SIGNAL_CYCLE = SIGNAL_HALF_CYCLE * 2
 
 /** 交差点から標識までの距離 [m]（config.SPEED_SIGN_SETBACK_M） */
 const SPEED_SIGN_SETBACK_M = 12.0
@@ -112,11 +80,6 @@ const MOCK_PRESETS: MapPreset[] = [
     radiusM: 400,
   },
   {
-    // ★ 中心座標だけは実バックエンドの presets.py と一致させること。
-    //   食い違うと、配色の切り替え時刻（autoTheme）の検証がモックと実機でずれる。
-    //   一方 radiusM は 400 のまま：実プリセットは 6,000m（12km 四方）だが、
-    //   モックは**合成した小さな格子を返すだけ**で radiusM をジオメトリに使わない。
-    //   ここだけ 6000 にすると、返す地図の広さと申告値が食い違う嘘になる。
     id: 'kanazawa',
     name: '石川・金沢（モックは縮小版）',
     description: '香林坊付近を模した合成マップ。実サーバーは市街地全域（12km 四方）',
@@ -134,14 +97,6 @@ const MOCK_PRESETS: MapPreset[] = [
   },
 ]
 
-// 実バックエンドの config.py と揃える。
-// ★ **ここに数字の由来をコメントで書かないこと**（code_review Q-04）。
-//   以前は「MAX_VEHICLES = 64 / OBS_DIM = 56 と揃える」と書いてあったが、
-//   画像認識ベースへの移行で実装が 8 台 / 57 次元になった後も残り、
-//   **コメントが明示的に嘘をついている**状態になっていた。
-//   モックに繋ぐと車両スライダーの上限が 64、車両チップが 64 個、
-//   ネットワーク図の入力層が 56 ノードになり、
-//   **本物では絶対に起こらない構成を相手に UI を確認する**ことになる。
 const MOCK_CONFIG: SimConfig = {
   maxVehicles: 8,
   simHz: SIM_HZ,
@@ -155,10 +110,6 @@ const DEFAULT_PARAMS: SimParams = {
   learningRate: 3e-4,
   gamma: 0.99,
   clipRange: 0.2,
-  // ★ バックエンドの既定と同じ 0.001（contracts.py）。0.01 は CLAUDE.md の
-  //   「試して駄目だったこと」に「log_std を上限まで押し上げて方策が
-  //   ランダムに潰れた」と実測が残っている値そのもの（code_review Q-04）。
-  //   モックは学習しないので害は出ないが、パネルの初期表示がその値になる。
   entropyCoef: 0.001,
   rolloutLength: 256,
   maxSpeed: 13.9,
@@ -172,10 +123,6 @@ const DEFAULT_PARAMS: SimParams = {
   obeySignals: true,
   obeySpeedSigns: true,
 }
-
-// ---------------------------------------------------------------------------
-// マップ生成
-// ---------------------------------------------------------------------------
 
 function nodeId(gx: number, gy: number): number {
   return gy * GRID_N + gx
@@ -202,7 +149,6 @@ function buildMockMap(presetId: string, name: string): MapMessage {
   const pushEdge = (a: number, b: number, lanes: number) => {
     const na = nodes[a]
     const nb = nodes[b]
-    // 中間点を入れて、リボン生成側の法線平均処理が動くことを確認できるようにする
     const polyline: Vec2[] = [
       [na.x, na.y],
       [(na.x + nb.x) / 2, (na.y + nb.y) / 2],
@@ -221,7 +167,6 @@ function buildMockMap(presetId: string, name: string): MapMessage {
   }
   for (let gy = 0; gy < GRID_N; gy++) {
     for (let gx = 0; gx < GRID_N; gx++) {
-      // 3 本おきに幹線道路（車線数を増やす）
       const majorX = gy % 3 === 0
       const majorY = gx % 3 === 0
       if (gx + 1 < GRID_N) pushEdge(nodeId(gx, gy), nodeId(gx + 1, gy), majorX ? 4 : 2)
@@ -229,10 +174,9 @@ function buildMockMap(presetId: string, name: string): MapMessage {
     }
   }
 
-  // 街区の中に建物を並べる
   const buildings: MapBuilding[] = []
   let buildingId = 0
-  const margin = 10 // 道路から離す距離
+  const margin = 10
   for (let gy = 0; gy + 1 < GRID_N; gy++) {
     for (let gx = 0; gx + 1 < GRID_N; gx++) {
       const x0 = nodeX(gx) + margin
@@ -242,7 +186,7 @@ function buildMockMap(presetId: string, name: string): MapMessage {
       const cell = inner / sub
       for (let sy = 0; sy < sub; sy++) {
         for (let sx = 0; sx < sub; sx++) {
-          if (rng() < 0.18) continue // 空き地
+          if (rng() < 0.18) continue
           const cx = x0 + cell * (sx + 0.5) + (rng() - 0.5) * 4
           const cy = y0 + cell * (sy + 0.5) + (rng() - 0.5) * 4
           const w = cell * (0.55 + rng() * 0.3)
@@ -260,7 +204,6 @@ function buildMockMap(presetId: string, name: string): MapMessage {
             cx + ox * cos - oy * sin,
             cy + ox * sin + oy * cos,
           ])
-          // 中心に近いほど高い（都心っぽさを出す）
           const distToCenter = Math.hypot(cx, cy) / GRID_HALF
           const base = 9 + (1 - distToCenter) * 34
           buildings.push({
@@ -297,17 +240,7 @@ function axisAngle(a: number, b: number): number {
   return Math.min(d, Math.PI - d)
 }
 
-/**
- * 交差点ごとに、進入路 1 本につき 1 基の信号機を作る。
- *
- * backend/app/map/loader.py の `_build_signals` と同じ考え方:
- *   - 接続する道路が 3 本以上のノードだけを交差点とみなす（格子の角は 2 本なので除外）
- *   - 日本の信号機は進入車両に正対するので、灯器の姿勢は進入方向で決まる
- *   - 停止線は交差点端から「横断歩道 + 余裕」だけ手前に引く
- *   - group は進入方向の**軸**で 0 / 1 に分け、直交する流れが同時に青にならないようにする
- *
- * 9x9 の格子では角 4 か所を除く 77 交差点に、合計 280 基できる（銀座の 261 基と同程度）。
- */
+/** 交差点ごとに、進入路 1 本につき 1 基の信号機を作る。 */
 function buildMockSignals(nodes: MapNode[], edges: MapEdge[]): MapSignal[] {
   const incident = new Map<number, MapEdge[]>()
   for (const e of edges) {
@@ -324,16 +257,13 @@ function buildMockSignals(nodes: MapNode[], edges: MapEdge[]): MapSignal[] {
     const neighbours = new Set(around.map((e) => (e.u === node.id ? e.v : e.u)))
     if (neighbours.size < SIGNAL_MIN_STREETS) continue
 
-    // 停止線の位置は交差する道路の広さで決まる
     const halfWidth = Math.max(...around.map((e) => e.width)) / 2
     const setback = halfWidth + SIGNAL_SETBACK_EXTRA_M
 
-    // 隣ノードごとに 1 本の進入路（モックの辺はすべて双方向）
     const approaches = new Map<number, { heading: number; x: number; y: number; width: number }>()
     for (const e of around) {
       const neighbourId = e.u === node.id ? e.v : e.u
       if (approaches.has(neighbourId)) continue
-      // nodes は id 昇順に詰めてあるので添字がそのまま id になる
       const from = nodes[neighbourId]
       const heading = Math.atan2(node.y - from.y, node.x - from.x)
       approaches.set(neighbourId, {
@@ -361,23 +291,9 @@ function buildMockSignals(nodes: MapNode[], edges: MapEdge[]): MapSignal[] {
   return signals
 }
 
-/**
- * 規制速度が変わる進入口に、最高速度標識を 1 基ずつ立てる。
- *
- * backend/app/map/loader.py の `_build_speed_signs` と同じ考え方:
- *   - OSM の traffic_sign タグは当てにならないので、道路（エッジ）の規制速度から作る
- *   - そのノードへ入ってくる**別の**道路と規制速度が同じなら置かない
- *     （同じ数字の標識を並べても情報が増えないため。規制が変わる地点に置く運用と同じ）
- *   - 支柱は進行方向の**左側**の路端に立てる（左側通行）
- *   - `heading` は「その標識が規制する側の進行方向」。標示板は heading + PI を向く
- *
- * モックの格子は幹線（16.7 m/s）と生活道路（11.1 m/s）が 3 本おきに交わるので、
- * その交点だけに標識が立つ。
- */
+/** 規制速度が変わる進入口に、最高速度標識を 1 基ずつ立てる。 */
 function buildMockSpeedSigns(nodes: MapNode[], edges: MapEdge[]): MapSign[] {
-  // ノードへ入ってくる有向エッジ（到着ノード -> [エッジ id, 規制速度]）
   const arriving = new Map<number, Array<[number, number]>>()
-  // ノードから出ていく有向エッジ（出発ノード -> [エッジ, 到着ノード]）
   const leaving = new Map<number, Array<[MapEdge, number]>>()
   const pushTo = <T>(m: Map<number, T[]>, key: number, value: T) => {
     const list = m.get(key)
@@ -385,7 +301,6 @@ function buildMockSpeedSigns(nodes: MapNode[], edges: MapEdge[]): MapSign[] {
     else m.set(key, [value])
   }
   for (const e of edges) {
-    // モックの辺はすべて双方向なので、両向きを進入路・退出路として登録する
     pushTo(arriving, e.v, [e.id, e.speedLimit])
     pushTo(arriving, e.u, [e.id, e.speedLimit])
     pushTo(leaving, e.u, [e, e.v])
@@ -397,7 +312,6 @@ function buildMockSpeedSigns(nodes: MapNode[], edges: MapEdge[]): MapSign[] {
     const out = leaving.get(node.id)
     if (!out) continue
     for (const [edge, toId] of [...out].sort((a, b) => a[0].id - b[0].id)) {
-      // 同じエッジの逆走（U ターン）は比較対象にしない
       const incoming = (arriving.get(node.id) ?? [])
         .filter(([otherId]) => otherId !== edge.id)
         .map(([, limit]) => limit)
@@ -405,12 +319,11 @@ function buildMockSpeedSigns(nodes: MapNode[], edges: MapEdge[]): MapSign[] {
         incoming.length > 0 &&
         incoming.every((limit) => Math.abs(limit - edge.speedLimit) < SIGN_LIMIT_EPSILON_MPS)
       ) {
-        continue // 手前と同じ規制なので標識は要らない
+        continue
       }
 
       const to = nodes[toId]
       const heading = Math.atan2(to.y - node.y, to.x - node.x)
-      // 交差点から少し進んだ位置の、進行方向左側（= heading + pi/2）へ寄せる
       const offset = edge.width / 2 + SPEED_SIGN_SIDE_MARGIN
       signs.push({
         id: signs.length,
@@ -425,10 +338,6 @@ function buildMockSpeedSigns(nodes: MapNode[], edges: MapEdge[]): MapSign[] {
   }
   return signs
 }
-
-// ---------------------------------------------------------------------------
-// 車両シミュレーション（格子上の貪欲ナビゲーション）
-// ---------------------------------------------------------------------------
 
 interface MockVehicle {
   id: number
@@ -485,13 +394,7 @@ function chooseNext(v: MockVehicle, rng: () => number): void {
   }
 }
 
-/**
- * 目的地までの残り距離 [m]。
- *
- * 「いま向かっているノードまでの距離 + そこから目的地までの格子距離」。
- * 貪欲ナビは x か y のどちらかを必ず 1 マス詰めるので、経路の取り方が変わっても
- * この値は単調に減る。したがって progress の分母として使える。
- */
+/** 目的地までの残り距離 [m]。 */
 function remainingDistance(v: MockVehicle): number {
   const segRest = Math.hypot(nodeX(v.tx) - v.x, nodeY(v.ty) - v.y)
   const grid = (Math.abs(v.goalGx - v.tx) + Math.abs(v.goalGy - v.ty)) * GRID_SPACING
@@ -513,14 +416,7 @@ function buildRoute(v: MockVehicle): Vec2[] {
   return pts
 }
 
-// ---------------------------------------------------------------------------
-// モック本体
-// ---------------------------------------------------------------------------
-
-/**
- * 何も実行していないときの `detector` メッセージ。
- * モックにはモデルのファイルが無いので `model.exists` は false のまま。
- */
+/** 何も実行していないときの `detector` メッセージ。 */
 function makeIdleDetector(): DetectorMessage {
   return {
     type: 'detector',
@@ -552,6 +448,8 @@ function makeIdleDetector(): DetectorMessage {
       batchMax: 128,
       widthMin: 0.25,
       widthMax: 2.0,
+      seedMin: 0,
+      seedMax: 999999,
     },
   }
 }
@@ -587,13 +485,9 @@ class MockServer {
   private metricsTimer: ReturnType<typeof setInterval> | null = null
   private loadTimer: ReturnType<typeof setTimeout> | null = null
   private closed = false
-  // 学習カーブの疑似状態
   private updates = 0
   private episodes = 0
   private progress = 0
-  // 認識器の学習（「モデル作成」タブ）の疑似ジョブ。
-  // ★ 実機と同じ**段階**を踏ませること。ここを一足飛びに done にすると、
-  //   進捗表示・中止ボタン・停止バナーがモックでは一度も確認できない
   private detector: DetectorMessage = makeIdleDetector()
   private detectorTimer: ReturnType<typeof setInterval> | null = null
 
@@ -604,7 +498,6 @@ class MockServer {
     }
     this.applyVehicleCount(this.params.vehicleCount)
 
-    // init は接続直後に 1 回だけ。実機と同じく detector もここで 1 通送る
     setTimeout(() => {
       this.sendInit()
       this.sendDetector()
@@ -613,8 +506,6 @@ class MockServer {
     this.frameTimer = setInterval(() => this.step(), FRAME_MS)
     this.metricsTimer = setInterval(() => this.sendMetrics(), 1000)
   }
-
-  // ---- 送信 ----
 
   private send(msg: ServerMessage): void {
     if (this.closed) return
@@ -645,13 +536,7 @@ class MockServer {
     this.send({ ...this.detector })
   }
 
-  /**
-   * 認識器の学習を模した進行。**実機の段階（収集 -> 保存 -> 学習 -> 完了）を
-   * そのまま踏む**ので、進捗表示と中止ボタンをモックでも確認できる。
-   *
-   * 1 周 250ms で、収集は 8 枚/周、学習は 1 エポック 8 周。実機より桁違いに速い
-   * （実機は銀座 2,400 枚で数分）。ここを実測に寄せると UI の確認ができない。
-   */
+  /** 認識器の学習を模した進行。**実機の段階（収集 -> 保存 -> 学習 -> 完了）を */
   private startDetectorJob(request: DetectorRequest): void {
     const preset = MOCK_PRESETS.find((p) => p.id === request.presetId)
     const startedAt = performance.now()
@@ -671,7 +556,6 @@ class MockServer {
       presetName: preset?.name ?? null,
       request,
     }
-    // 実機と同じく走行と学習を止める
     this.sendStatus({
       simSuspended: true,
       learning: false,
@@ -735,7 +619,6 @@ class MockServer {
       d.progress = (epoch - 1 + batch / d.batches) / request.epochs
       d.message = `（モック）学習中（${epoch} / ${request.epochs} エポック）`
       if (batch === d.batches) {
-        // エポックの終わりに損失を 1 点足す（推移グラフの確認用）
         const t = epoch / Math.max(1, request.epochs)
         d.history = [
           ...d.history,
@@ -800,20 +683,11 @@ class MockServer {
     this.send(metrics)
   }
 
-  // ---- 信号 ----
-
-  /**
-   * マップ読込時に、信号の引き当て表を作る。
-   *
-   * 灯器は「進入車両に正対」しているので、heading の逆側にある隣ノードが
-   * 「どこから来る車のための信号か」を表す。格子の heading は 0 / ±pi/2 / pi の
-   * いずれかなので、cos・sin を丸めればそのまま隣マスの差分になる。
-   */
+  /** マップ読込時に、信号の引き当て表を作る。 */
   private buildSignalIndex(): void {
     this.signalIndex.clear()
     this.signalSetback = []
     this.signLimits.clear()
-    // 標識は「出発ノードから heading の向きへ出る区間」の入口に立っている
     for (const sg of this.map?.signs ?? []) {
       const gx = sg.nodeId % GRID_N
       const gy = Math.floor(sg.nodeId / GRID_N)
@@ -833,16 +707,12 @@ class MockServer {
     }
   }
 
-  /**
-   * 灯色を simTime だけの関数として決める（backend/app/sim/signals.py と同じ式）。
-   * 内部状態を持たないので、一時停止やリセットと自然に整合する。
-   */
+  /** 灯色を simTime だけの関数として決める（backend/app/sim/signals.py と同じ式）。 */
   private computePhases(): number[] {
     const signals = this.map?.signals ?? []
     const out: number[] = new Array(signals.length)
     for (let i = 0; i < signals.length; i++) {
       const sg = signals[i]
-      // 街じゅうの信号が一斉に変わらないよう、ノードごとに位相をずらす
       const offset = (sg.nodeId * 7919) % SIGNAL_CYCLE
       const t = (this.simTime + offset) % SIGNAL_CYCLE
       const local = sg.group === 0 ? t : (t + SIGNAL_HALF_CYCLE) % SIGNAL_CYCLE
@@ -855,8 +725,6 @@ class MockServer {
     }
     return out
   }
-
-  // ---- 車両 ----
 
   private makeVehicle(id: number): MockVehicle {
     const gx = Math.floor(this.rng() * GRID_N)
@@ -895,8 +763,6 @@ class MockServer {
     v.routeTotal = Math.max(1, remainingDistance(v))
     v.progress = 0
     v.routeDirty = true
-    // エピソードの切れ目なので速度超過の統計は持ち越さない
-    // （backend の env._reset_slot_stats() と同じ扱い）
     v.speedViolations = 0
     v.overspeeding = false
   }
@@ -922,7 +788,6 @@ class MockServer {
     const by = nodeY(v.ty)
     const segLen = Math.hypot(bx - ax, by - ay)
 
-    // 目的地に着いていたら次の目的地を決める
     if (segLen < 1e-6) {
       v.goalGx = Math.floor(this.rng() * GRID_N)
       v.goalGy = Math.floor(this.rng() * GRID_N)
@@ -933,21 +798,14 @@ class MockServer {
       return
     }
 
-    // 交差点手前で少し減速し、直線で加速する（見た目の変化をつける）
     let targetSpeed = this.params.maxSpeed * (0.45 + 0.55 * Math.sin(Math.PI * v.t))
 
-    // 区間の入口に標識があれば、そこから規制速度が切り替わる。
-    // 無い区間では手前の標識の値がそのまま効き続ける（実際の規制と同じ）。
     const limit = this.signLimits.get(`${v.gx},${v.gy}>${v.tx},${v.ty}`)
     if (limit !== undefined) v.speedLimit = limit
-    // 「標識に従う」が入っていれば規制速度で頭打ちにする（backend の加速指令の抑制と同じ）
     if (this.params.obeySpeedSigns && v.speedLimit > 0) {
       targetSpeed = Math.min(targetSpeed, v.speedLimit)
     }
 
-    // 前方の信号（protocol.md 5章）。赤、および安全に止まれる黄では
-    // 停止線の手前で止まる。t が停止線を越えないようにクランプするので、
-    // 実バックエンドと違って信号無視は起きない。
     let stopT = 1
     if (this.params.obeySignals) {
       const idx = this.signalIndex.get(`${v.gx},${v.gy}>${v.tx},${v.ty}`)
@@ -956,7 +814,6 @@ class MockServer {
         const setback = this.signalSetback[idx]
         const stopDist = (1 - v.t) * segLen - setback
         const canStop = (v.speed * v.speed) / (2 * BRAKE_ACCEL) <= Math.max(0, stopDist)
-        // 黄で止まりきれないときはそのまま進んでよい（道交法施行令 2 条ただし書き）
         if (phase === SIGNAL_RED || canStop) {
           stopT = Math.max(0, 1 - setback / segLen)
           targetSpeed = Math.min(targetSpeed, Math.sqrt(2 * BRAKE_ACCEL * Math.max(0, stopDist)))
@@ -966,7 +823,6 @@ class MockServer {
 
     v.speed += (targetSpeed - v.speed) * Math.min(1, dt * 1.6)
 
-    // 超え「始めた」ステップだけを 1 回と数える（protocol.md の speedViolations）
     const over = v.speedLimit > 0 && v.speed > v.speedLimit
     if (over && !v.overspeeding) v.speedViolations += 1
     v.overspeeding = over
@@ -980,7 +836,6 @@ class MockServer {
 
     const prevHeading = v.heading
     v.heading = Math.atan2(by - ay, bx - ax)
-    // 舵角は heading の変化から作る（最短回りで差を取る）
     const dh = Math.atan2(Math.sin(v.heading - prevHeading), Math.cos(v.heading - prevHeading))
     v.steer += (Math.max(-0.5, Math.min(0.5, dh * 4)) - v.steer) * 0.25
 
@@ -996,7 +851,6 @@ class MockServer {
         v.goalGx = Math.floor(this.rng() * GRID_N)
         v.goalGy = Math.floor(this.rng() * GRID_N)
         chooseNext(v, this.rng)
-        // 目的地が変わったので達成度の分母を取り直す
         this.beginRoute(v)
       } else {
         v.reachedGoal = false
@@ -1011,12 +865,7 @@ class MockServer {
     v.reachedGoal = false
   }
 
-  /**
-   * 同じ区間を走る前走車に追突しないよう、後続の位置を後ろへ詰める。
-   *
-   * モックには車間制御が無いので、これが無いと赤信号の停止線で
-   * 全車が同じ点に重なり、衝突フラグが立ちっぱなしになる。
-   */
+  /** 同じ区間を走る前走車に追突しないよう、後続の位置を後ろへ詰める。 */
   private applyQueueing(): void {
     const lanes = new Map<string, MockVehicle[]>()
     for (const v of this.vehicles) {
@@ -1035,10 +884,10 @@ class MockServer {
       const bx = nodeX(head.tx)
       const by = nodeY(head.ty)
       const segLen = Math.hypot(bx - ax, by - ay)
-      if (segLen < 1e-6) continue // 目的地で停止中のスロット同士
+      if (segLen < 1e-6) continue
 
       const gap = CAR_GAP_M / segLen
-      list.sort((a, b) => b.t - a.t) // 前を走っている車から順に見る
+      list.sort((a, b) => b.t - a.t)
       for (let i = 1; i < list.length; i++) {
         const ahead = list[i - 1]
         const v = list[i]
@@ -1065,7 +914,6 @@ class MockServer {
           b.collided = true
         }
       }
-      // 障害物との接触
       for (const o of this.obstacles) {
         const a = active[i]
         if (Math.hypot(a.x - o.x, a.y - o.y) < o.radius + 2.2) a.collided = true
@@ -1084,7 +932,6 @@ class MockServer {
     for (const v of this.vehicles) this.stepVehicle(v, dt)
     this.detectCollisions()
 
-    // 「一時停止」は frame 配信だけを止める。裏の学習・物理は回り続ける（protocol.md 4章）
     if (this.status.renderPaused) return
 
     const vehicles: VehicleState[] = this.vehicles.map((v) => {
@@ -1119,32 +966,18 @@ class MockServer {
       vehicles,
       obstacles: this.obstacles,
     }
-    // 信号のあるマップなら現示も載せる。これが無いと TrafficSignals も
-    // RoadMarkings の停止線・横断歩道もモックでは一切動かない（code_review F-13）
     if (this.map?.signals?.length) frame.signals = this.computePhases()
     const detections = this.buildDetections()
     if (detections) frame.detections = detections
     this.send(frame)
   }
 
-  /**
-   * 認識結果のダミー。**運転席カメラのボックスと路面の車線オーバーレイを
-   * モックでも確認できるようにするため**（code_review Q-05）。
-   *
-   * これが無いと `DetectionOverlay` と `LaneDetectionOverlay` はモック接続中
-   * 必ず何も描かず、`frame.detections` が省略されたときと同じ「静かに空」に
-   * なるので、**「まだ実装されていない」のか「モックが送っていない」のか
-   * 画面から区別できない**。
-   *
-   * 中身は本物の認識結果ではなく固定の 2 件（信号 1 つ・車線 1 本）。
-   * 車線は自車座標系の点列なので、そのまま路面へ重なる。
-   */
+  /** 認識結果のダミー。**運転席カメラのボックスと路面の車線オーバーレイを */
   private buildDetections(): Record<string, Detection[]> | null {
     const phases = this.map?.signals?.length ? this.computePhases() : null
     const out: Record<string, Detection[]> = {}
     for (const v of this.vehicles) {
       if (!v.active) continue
-      // 車線はゆっくり左右へ振る。「ずれていればずれて見える」ことも確認できる
       const lateral = Math.sin(this.simTime * 0.4 + v.id) * 0.6
       const lane: Detection = {
         cls: DET_LANE,
@@ -1168,8 +1001,6 @@ class MockServer {
     return Object.keys(out).length ? out : null
   }
 
-  // ---- 受信 ----
-
   handle(json: string): void {
     if (this.closed) return
     let msg: ClientMessage
@@ -1182,6 +1013,14 @@ class MockServer {
 
     switch (msg.type) {
       case 'load_map': {
+        if (this.detector.running) {
+          this.send({
+            type: 'error',
+            code: 'DETECTOR_TRAINING',
+            message: '（モック）認識器の学習中はエリアを変えられません',
+          })
+          return
+        }
         const preset = MOCK_PRESETS.find((p) => p.id === msg.presetId)
         if (!preset) {
           this.send({
@@ -1198,8 +1037,6 @@ class MockServer {
           message: '（モック）地図データを取得しています…',
         })
         if (this.loadTimer) clearTimeout(this.loadTimer)
-        // 実機では Overpass API から取るので 10〜60 秒かかる。
-        // モックでは進捗 UI を確認できる程度の 1.4 秒にしている。
         this.loadTimer = setTimeout(() => {
           if (this.closed) return
           this.map = buildMockMap(preset.id, preset.name)
@@ -1236,15 +1073,14 @@ class MockServer {
 
       case 'spawn_vehicle': {
         if (!this.map) {
-          this.send({ type: 'error', code: 'NO_MAP_LOADED', message: 'マップが未読込です' })
+          this.sendStatus({ message: 'マップが読み込まれていません' })
           return
         }
         const slot = this.vehicles.find((v) => !v.active)
         if (!slot) {
-          this.send({ type: 'error', code: 'SPAWN_FAILED', message: '空きスロットがありません' })
+          this.sendStatus({ message: '空きスロットがありません' })
           return
         }
-        // 最寄りの格子ノードへスナップ
         const gx = clampGrid(Math.round((msg.x + GRID_HALF) / GRID_SPACING))
         const gy = clampGrid(Math.round((msg.y + GRID_HALF) / GRID_SPACING))
         slot.gx = gx

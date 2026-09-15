@@ -1,14 +1,4 @@
-/**
- * frame（20Hz）専用の可変バッファ。
- *
- * なぜ zustand に入れないのか:
- *   frame は既定 20Hz で飛んでくる。これを zustand（= React state）に入れると
- *   毎秒 20 回コンポーネントツリーが再レンダリングされ、3D 描画が確実に重くなる。
- *   そこで frame だけは React の外（モジュールスコープの mutable オブジェクト）に
- *   置き、Three.js の useFrame から直接読む。
- *   React の再レンダリングは「マップ変更」「パラメータ変更」「メトリクス更新(1Hz)」
- *   「UI 操作」だけに限定する。
- */
+/** frame（20Hz）専用の可変バッファ。 */
 
 import type { FrameMessage, ObstacleState, Vec2, VehicleState } from '../types/protocol'
 
@@ -26,16 +16,9 @@ export interface FrameBuffer {
   intervalMs: number
   /** これまでに受信したフレーム数 */
   received: number
-  /**
-   * 車両ごとの最新経路。frame.route は変化時のみ届くので、ここで保持する
-   * （protocol.md 2.3「省略時は前回値を保持」）
-   */
+  /** 車両ごとの最新経路。frame.route は変化時のみ届くので、ここで保持する */
   routes: Map<number, Vec2[]>
-  /**
-   * 車両ごとの経路の版。その車両の経路が届くたびに +1 する。
-   * routeVersion だけだと「どれか 1 台でも変わった」しか分からず、
-   * 3D 側が 64 台ぶんのジオメトリを毎回作り直すことになる（code_review F-01）。
-   */
+  /** 車両ごとの経路の版。その車両の経路が届くたびに +1 する。 */
   routeRevisions: Map<number, number>
   /** routes が変わるたびに増える。3D 側はこれを見て作り直しの要否を判断する */
   routeVersion: number
@@ -87,24 +70,20 @@ export function pushFrame(frame: FrameMessage): void {
   frameBuffer.currTime = now
   frameBuffer.received += 1
 
-  // 受信間隔を推定（極端な値は無視して 16〜500ms にクランプ）
   if (frameBuffer.prev) {
     const dt = frameBuffer.currTime - frameBuffer.prevTime
     if (dt > 1) frameBuffer.intervalMs = Math.min(500, Math.max(16, dt))
   }
 
-  // route は変化時のみ届く。届いたものだけ差し替える
   let routeChanged = false
   for (const v of frame.vehicles) {
     if (v.route !== undefined) {
       if (frameBuffer.routes === EMPTY_ROUTES) frameBuffer.routes = new Map()
       if (frameBuffer.routeRevisions === EMPTY_REVISIONS) frameBuffer.routeRevisions = new Map()
       frameBuffer.routes.set(v.id, v.route)
-      // この車両だけが変わったことを 3D 側へ伝える
       frameBuffer.routeRevisions.set(v.id, (frameBuffer.routeRevisions.get(v.id) ?? 0) + 1)
       routeChanged = true
     }
-    // 非アクティブになったスロットの経路は消す
     if (!v.active && frameBuffer.routes.has(v.id)) {
       frameBuffer.routes.delete(v.id)
       frameBuffer.routeRevisions.delete(v.id)
@@ -113,7 +92,6 @@ export function pushFrame(frame: FrameMessage): void {
   }
   if (routeChanged) frameBuffer.routeVersion += 1
 
-  // 信号は数秒に一度しか変わらないので、変化したときだけバージョンを上げる
   const nextSignals = frame.signals
   if (nextSignals) {
     const prevSignals = frameBuffer.signals
@@ -132,7 +110,6 @@ export function pushFrame(frame: FrameMessage): void {
     }
   }
 
-  // 障害物は集合が変わったときだけバージョンを上げる
   frameBuffer.obstacles = frame.obstacles
   const sig = obstacleSignature(frame.obstacles)
   if (sig !== lastObstacleSig) {
@@ -150,6 +127,7 @@ export function resetFrameBuffer(): void {
   frameBuffer.intervalMs = 50
   frameBuffer.received = 0
   frameBuffer.routes = new Map()
+  frameBuffer.routeRevisions = new Map()
   frameBuffer.routeVersion += 1
   frameBuffer.obstacles = []
   frameBuffer.obstacleVersion += 1

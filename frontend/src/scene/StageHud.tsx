@@ -1,16 +1,4 @@
-/**
- * 画面右下の走行状況（HUD）。
- *
- * ★ これは **3D の上に浮かせるオーバーレイではなく、操作パネルの列の
- *   一番下に積む部品**です（App.tsx が .app-panel-slot の中で描画する）。
- *   カードと幅を揃えるとチップは必ず折り返すので、行数は画面幅と
- *   チップの枚数（警告行は出たり出なかったりする）で変わります。
- *   絶対配置で「1 行分だけ場所を空けておく」という作りにすると、
- *   行が増えた瞬間に黙ってカードの下端に重なります。
- *   flex の並びに置いて、カード（flex: 1）の側が縮むようにしてあります。
- *
- * frameBuffer を 4Hz で覗くだけで、60fps で React は回さない。
- */
+/** 画面右下の走行状況（HUD）。 */
 
 import { useEffect, useRef, useState } from 'react'
 import { currentCameraNotice, sceneStats } from './sceneStats'
@@ -57,8 +45,6 @@ export function StageHud() {
   const mapLoaded = useSimStore((s) => s.map !== null)
   const panelOpen = useSimStore((s) => s.panelOpen)
   const renderPaused = useSimStore((s) => s.status.renderPaused)
-  // サーバーが実際に進めているステップ速度。要求した倍速に届いているかを見る。
-  // 台数と倍速の組み合わせによっては計算が間に合わず、黙って遅くなるため。
   const stepsPerSec = useSimStore((s) => s.latestMetrics?.stepsPerSec ?? 0)
   const requestedSpeed = useSimStore((s) => s.params.simSpeed)
   const simHz = useSimStore((s) => s.config.simHz)
@@ -67,18 +53,12 @@ export function StageHud() {
     requestedSpeed <= 0 || actualSpeed >= requestedSpeed * SPEED_SHORTFALL_RATIO
   const [hud, setHud] = useState<HudState>(EMPTY_HUD)
   const lastSample = useRef({ received: 0, at: performance.now() })
-  // 表示が変わらないポーリングでは setState しない（停車中に毎秒 4 回回さないため）
   const lastSignature = useRef(hudSignature(EMPTY_HUD))
 
-  // マップが読まれていて、かつ操作パネルが開いているときだけ出す
   const visible = mapLoaded && panelOpen
 
   useEffect(() => {
-    // ★ 見えていない間はポーリングごと止める（code_review F-10）。
-    //   3D を全画面で見たいときにこそ、隠れた行の再レンダリングが乗る
     if (!visible) return
-    // 止めていた間の空白を受信 Hz に混ぜない。
-    // これを忘れると、開いた直後の 1 回だけ dt が数分になって 0.0Hz と出る
     lastSample.current = { received: frameBuffer.received, at: performance.now() }
 
     const timer = window.setInterval(() => {
@@ -105,15 +85,8 @@ export function StageHud() {
     return () => window.clearInterval(timer)
   }, [visible])
 
-  // ★ マップが無いときだけは**本当に外す**。
-  //   これはパネル列の flex の並びの一つなので、visibility: hidden で残すと
-  //   **中身が無いのにカードの下に空白が居座る**。
-  //   マップの読み込みは 1 回きりなので、ここに退場の演出は要らない。
   if (!mapLoaded) return null
 
-  // 一方でパネルの開閉は条件レンダリングにしない。外すと消えるときの
-  // アニメーションがかからず、スロットが 400ms かけて抜けていく横で
-  // チップだけが瞬間的に消える（ハンバーガーと同じ作法）
   return (
     <div className="app-hud" data-visible={visible ? 'true' : 'false'} inert={!visible}>
       <div className="app-hud-item">
