@@ -412,12 +412,13 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
 { "type": "error", "code": "MAP_LOAD_FAILED", "message": "Overpass API への接続に失敗しました" }
 ```
 
-`code` の値は次の 2 つだけ。
+`code` の値は次の 3 つ。
 
 | コード | いつ返るか |
 |---|---|
 | `MAP_LOAD_FAILED` | 未知のプリセット ID、Overpass API への接続失敗 |
 | `INVALID_MESSAGE` | JSON として読めない、オブジェクトでない、未知の `type`、必須項目の欠落、`set_params` の値が非有限または型違い |
+| `DETECTOR_TRAINING` | 認識器の学習中に `load_map` が来た（ジョブが握っているマップと画面がずれるため断る） |
 
 **介入（車両追加・障害物設置）の失敗は `error` ではなく `status` メッセージの
 `message` で返す。** 「スロットが満杯」「その地点から到達可能な経路が無い」
@@ -453,7 +454,7 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
   "presetName": "東京・銀座",
   "request": {             // 受け付けた依頼のエコー
     "mode": "full", "presetId": "ginza",
-    "samples": 2400, "epochs": 12, "batchSize": 32, "width": 1.0
+    "samples": 2400, "epochs": 12, "batchSize": 32, "width": 1.0, "seed": 0
   },
   "dataset": {             // 集めた教師データの内訳。集めていなければ null
     "samples": 2400,
@@ -472,7 +473,8 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
     "samplesMin": 200, "samplesMax": 4800,
     "epochsMin": 1, "epochsMax": 60,
     "batchMin": 8, "batchMax": 128,
-    "widthMin": 0.25, "widthMax": 2.0
+    "widthMin": 0.25, "widthMax": 2.0,
+    "seedMin": 0, "seedMax": 999999
   }
 }
 ```
@@ -506,7 +508,8 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
 { "type": "set_network", "hiddenSizes": [128, 128, 128] }     // 隠れ層の構成を変える
 { "type": "start_detector_training",                          // 認識器（CNN）を学習する
   "request": { "mode": "full", "presetId": "ginza",
-               "samples": 2400, "epochs": 12, "batchSize": 32, "width": 1.0 } }
+               "samples": 2400, "epochs": 12, "batchSize": 32,
+               "width": 1.0, "seed": 0 } }
 { "type": "cancel_detector_training" }                        // 中断（すぐには止まらない）
 { "type": "ping" }                                            // → {"type":"pong","t":<server epoch ms>}
 ```
@@ -530,9 +533,15 @@ asyncio 側から触ると更新中の重みを壊す）。
 - `presetId` を省略（または `null`）にすると、**いま読み込んでいるマップ**を使う。
   読み込み済みのものと同じなら地図を読み直さない（`groundtruth` の静的キャッシュを
   走行側と取り合わないためでもある）。
+- `seed` は収集の乱数種（省略時 0）。`SimulationEnv` と行動のランダム化の両方に
+  渡るので、**変えるだけで教師データの多様性が上がる**。逆に同じ種なら何度回しても
+  同じ画が集まる（再現性が要るときはここを固定する）。CLI の `--seed` と同じ。
 - 値域（2.9 の `limits`）を外れた値は**丸めずに** `INVALID_MESSAGE` で弾く。
   `set_params` と違い、押した瞬間に数十分動き出す操作なので、
   指定と違う値で走り出すほうが危ないため。
+- **認識器の学習中は `load_map` を受け付けない**（`DETECTOR_TRAINING` で断る）。
+  ジョブは開始時に借りたマップの参照を握り続けるので、通すと
+  「収集は元のエリアのまま、画面だけ新しいエリア」という食い違いが起きる。
 - **実行中は `status.simSuspended` が true になり、物理と PPO が止まる。**
   完了・中断でサーバーが自動的に降ろす。
 - 二重起動・教師データ不足は `error` ではなく `status.message` で返す
