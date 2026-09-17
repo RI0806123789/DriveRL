@@ -16,6 +16,7 @@ import type {
   SimConfig,
   SimParams,
   StatusPayload,
+  WeatherPreset,
 } from '../types/protocol'
 import { PROTOCOL_VERSION } from '../types/protocol'
 import { pushFrame, resetFrameBuffer } from './frameBuffer'
@@ -95,6 +96,9 @@ const DEFAULT_PARAMS: SimParams = {
   rewardOverspeed: -5,
   obeySignals: true,
   obeySpeedSigns: true,
+  weatherRain: 0,
+  weatherFog: 0,
+  weatherAuto: false,
 }
 
 const DEFAULT_CONFIG: SimConfig = {
@@ -122,6 +126,8 @@ export interface SimStore {
   usingMock: boolean
 
   presets: MapPreset[]
+  /** 天候の選択肢。数値はサーバーが配る（表示名だけ UI 側が持つ） */
+  weatherPresets: WeatherPreset[]
   config: SimConfig
   params: SimParams
   status: StatusPayload
@@ -195,6 +201,7 @@ export const useSimStore = create<SimStore>((set, get) => ({
   usingMock: false,
 
   presets: [],
+  weatherPresets: [],
   config: DEFAULT_CONFIG,
   params: DEFAULT_PARAMS,
   status: DEFAULT_STATUS,
@@ -259,6 +266,7 @@ export const useSimStore = create<SimStore>((set, get) => ({
           handshaked: true,
           protocolMismatch: init.protocolVersion !== PROTOCOL_VERSION,
           presets: init.presets ?? [],
+          weatherPresets: init.weatherPresets ?? [],
           config: init.config ?? DEFAULT_CONFIG,
           params: init.params ?? DEFAULT_PARAMS,
           status: init.status ?? DEFAULT_STATUS,

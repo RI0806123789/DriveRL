@@ -17,6 +17,7 @@ import { ValueFlash } from '../ui/ValueFlash'
 import {
   CarIcon,
   ConeIcon,
+  FogIcon,
   InfoIcon,
   PauseIcon,
   PlayIcon,
@@ -70,9 +71,19 @@ const INTERACTIONS: Array<{ id: InteractionMode; label: string; icon: React.Reac
   { id: 'vehicle', label: '車両を追加', icon: <CarIcon size={16} /> },
 ]
 
+/** 天候プリセットの表示名。**値そのものは init の weatherPresets が出典。** */
+const WEATHER_LABELS: Record<string, string> = {
+  clear: '晴れ',
+  drizzle: '小雨',
+  rain: '雨',
+  fog: '霧',
+  heavy_fog: '濃霧',
+}
+
 export function SimulationTab() {
   const params = useSimStore((s) => s.params)
   const config = useSimStore((s) => s.config)
+  const weatherPresets = useSimStore((s) => s.weatherPresets)
   const status = useSimStore((s) => s.status)
   const interaction = useSimStore((s) => s.interaction)
   const obstacleRadius = useSimStore((s) => s.obstacleRadius)
@@ -88,6 +99,7 @@ export function SimulationTab() {
 
   const [rows, setRows] = useState<VehicleRow[]>([])
   const [obstacleCount, setObstacleCount] = useState(0)
+  const [visibility, setVisibility] = useState(0)
 
   useEffect(() => {
     if (!panelOpen) return
@@ -95,6 +107,8 @@ export function SimulationTab() {
       const curr = frameBuffer.curr
       const obstacles = frameBuffer.obstacles.length
       setObstacleCount((prev) => (prev === obstacles ? prev : obstacles))
+      const reach = Math.round(frameBuffer.weather.visibility)
+      setVisibility((prev) => (prev === reach ? prev : reach))
       if (!curr) {
         setRows((prev) => (prev.length === 0 ? prev : []))
         return
@@ -116,6 +130,11 @@ export function SimulationTab() {
   }, [panelOpen])
 
   const tracked = rows.find((r) => r.id === followTarget && r.active) ?? null
+  const currentWeather = weatherPresets.find(
+    (w) =>
+      Math.abs(w.rain - params.weatherRain) < 0.02 &&
+      Math.abs(w.fog - params.weatherFog) < 0.02,
+  )
 
   return (
     <>
@@ -216,6 +235,49 @@ export function SimulationTab() {
           <br />
           車線（左側通行・右左折時の寄せ）は経路そのものが車線に沿っているため、
           この切り替えとは無関係に常に守られます。
+        </div>
+      </Card>
+
+      <Card title="天候" icon={<FogIcon size={16} />}>
+        <div className="m3-row m3-row--wrap">
+          {weatherPresets.map((w) => (
+            <Chip
+              key={w.id}
+              selected={!params.weatherAuto && currentWeather?.id === w.id}
+              disabled={params.weatherAuto}
+              onClick={() => {
+                const patch = { weatherRain: w.rain, weatherFog: w.fog }
+                patchParamsLocal(patch)
+                send({ type: 'set_params', params: patch })
+              }}
+            >
+              {WEATHER_LABELS[w.id] ?? w.id}
+            </Chip>
+          ))}
+        </div>
+
+        <Switch
+          label="時間で自動に変える"
+          description="シミュレーション内の時刻に沿って、晴れ → 雨 → 晴れ → 霧 とゆっくり巡ります"
+          checked={params.weatherAuto}
+          onChange={(v) => {
+            patchParamsLocal({ weatherAuto: v })
+            send({ type: 'set_params', params: { weatherAuto: v } })
+          }}
+        />
+
+        <div className="m3-row">
+          <span className="m3-note m3-grow">
+            いまの視程: <strong>{visibility > 0 ? `${visibility} m` : '—'}</strong>
+          </span>
+        </div>
+        <div className="m3-note">
+          雨は画を濁らせるだけで視程は縮めません。霧は視程を縮め、
+          <strong>遠くのものは正解ラベルからも外れます</strong>
+          （見えないものを当てさせると学習が成立しないため）。
+          <br />
+          報酬と終了条件は真値のままなので、霧で赤信号を見落として進めば
+          そのまま信号無視として罰が入ります。
         </div>
       </Card>
 

@@ -304,6 +304,9 @@ _PARAM_SPECS: dict[str, _ParamSpec] = {
     "reward_overspeed": _ParamSpec("rewardOverspeed", float, -1000.0, 0.0),
     "obey_signals": _ParamSpec("obeySignals", bool),
     "obey_speed_signs": _ParamSpec("obeySpeedSigns", bool),
+    "weather_rain": _ParamSpec("weatherRain", float, 0.0, 1.0),
+    "weather_fog": _ParamSpec("weatherFog", float, 0.0, 1.0),
+    "weather_auto": _ParamSpec("weatherAuto", bool),
 }
 
 _TRUE_WORDS = {"true", "1", "yes", "on"}
@@ -359,6 +362,9 @@ class SimParams:
     reward_overspeed: float = -5.0
     obey_signals: bool = True
     obey_speed_signs: bool = True
+    weather_rain: float = 0.0
+    weather_fog: float = 0.0
+    weather_auto: bool = False
 
     def to_wire(self) -> dict[str, Any]:
         return {spec.wire: getattr(self, snake) for snake, spec in _PARAM_SPECS.items()}
@@ -480,6 +486,7 @@ class FrameSnapshot:
     obstacles: list[ObstacleSnapshot]
     signals: list[int] = field(default_factory=list)
     detections: dict[int, list[dict[str, Any]]] = field(default_factory=dict)
+    weather: dict[str, float] | None = None
 
     def to_wire(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -488,6 +495,8 @@ class FrameSnapshot:
             "vehicles": [v.to_wire() for v in self.vehicles],
             "obstacles": [o.to_wire() for o in self.obstacles],
         }
+        if self.weather is not None:
+            payload["weather"] = {k: round(v, 3) for k, v in self.weather.items()}
         if self.signals:
             payload["signals"] = self.signals
         if self.detections:

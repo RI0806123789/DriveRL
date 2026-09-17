@@ -8,7 +8,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, TYPE_CHECKING
+from typing import Any, Callable, Sequence, TYPE_CHECKING
 
 os.environ.setdefault("KERAS_BACKEND", "torch")
 
@@ -18,6 +18,7 @@ from app import config
 from app.contracts import SimParams
 from app.percep import detector as det
 from app.percep.types import DEFAULT_CAMERA, CameraSpec, DetClass
+from app.percep.weather import PRESETS, Weather
 
 if TYPE_CHECKING:
     from app.contracts import MapIndex
@@ -26,7 +27,7 @@ if TYPE_CHECKING:
 
 DATASET_FILE = "detector_dataset.npz"
 
-DATASET_VERSION = 1
+DATASET_VERSION = 2
 
 VALIDATION_SPLIT = 0.1
 
@@ -53,7 +54,7 @@ def dataset_meta(spec: CameraSpec = DEFAULT_CAMERA) -> dict[str, np.ndarray]:
 
 def check_dataset(data: dict[str, np.ndarray], spec: CameraSpec = DEFAULT_CAMERA) -> str:
     """読み込んだ教師データが今のコードと噛み合うか調べる。"""
-    required = ("images", "detections", "freespace")
+    required = ("images", "detections", "freespace", "weather")
     missing = [k for k in required if k not in data]
     if missing:
         return (
@@ -90,8 +91,12 @@ def check_dataset(data: dict[str, np.ndarray], spec: CameraSpec = DEFAULT_CAMERA
     n = int(data["images"].shape[0])
     if n == 0:
         return "教師データが空です。収集し直してください"
-    if int(data["detections"].shape[0]) != n or int(data["freespace"].shape[0]) != n:
-        return "教師データの枚数が画像・検出・走行可能距離で揃っていません。収集し直してください"
+    if (
+        int(data["detections"].shape[0]) != n
+        or int(data["freespace"].shape[0]) != n
+        or int(data["weather"].shape[0]) != n
+    ):
+        return "教師データの枚数が画像・検出・走行可能距離・天候で揃っていません。収集し直してください"
     return ""
 
 
@@ -105,18 +110,21 @@ def load_dataset(path: Path, spec: CameraSpec = DEFAULT_CAMERA) -> dict[str, np.
     return data
 
 
-def cluster_vehicles(env: "SimulationEnv", rng: np.random.Generator) -> None:
+def cluster_vehicles(
+    env: "SimulationEnv", rng: np.random.Generator, *, tight: bool = False
+) -> None:
     """車両を互いの視界に入る距離へ寄せ集める。"""
     slots = np.flatnonzero(env.world.fleet.active)
     if slots.size < 2:
         return
+    far = 22.0 if tight else 45.0
     anchor = int(slots[0])
     ax = float(env.world.fleet.x[anchor])
     ay = float(env.world.fleet.y[anchor])
     for raw in slots[1:]:
         slot = int(raw)
         for _ in range(8):
-            radius = float(rng.uniform(8.0, 45.0))
+            radius = float(rng.uniform(8.0, far))
             theta = float(rng.uniform(0.0, 2.0 * np.pi))
             at = (ax + radius * np.cos(theta), ay + radius * np.sin(theta))
             if env.relocate_vehicle(slot, at=at):
@@ -125,21 +133,123 @@ def cluster_vehicles(env: "SimulationEnv", rng: np.random.Generator) -> None:
             env.relocate_vehicle(slot)
 
 
-def scatter_obstacles(env: "SimulationEnv", rng: np.random.Generator) -> None:
+def scatter_obstacles(
+    env: "SimulationEnv", rng: np.random.Generator, *, dense: bool = False
+) -> None:
     """各車両の前方にパイロンを置く。置かないと OBSTACLE の教師が 0 件になる。"""
     env.world.clear_obstacles()
+    per_vehicle = 3 if dense else 1
+    reach = 16.0 if dense else 28.0
     for raw in np.flatnonzero(env.world.fleet.active):
         slot = int(raw)
         x = float(env.world.fleet.x[slot])
         y = float(env.world.fleet.y[slot])
         heading = float(env.world.fleet.heading[slot])
-        ahead = float(rng.uniform(6.0, 28.0))
-        side = float(rng.uniform(-3.5, 3.5))
-        env.world.add_obstacle(
-            x + np.cos(heading) * ahead - np.sin(heading) * side,
-            y + np.sin(heading) * ahead + np.cos(heading) * side,
-            float(config.OBSTACLE_RADIUS),
-        )
+        for _ in range(per_vehicle):
+            ahead = float(rng.uniform(6.0, reach))
+            side = float(rng.uniform(-3.5, 3.5))
+            env.world.add_obstacle(
+                x + np.cos(heading) * ahead - np.sin(heading) * side,
+                y + np.sin(heading) * ahead + np.cos(heading) * side,
+                float(config.OBSTACLE_RADIUS),
+            )
+
+
+FACE_TOLERANCE = math.cos(math.radians(55.0))
+
+PLACE_TRIALS = 6
+
+APPROACH_MIN_M = 18.0
+APPROACH_MAX_M = 55.0
+
+
+def _place_facing(
+    env: "SimulationEnv",
+    rng: np.random.Generator,
+    positions: np.ndarray,
+    headings: np.ndarray,
+) -> None:
+    """物体の手前へ、その物体に正対する向きで車両を置き直す。
+
+    `_route_from_point` が作る経路の向きは選べないので、置いてから向きを見て
+    合わなければ引き直す。合わせられなければ通常の再配置に落とす。
+    """
+    if positions.shape[0] == 0:
+        cluster_vehicles(env, rng)
+        return
+
+    for raw in np.flatnonzero(env.world.fleet.active):
+        slot = int(raw)
+        placed = False
+        for _ in range(PLACE_TRIALS):
+            i = int(rng.integers(0, positions.shape[0]))
+            heading = float(headings[i])
+            back = float(rng.uniform(APPROACH_MIN_M, APPROACH_MAX_M))
+            side = float(rng.uniform(-2.5, 2.5))
+            at = (
+                float(positions[i, 0]) - math.cos(heading) * back - math.sin(heading) * side,
+                float(positions[i, 1]) - math.sin(heading) * back + math.cos(heading) * side,
+            )
+            if not env.relocate_vehicle(slot, at=at):
+                continue
+            mine = float(env.world.fleet.heading[slot])
+            if math.cos(mine - heading) >= FACE_TOLERANCE:
+                placed = True
+                break
+        if not placed:
+            env.relocate_vehicle(slot)
+
+
+def _signal_approaches(env: "SimulationEnv") -> tuple[np.ndarray, np.ndarray]:
+    """信号の停止線の座標と、そこへ向かう進行方向。"""
+    signals = env.world.map_index.data.signals
+    if not signals:
+        return np.zeros((0, 2), dtype=np.float64), np.zeros(0, dtype=np.float64)
+    xy = np.array([(s.x, s.y) for s in signals], dtype=np.float64)
+    heading = np.array([s.heading for s in signals], dtype=np.float64)
+    return xy, heading
+
+
+def _sign_approaches(env: "SimulationEnv") -> tuple[np.ndarray, np.ndarray]:
+    """最高速度標識の座標と、そこへ向かう進行方向。"""
+    signs = env.world.map_index.data.signs
+    if not signs:
+        return np.zeros((0, 2), dtype=np.float64), np.zeros(0, dtype=np.float64)
+    xy = np.array([(s.x, s.y) for s in signs], dtype=np.float64)
+    heading = np.array([s.heading for s in signs], dtype=np.float64)
+    return xy, heading
+
+
+def arrange_scene(
+    env: "SimulationEnv", rng: np.random.Generator, focus: DetClass | None
+) -> None:
+    """狙うクラスに応じて車両とパイロンを置き直す。
+
+    ★ 車両を動かしたらパイロンも必ず置き直すこと（別々の周期に任せると、
+    片方を変えたときに黙って崩れる）。
+    """
+    if focus is DetClass.TRAFFIC_LIGHT:
+        _place_facing(env, rng, *_signal_approaches(env))
+    elif focus is DetClass.SPEED_SIGN:
+        _place_facing(env, rng, *_sign_approaches(env))
+    else:
+        cluster_vehicles(env, rng, tight=focus is DetClass.VEHICLE)
+    scatter_obstacles(env, rng, dense=focus is DetClass.OBSTACLE)
+
+
+def _weighted_choice(
+    rng: np.random.Generator, keys: Sequence[Any], weights: dict[Any, float] | None
+) -> Any:
+    """重みに比例して 1 つ選ぶ。重みが無ければ一様。"""
+    if not keys:
+        return None
+    if not weights:
+        return keys[int(rng.integers(0, len(keys)))]
+    raw = np.array([max(float(weights.get(k, 1.0)), 0.0) for k in keys], dtype=np.float64)
+    total = float(raw.sum())
+    if total <= 1e-9:
+        return keys[int(rng.integers(0, len(keys)))]
+    return keys[int(rng.choice(len(keys), p=raw / total))]
 
 
 SCATTER_EVERY = 40
@@ -164,6 +274,9 @@ def collect_dataset(
     spec: CameraSpec = DEFAULT_CAMERA,
     seed: int = 0,
     reset_every: int | None = None,
+    weathers: Sequence[str] | None = None,
+    weather_focus: dict[str, float] | None = None,
+    class_focus: dict[DetClass, float] | None = None,
     on_progress: Callable[[int, int, float], None] | None = None,
     should_cancel: Callable[[], bool] | None = None,
 ) -> dict[str, np.ndarray]:
@@ -180,12 +293,24 @@ def collect_dataset(
     if reset_every is None:
         reset_every = _reset_interval(samples)
 
+    names = [name for name in (weathers or ("clear",)) if name in PRESETS] or ["clear"]
+    classes = list(DetClass)
+
     images: list[np.ndarray] = []
     targets: list[np.ndarray] = []
     frees: list[np.ndarray] = []
+    skies: list[np.ndarray] = []
 
-    cluster_vehicles(env, rng)
-    scatter_obstacles(env, rng)
+    def pick_focus() -> DetClass | None:
+        """狙うクラスを選ぶ。**弱点が渡されていなければ狙わない（None）。**
+
+        一様に選んでしまうと、信号・標識狙いの寄せ（`_place_facing`）が毎回
+        1/5 で走り、似た構図ばかりになって過学習する（実測: 銀座 1,600 枚 8
+        エポックで val_loss が学習損失の 50 倍、検出率 9.3%）。
+        """
+        return _weighted_choice(rng, classes, class_focus) if class_focus else None
+
+    arrange_scene(env, rng, pick_focus())
 
     started = time.perf_counter()
     step = 0
@@ -196,20 +321,26 @@ def collect_dataset(
 
         slots = np.flatnonzero(env.world.fleet.active)
         if slots.size:
-            frame = camera.render(env.world, slots)
-            results = detect_ground_truth_batch(env.world, slots, spec)
+            weather: Weather = PRESETS[_weighted_choice(rng, names, weather_focus)]
+            frame = camera.render(env.world, slots, weather, step)
+            results = detect_ground_truth_batch(env.world, slots, spec, weather)
             target = det.encode_targets(results, spec)
+            reach = min(
+                float(config.OBS_FREESPACE_MAX_DISTANCE),
+                weather.visibility_m(float(spec.far)),
+            )
             free = np.stack(
-                [
-                    freespace_ground_truth(
-                        env.world, int(s), spec, float(config.OBS_FREESPACE_MAX_DISTANCE)
-                    )
-                    for s in slots
-                ]
+                [freespace_ground_truth(env.world, int(s), spec, reach) for s in slots]
             )
             images.append(frame)
             targets.append(target)
             frees.append(det.encode_freespace(free))
+            skies.append(
+                np.tile(
+                    np.array([weather.rain, weather.fog], dtype=np.float32),
+                    (int(frame.shape[0]), 1),
+                )
+            )
             collected += int(frame.shape[0])
 
         action = np.zeros((config.MAX_VEHICLES, config.ACTION_DIM), dtype=np.float32)
@@ -219,8 +350,7 @@ def collect_dataset(
         step += 1
         if reset_every > 0 and step % reset_every == 0:
             env.reset_all()
-            cluster_vehicles(env, rng)
-            scatter_obstacles(env, rng)
+            arrange_scene(env, rng, pick_focus())
         elif step % SCATTER_EVERY == 0:
             scatter_obstacles(env, rng)
 
@@ -230,15 +360,23 @@ def collect_dataset(
     x = np.concatenate(images, axis=0)[:samples]
     y_det = np.concatenate(targets, axis=0)[:samples]
     y_free = np.concatenate(frees, axis=0)[:samples]
+    y_sky = np.concatenate(skies, axis=0)[:samples]
 
     order = rng.permutation(int(x.shape[0]))
     x = x[order]
     y_det = y_det[order]
     y_free = y_free[order]
+    y_sky = y_sky[order]
 
     if on_progress is not None:
         on_progress(int(x.shape[0]), samples, time.perf_counter() - started)
-    return {"images": x, "detections": y_det, "freespace": y_free, **dataset_meta(spec)}
+    return {
+        "images": x,
+        "detections": y_det,
+        "freespace": y_free,
+        "weather": y_sky,
+        **dataset_meta(spec),
+    }
 
 
 @dataclass(frozen=True)
@@ -249,6 +387,7 @@ class DatasetSummary:
     object_cell_ratio: float
     objects_per_image: float
     class_counts: dict[str, int]
+    weather_counts: dict[str, int] = field(default_factory=dict)
 
     def to_wire(self) -> dict[str, Any]:
         return {
@@ -256,7 +395,20 @@ class DatasetSummary:
             "objectCellRatio": float(self.object_cell_ratio),
             "objectsPerImage": float(self.objects_per_image),
             "classCounts": {k: int(v) for k, v in self.class_counts.items()},
+            "weatherCounts": {k: int(v) for k, v in self.weather_counts.items()},
         }
+
+
+def _weather_name(rain: float, fog: float) -> str:
+    """収集時の (rain, fog) をいちばん近いプリセット名へ戻す。"""
+    best = "clear"
+    best_gap = float("inf")
+    for name, preset in PRESETS.items():
+        gap = abs(preset.rain - float(rain)) + abs(preset.fog - float(fog))
+        if gap < best_gap:
+            best = name
+            best_gap = gap
+    return best
 
 
 def summarize_dataset(data: dict[str, np.ndarray]) -> DatasetSummary:
@@ -266,11 +418,20 @@ def summarize_dataset(data: dict[str, np.ndarray]) -> DatasetSummary:
     n = max(1, int(x.shape[0]))
     obj = y_det[..., det.OFF_OBJ]
     cls_hist = y_det[..., det.OFF_CLS : det.OFF_CLS + det.NUM_CLASSES].sum(axis=(0, 1, 2))
+
+    weather_counts: dict[str, int] = {}
+    sky = data.get("weather")
+    if sky is not None and sky.size:
+        for rain, fog in np.asarray(sky, dtype=np.float32).reshape(-1, 2):
+            name = _weather_name(float(rain), float(fog))
+            weather_counts[name] = weather_counts.get(name, 0) + 1
+
     return DatasetSummary(
         samples=int(x.shape[0]),
         object_cell_ratio=float(obj.mean()),
         objects_per_image=float(obj.sum()) / n,
         class_counts={DetClass(i).name: int(v) for i, v in enumerate(cls_hist)},
+        weather_counts=weather_counts,
     )
 
 

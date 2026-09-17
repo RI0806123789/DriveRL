@@ -12,6 +12,7 @@ import numpy as np
 from app import config
 from app.map import build_map_index, get_preset, list_presets, load_map
 from app.percep import trainer
+from app.percep.evaluate import COLLECT_WEATHERS, EVAL_WEATHERS, evaluate_detector
 from app.percep.trainer import DATASET_FILE
 
 from app.runtime.detector_job import (
@@ -19,6 +20,7 @@ from app.runtime.detector_job import (
     BATCH_MIN,
     EPOCHS_MAX,
     EPOCHS_MIN,
+    EVAL_SAMPLES,
     SAMPLES_MAX,
     SAMPLES_MIN,
     SEED_MAX,
@@ -48,6 +50,34 @@ def _print_summary(summary: trainer.DatasetSummary) -> None:
         f"（1 枚あたり {summary.objects_per_image:.1f} 個）"
     )
     print("  クラス内訳:", summary.class_counts)
+    if summary.weather_counts:
+        print("  天候内訳:", summary.weather_counts)
+
+
+def _evaluate_current(index, seed: int, weather_mix: bool):
+    """収集の前に、いまの認識器を採点する（無ければ None）。UI と同じ実装。"""
+    from app.percep.detector import Detector
+
+    detector = Detector.load(config.DETECTOR_PATH)
+    if detector is None:
+        print("[採点] 認識器がまだ無いので、弱点は測らず一様に集めます")
+        return None
+
+    print(f"[採点] いまの認識器を {EVAL_SAMPLES} 枚で測ります")
+    evaluation = evaluate_detector(
+        index,
+        detector,
+        samples=EVAL_SAMPLES,
+        seed=seed,
+        weathers=EVAL_WEATHERS if weather_mix else ("clear",),
+    )
+    for entry in evaluation.classes:
+        share = "写らず" if entry.truth == 0 else f"{entry.recall * 100:5.1f}%"
+        print(f"    {entry.cls.name:14s} 検出率 {share}")
+    for entry in evaluation.weathers:
+        print(f"    {entry.name:14s} 検出率 {entry.recall * 100:5.1f}%")
+    print(f"[採点] {evaluation.weakest()}")
+    return evaluation
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -65,6 +95,16 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=0,
         help="収集の乱数種。変えると別の教師データが集まる（同じ種なら毎回同じ）",
+    )
+    parser.add_argument(
+        "--no-weather",
+        action="store_true",
+        help="晴れの画だけを集める（既定は小雨・雨・霧・濃霧も混ぜる）",
+    )
+    parser.add_argument(
+        "--no-focus",
+        action="store_true",
+        help="収集前の採点をせず一様に集める（既定は弱点を狙う）",
     )
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument("--collect-only", action="store_true", help="収集だけして終わる")
@@ -107,11 +147,17 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print(f"[収集] マップ {args.preset} を読み込みます")
         index = build_map_index(load_map(get_preset(args.preset)))
+        evaluation = None
+        if not args.no_focus:
+            evaluation = _evaluate_current(index, int(args.seed), not args.no_weather)
         started = time.perf_counter()
         data = trainer.collect_dataset(
             index,
             int(args.samples),
             seed=int(args.seed),
+            weathers=COLLECT_WEATHERS if not args.no_weather else ("clear",),
+            weather_focus=evaluation.weather_focus() if evaluation else None,
+            class_focus=evaluation.class_focus() if evaluation else None,
             on_progress=_print_collect_progress,
         )
         print(
