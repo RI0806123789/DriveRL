@@ -44,6 +44,61 @@ export interface WeatherLook {
   dim: number
   /** 雨粒の不透明度 0..1。0 なら描かない */
   dropOpacity: number
+  /** 路面の濡れ具合 0..1。上げるほど暗く、つやが出る */
+  wetness: number
+}
+
+/** 濡れた路面の粗さ・金属感・暗さ（乾いた状態からの行き先）。
+ *
+ * ★ `metalness` を上げすぎないこと。環境マップを置いていないので、上げても
+ * 映り込む先が無く**ただ黒くなるだけ**で光沢にはならない（0.3 で試して暗いだけだった）。
+ * 濡れは「粗さを落として日差しの反射を残し、暗くして、空の色をわずかに映す」で作る。
+ */
+export const WET_ROUGHNESS = 0.26
+export const WET_METALNESS = 0.1
+export const WET_DARKEN = 0.66
+
+/** 濡れた路面へ映り込ませる空の割合。上げすぎると路面が空と同じ色になる */
+export const WET_SKY_MIX = 0.14
+
+/** 雨がやんでも路面はすぐには乾かない [秒] */
+const DRY_TAU_SEC = 9
+
+/** 天候の切り替えをこの時定数で追わせる [秒] */
+const SHIFT_TAU_SEC = 1.6
+
+export function lerp(a: number, b: number, t: number): number {
+  return a + (b - a) * Math.min(Math.max(t, 0), 1)
+}
+
+/** 指数で目標へ近づく 1 ステップぶん（フレームレートに依らない）。 */
+export function approach(current: number, target: number, dt: number, tau: number): number {
+  if (tau <= 0) return target
+  return current + (target - current) * (1 - Math.exp(-Math.max(dt, 0) / tau))
+}
+
+/**
+ * 画面に出ている天候。**目標値（`frameBuffer.weather`）へ追いつく途中の値。**
+ *
+ * プリセットを押した瞬間に空と路面が切り替わると作り物に見えるので、
+ * 1〜2 秒かけて寄せる。路面はさらに遅く乾かす（雨がやんだ直後はまだ濡れている）。
+ * ★ 進めるのは `SceneAtmosphere` の 1 か所だけ（`useFrame` の priority を
+ * 一番若くしてある）。読む側は進めないこと。
+ */
+export const displayedWeather = { rain: 0, fog: 0, visibility: 120, wet: 0 }
+
+/** 表示用の天候を 1 フレーム進める。戻り値は `displayedWeather` そのもの。 */
+export function advanceWeather(
+  target: { rain: number; fog: number; visibility: number },
+  dt: number,
+): typeof displayedWeather {
+  const d = displayedWeather
+  d.rain = approach(d.rain, target.rain, dt, SHIFT_TAU_SEC)
+  d.fog = approach(d.fog, target.fog, dt, SHIFT_TAU_SEC)
+  d.visibility = approach(d.visibility, target.visibility, dt, SHIFT_TAU_SEC)
+  // 濡れるのは雨に追随し、乾くのはゆっくり
+  d.wet = approach(d.wet, target.rain, dt, target.rain > d.wet ? SHIFT_TAU_SEC : DRY_TAU_SEC)
+  return d
 }
 
 /** 0 と 1 の間を滑らかにつなぐ（両端で傾きが 0）。 */
@@ -72,7 +127,7 @@ export function fogLift(eyeHeight: number): number {
 
 /** 天候と配色から、シーンへ入れる値を作る。`eyeHeight` はカメラの地上高 [m]。 */
 export function weatherLook(
-  weather: WeatherState,
+  weather: WeatherState & { wet?: number },
   clearNear: number,
   clearFar: number,
   eyeHeight = 0,
@@ -93,5 +148,6 @@ export function weatherLook(
     fogFar: fog < FOG_EPS ? clearFar : blendDistance(clearFar, foggyFar, t),
     dim: Math.max(1 - RAIN_DIM * rain - FOG_DIM * t, 0.2),
     dropOpacity: rain < RAIN_EPS ? 0 : 0.25 + 0.45 * rain,
+    wetness: Math.min(Math.max(weather.wet ?? rain, 0), 1),
   }
 }

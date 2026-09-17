@@ -1,7 +1,15 @@
 /** 天候を 3D の見え方へ落とす計算を検証する（ブラウザ不要）。 */
 
 import { LIGHT_SCENE } from '../src/scene/palette.ts'
-import { blendDistance, fogLift, smoothstep, weatherLook } from '../src/scene/weatherView.ts'
+import {
+  advanceWeather,
+  approach,
+  blendDistance,
+  displayedWeather,
+  fogLift,
+  smoothstep,
+  weatherLook,
+} from '../src/scene/weatherView.ts'
 import type { WeatherState } from '../src/types/protocol.ts'
 
 let failures = 0
@@ -135,6 +143,51 @@ console.log('='.repeat(70))
     prevDim = d
   }
   check('雨が強いほど暗い（単調）', dimMonotonic)
+}
+
+console.log()
+console.log('='.repeat(70))
+console.log('6. 路面の濡れと、天候の移り変わり')
+console.log('='.repeat(70))
+{
+  check(
+    '雨が強いほど濡れる',
+    weatherLook(weather(1, 0), CLEAR_NEAR, CLEAR_FAR).wetness >
+      weatherLook(weather(0.3, 0), CLEAR_NEAR, CLEAR_FAR).wetness,
+  )
+  check('晴れでは乾いている', weatherLook(weather(0, 0), CLEAR_NEAR, CLEAR_FAR).wetness === 0)
+  check(
+    '濡れ具合は明示された値が優先される（乾きかけを表せる）',
+    weatherLook({ ...weather(0, 0), wet: 0.6 }, CLEAR_NEAR, CLEAR_FAR).wetness === 0.6,
+  )
+
+  check('approach は目標を追い越さない', approach(0, 1, 0.016, 1.6) < 1)
+  check('approach は dt を大きくすると目標へ寄る', approach(0, 1, 100, 1.6) > 0.99)
+  check('approach の tau=0 は即座に目標', approach(0, 1, 0.016, 0) === 1)
+
+  // ★ displayedWeather はモジュールの状態なので、ここは最後に動かす
+  const dt = 1 / 60
+  const rainy = { rain: 1, fog: 0, visibility: FAR_M }
+  for (let i = 0; i < 60 * 6; i += 1) advanceWeather(rainy, dt)
+  check('数秒で雨に追いつく', displayedWeather.rain > 0.95,
+    `rain=${displayedWeather.rain.toFixed(3)}`)
+  check('路面も濡れている', displayedWeather.wet > 0.9, `wet=${displayedWeather.wet.toFixed(3)}`)
+
+  const dry = { rain: 0, fog: 0, visibility: FAR_M }
+  for (let i = 0; i < 60 * 3; i += 1) advanceWeather(dry, dt)
+  check(
+    '雨がやんだ直後は空が先に晴れる',
+    displayedWeather.rain < 0.2,
+    `rain=${displayedWeather.rain.toFixed(3)}`,
+  )
+  check(
+    '路面はまだ濡れている（乾くのは遅い）',
+    displayedWeather.wet > displayedWeather.rain,
+    `wet=${displayedWeather.wet.toFixed(3)} > rain=${displayedWeather.rain.toFixed(3)}`,
+  )
+
+  for (let i = 0; i < 60 * 40; i += 1) advanceWeather(dry, dt)
+  check('十分おけば乾く', displayedWeather.wet < 0.02, `wet=${displayedWeather.wet.toFixed(4)}`)
 }
 
 console.log()

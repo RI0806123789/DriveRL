@@ -1,10 +1,19 @@
 /** 道路メッシュ。 */
 
-import { useEffect, useMemo } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
+import { useFrame } from '@react-three/fiber'
 import * as THREE from 'three'
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import type { MapEdge, Vec2 } from '../types/protocol'
 import { usePalette } from './usePalette'
+import {
+  WET_DARKEN,
+  WET_METALNESS,
+  WET_ROUGHNESS,
+  WET_SKY_MIX,
+  displayedWeather,
+  lerp,
+} from './weatherView'
 
 /** 道路面の高さ [m]（地面とのz-fighting回避） */
 const ROAD_Y = 0.02
@@ -143,9 +152,16 @@ export interface RoadNetworkProps {
   receiveShadow: boolean
 }
 
+/** 乾いた路面の質感。濡れるとここから `WET_*` へ寄る */
+const DRY_ROUGHNESS = 0.94
+const DRY_METALNESS = 0.02
+
 export function RoadNetwork({ edges, receiveShadow }: RoadNetworkProps) {
   const palette = usePalette()
   const geoms = useMemo(() => buildRoadGeometries(edges), [edges])
+  const surface = useRef<THREE.MeshStandardMaterial>(null)
+  const dryColor = useMemo(() => new THREE.Color(palette.roadSurface), [palette.roadSurface])
+  const skyColor = useMemo(() => new THREE.Color(palette.sky), [palette.sky])
 
   useEffect(() => {
     return () => {
@@ -154,15 +170,30 @@ export function RoadNetwork({ edges, receiveShadow }: RoadNetworkProps) {
     }
   }, [geoms])
 
+  // 雨で路面を濡らす。**マテリアルは作り直さず、値だけ書き換える**
+  useFrame(() => {
+    const mat = surface.current
+    if (!mat) return
+    const wet = displayedWeather.wet
+    mat.roughness = lerp(DRY_ROUGHNESS, WET_ROUGHNESS, wet)
+    mat.metalness = lerp(DRY_METALNESS, WET_METALNESS, wet)
+    mat.color
+      .copy(dryColor)
+      .multiplyScalar(lerp(1, WET_DARKEN, wet))
+      // 濡れた路面は空を映す。環境マップの代わりに空の色を薄く混ぜる
+      .lerp(skyColor, wet * WET_SKY_MIX)
+  })
+
   if (!geoms.surface) return null
 
   return (
     <group>
       <mesh geometry={geoms.surface} receiveShadow={receiveShadow}>
         <meshStandardMaterial
+          ref={surface}
           color={palette.roadSurface}
-          roughness={0.94}
-          metalness={0.02}
+          roughness={DRY_ROUGHNESS}
+          metalness={DRY_METALNESS}
           side={THREE.DoubleSide}
           polygonOffset
           polygonOffsetFactor={-1}

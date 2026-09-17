@@ -20,7 +20,7 @@ import { Vehicles } from './Vehicles'
 import { DARK_SCENE } from './palette'
 import { usePalette } from './usePalette'
 import { sceneStats } from './sceneStats'
-import { weatherLook } from './weatherView'
+import { advanceWeather, displayedWeather, weatherLook } from './weatherView'
 import { frameBuffer } from '../store/frameBuffer'
 import { useSimStore } from '../store/simStore'
 import { ConeIcon, CarIcon, MapIcon } from '../ui/Icons'
@@ -40,6 +40,10 @@ function mapSpan(bounds: MapBounds | null): number {
   if (!bounds) return DESIGN_SPAN_M
   return Math.max(bounds.maxX - bounds.minX, bounds.maxY - bounds.minY)
 }
+
+/** 天候を進める useFrame の優先度。**負にして他より先に走らせる**
+ *  （正にすると R3F が自動レンダリングをやめてしまうので 0 より下で分ける）。 */
+const WEATHER_PRIORITY = -1
 
 /** カメラの far 面 [m]。 */
 function cameraFarFor(span: number): number {
@@ -189,9 +193,10 @@ function SceneAtmosphere({ span }: { span: number }) {
   }, [palette, k])
 
   // ★ 天候は 20Hz の frame で届くので zustand ではなく frameBuffer から読む。
-  //   色と距離の差し替えは**変わったときだけ**（毎フレーム set すると無駄に重い）
-  useFrame(() => {
-    const weather = frameBuffer.weather
+  //   表示用の値を進めるのは**ここだけ**（priority を若くして最初に走らせる）。
+  //   色と距離の差し替えは変わったときだけ（毎フレーム set すると無駄に重い）
+  useFrame((_, delta) => {
+    const weather = advanceWeather(frameBuffer.weather, delta)
     const last = applied.current
     // 高さが変わればフォグの距離も変わる（俯瞰と運転席で見え方を分けている）
     const eye = Math.round(camera.position.y)
@@ -218,7 +223,7 @@ function SceneAtmosphere({ span }: { span: number }) {
     } else {
       scene.fog = new THREE.Fog(tint, look.fogNear, look.fogFar)
     }
-  })
+  }, WEATHER_PRIORITY)
 
   useEffect(() => {
     const far = cameraFarFor(span)
@@ -239,7 +244,7 @@ function SceneLights() {
 
   // 雨と霧で暗くする。**強さだけを書き換える**（ライトを作り直さない）
   useFrame(() => {
-    const dim = weatherLook(frameBuffer.weather, palette.fogNear, palette.fogFar).dim
+    const dim = weatherLook(displayedWeather, palette.fogNear, palette.fogFar).dim
     if (hemi.current) hemi.current.intensity = palette.hemiIntensity * dim
     if (ambient.current) ambient.current.intensity = palette.ambientIntensity * dim
   })
@@ -269,7 +274,7 @@ function SunLight({ cx, cz, extent, castShadow }: SunLightProps) {
 
   // 曇れば日差しも落ちる。強さだけを書き換える
   useFrame(() => {
-    const dim = weatherLook(frameBuffer.weather, palette.fogNear, palette.fogFar).dim
+    const dim = weatherLook(displayedWeather, palette.fogNear, palette.fogFar).dim
     if (light.current) light.current.intensity = palette.sunIntensity * dim
   })
 
