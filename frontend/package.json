@@ -17,7 +17,8 @@
     "verify:sun": "node scripts/verify-sun.ts",
     "verify:detections": "node scripts/verify-detections.ts",
     "verify:markings": "node scripts/verify-road-markings.ts",
-    "verify": "npm run verify:signals && npm run verify:speedsigns && npm run verify:camera && npm run verify:colors && npm run verify:vehicles && npm run verify:sun && npm run verify:detections && npm run verify:markings"
+    "verify:weather": "node scripts/verify-weather.ts",
+    "verify": "npm run verify:signals && npm run verify:speedsigns && npm run verify:camera && npm run verify:colors && npm run verify:vehicles && npm run verify:sun && npm run verify:detections && npm run verify:markings && npm run verify:weather"
   },
   "dependencies": {
     "@react-three/drei": "^10.7.8",

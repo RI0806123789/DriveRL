@@ -578,6 +578,16 @@ async def import_model_endpoint(file: UploadFile = File(...)):
                 )
 
 
+def _weather_presets_wire() -> list[dict[str, Any]]:
+    """天候プリセットの (rain, fog)。**数値の出典は percep/weather.py の PRESETS だけ。**"""
+    from app.percep.weather import PRESETS
+
+    return [
+        {"id": name, "rain": round(w.rain, 3), "fog": round(w.fog, 3)}
+        for name, w in PRESETS.items()
+    ]
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket) -> None:
     await websocket.accept()
@@ -605,6 +615,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                     "obsDim": config.OBS_DIM,
                     "actionDim": config.ACTION_DIM,
                 },
+                "weatherPresets": _weather_presets_wire(),
                 "params": engine.snapshot_params().to_wire(),
                 "status": engine.status_payload(),
             },

@@ -23,6 +23,7 @@ from app.percep.types import (
     CameraSpec,
     facing_viewer,
 )
+from app.percep.weather import CLEAR, Weather, apply_weather
 
 if TYPE_CHECKING:
     from app.sim.world import World
@@ -240,6 +241,7 @@ class PseudoCamera:
             self._ground_g = np.zeros((0, 1), dtype=np.float32)
             self._ground_q = np.zeros((0, w), dtype=np.float32)
             self._ground_ok = np.zeros((0, w), dtype=bool)
+            self._ground_zc = np.zeros((0, 1), dtype=np.float32)
             return
 
         b = (self._cy - (rows + 0.5)) / focal
@@ -255,6 +257,7 @@ class PseudoCamera:
         self._ground_ok = dist2 <= (self._far * self._far)
         self._ground_g = g.astype(np.float32)[:, None]
         self._ground_q = q.astype(np.float32)
+        self._ground_zc = (self._cp * g - self._sp * self._eye_h).astype(np.float32)[:, None]
 
     def _prepare_columns(self) -> None:
         """建物レイキャストに使う、画面の列ごとの水平方向。"""
@@ -497,7 +500,13 @@ class PseudoCamera:
         self._sign_digits = digits.astype(np.int8)
         self._sign_grid = _NeighborIndex(self._sign_x, self._sign_y, self._far)
 
-    def render(self, world: "World", slots: np.ndarray) -> np.ndarray:
+    def render(
+        self,
+        world: "World",
+        slots: np.ndarray,
+        weather: Weather = CLEAR,
+        frame_index: int = 0,
+    ) -> np.ndarray:
         """指定スロットの運転席視点を描く。戻り値 (len(slots), H, W, 3) uint8。"""
         slots = np.asarray(slots, dtype=np.int64).reshape(-1)
         n = int(slots.size)
@@ -516,7 +525,11 @@ class PseudoCamera:
         label[:, : self._horizon_row, :] = LBL_SKY
         label[:, self._horizon_row :, :] = LBL_GROUND
 
-        self._draw_ground(label, eye_x, eye_y, cos_h, sin_h)
+        depth: np.ndarray | None = None
+        if weather.needs_depth:
+            depth = np.full((n, h, w), np.float32(self._far), dtype=np.float32)
+
+        self._draw_ground(label, depth, eye_x, eye_y, cos_h, sin_h)
 
         specs = []
         walls = self._collect_buildings(eye_x, eye_y, cos_h, sin_h)
@@ -530,13 +543,16 @@ class PseudoCamera:
         ):
             if part is not None:
                 specs.append(part)
-        self._draw_shapes(label, specs)
+        self._draw_shapes(label, depth, specs)
 
-        return PALETTE[label]
+        return apply_weather(
+            PALETTE[label], depth, weather, far=self._far, frame_index=frame_index
+        )
 
     def _draw_ground(
         self,
         label: np.ndarray,
+        depth: np.ndarray | None,
         eye_x: np.ndarray,
         eye_y: np.ndarray,
         cos_h: np.ndarray,
@@ -565,6 +581,12 @@ class PseudoCamera:
             values,
             where=self._ground_ok[None],
         )
+        if depth is not None:
+            np.copyto(
+                depth[:, self._horizon_row :, :],
+                np.broadcast_to(self._ground_zc, self._ground_ok.shape),
+                where=self._ground_ok[None],
+            )
 
     def _collect_buildings(
         self,
@@ -1088,7 +1110,9 @@ class PseudoCamera:
             np.full(cam3.size, 3, dtype=np.int16),
         )
 
-    def _draw_shapes(self, label: np.ndarray, specs: list) -> None:
+    def _draw_shapes(
+        self, label: np.ndarray, depth_buf: np.ndarray | None, specs: list
+    ) -> None:
         """矩形／楕円のスパンを、奥から手前へ一括で塗る。"""
         if not specs:
             return
@@ -1123,6 +1147,8 @@ class PseudoCamera:
         hh = hh[idx]
         ell = ell[idx]
         lbl = lbl[idx]
+        if depth_buf is not None:
+            depth = depth[idx]
         y0 = np.clip(y0[idx], 0, h - 1)
         y1 = np.clip(y1[idx], 0, h - 1)
 
@@ -1149,3 +1175,5 @@ class PseudoCamera:
         pixels = _ragged_range(start, lens)
         values = np.repeat(lbl[obj], lens)
         label.reshape(-1)[pixels] = values
+        if depth_buf is not None:
+            depth_buf.reshape(-1)[pixels] = np.repeat(depth[obj], lens)

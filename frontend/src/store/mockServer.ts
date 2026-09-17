@@ -3,6 +3,7 @@
 import type {
   ClientMessage,
   Detection,
+  DetectorEvaluation,
   DetectorMessage,
   DetectorRequest,
   FrameMessage,
@@ -21,6 +22,8 @@ import type {
   StatusPayload,
   Vec2,
   VehicleState,
+  WeatherPreset,
+  WeatherState,
 } from '../types/protocol'
 import {
   DET_LANE,
@@ -104,6 +107,15 @@ const MOCK_CONFIG: SimConfig = {
   actionDim: 2,
 }
 
+/** 本物は `percep/weather.py` の PRESETS が出典。ここはモック用の写し。 */
+const MOCK_WEATHER_PRESETS: WeatherPreset[] = [
+  { id: 'clear', rain: 0, fog: 0 },
+  { id: 'drizzle', rain: 0.35, fog: 0 },
+  { id: 'rain', rain: 0.85, fog: 0 },
+  { id: 'fog', rain: 0, fog: 0.75 },
+  { id: 'heavy_fog', rain: 0.15, fog: 0.95 },
+]
+
 const DEFAULT_PARAMS: SimParams = {
   vehicleCount: 4,
   simSpeed: 1,
@@ -122,6 +134,9 @@ const DEFAULT_PARAMS: SimParams = {
   rewardOverspeed: -5,
   obeySignals: true,
   obeySpeedSigns: true,
+  weatherRain: 0,
+  weatherFog: 0,
+  weatherAuto: false,
 }
 
 function nodeId(gx: number, gy: number): number {
@@ -416,6 +431,50 @@ function buildRoute(v: MockVehicle): Vec2[] {
   return pts
 }
 
+const MOCK_EVAL_SAMPLES = 400
+
+const MOCK_WEATHER_PERIOD_SEC = 480
+
+const MOCK_MIN_VISIBILITY_M = 15
+
+/** 採点結果の見本。数字は銀座での実測に寄せてある（霧で崩れる形）。 */
+function makeMockEvaluation(): DetectorEvaluation {
+  const classes = [
+    { cls: 0, name: 'TRAFFIC_LIGHT', truth: 231, recall: 0.619, attr: 0.594 },
+    { cls: 1, name: 'SPEED_SIGN', truth: 42, recall: 0.524, attr: 0.955 },
+    { cls: 2, name: 'VEHICLE', truth: 171, recall: 0.456, attr: 1 },
+    { cls: 3, name: 'OBSTACLE', truth: 389, recall: 0.586, attr: 1 },
+    { cls: 4, name: 'LANE', truth: 236, recall: 0.665, attr: 1 },
+  ]
+  const weathers = [
+    { name: 'clear', truth: 380, recall: 0.808 },
+    { name: 'rain', truth: 371, recall: 0.814 },
+    { name: 'fog', truth: 318, recall: 0.16 },
+  ]
+  return {
+    samples: MOCK_EVAL_SAMPLES,
+    elapsedSec: 4.3,
+    overallRecall: 0.584,
+    classes: classes.map((c) => ({
+      cls: c.cls,
+      name: c.name,
+      truth: c.truth,
+      matched: Math.round(c.truth * c.recall),
+      recall: c.recall,
+      attributeTotal: c.attr < 1 ? Math.round(c.truth * c.recall) : 0,
+      attributeOk: c.attr < 1 ? Math.round(c.truth * c.recall * c.attr) : 0,
+      attributeAccuracy: c.attr,
+    })),
+    weathers: weathers.map((w) => ({
+      name: w.name,
+      truth: w.truth,
+      matched: Math.round(w.truth * w.recall),
+      recall: w.recall,
+    })),
+    weakest: '（モック）信号機 の成績が最も低い（37%）。霧でも落ちています',
+  }
+}
+
 /** 何も実行していないときの `detector` メッセージ。 */
 function makeIdleDetector(): DetectorMessage {
   return {
@@ -436,6 +495,7 @@ function makeIdleDetector(): DetectorMessage {
     paramCount: 0,
     presetName: null,
     request: null,
+    evaluation: null,
     dataset: null,
     model: { exists: false, filename: 'detector.keras', sizeBytes: 0, modifiedAt: null, inUse: false },
     datasetFile: { exists: false, sizeBytes: 0, modifiedAt: null },
@@ -518,6 +578,7 @@ class MockServer {
       protocolVersion: PROTOCOL_VERSION,
       presets: MOCK_PRESETS,
       config: MOCK_CONFIG,
+      weatherPresets: MOCK_WEATHER_PRESETS,
       params: this.params,
       status: this.status,
     })
@@ -543,13 +604,16 @@ class MockServer {
     const collects = request.mode !== 'train'
     const trains = request.mode !== 'collect'
 
+    const evaluates = collects && request.focusWeak
     this.detector = {
       ...makeIdleDetector(),
-      state: collects ? 'collecting' : 'preparing',
+      state: evaluates ? 'evaluating' : collects ? 'collecting' : 'preparing',
       running: true,
-      message: collects
-        ? `（モック）${preset?.name ?? 'マップ'} を走らせて教師データを集めています`
-        : '（モック）保存済みの教師データを読み込んでいます',
+      message: evaluates
+        ? '（モック）いまの認識器の弱点を測っています'
+        : collects
+          ? `（モック）${preset?.name ?? 'マップ'} を走らせて教師データを集めています`
+          : '（モック）保存済みの教師データを読み込んでいます',
       samples: request.samples,
       epochs: request.epochs,
       batches: 8,
@@ -564,6 +628,7 @@ class MockServer {
     })
     this.sendDetector()
 
+    let evaluated = evaluates ? 0 : MOCK_EVAL_SAMPLES
     let collected = collects ? 0 : request.samples
     let epoch = 0
     let batch = 0
@@ -572,6 +637,21 @@ class MockServer {
     this.detectorTimer = setInterval(() => {
       const d = this.detector
       d.elapsedSec = (performance.now() - startedAt) / 1000
+
+      if (evaluated < MOCK_EVAL_SAMPLES) {
+        evaluated = Math.min(MOCK_EVAL_SAMPLES, evaluated + MOCK_EVAL_SAMPLES / 4)
+        d.state = 'evaluating'
+        d.collected = evaluated
+        d.samples = MOCK_EVAL_SAMPLES
+        d.progress = evaluated / MOCK_EVAL_SAMPLES
+        d.message = `（モック）いまの認識器の弱点を測っています（${evaluated} / ${MOCK_EVAL_SAMPLES} 枚）`
+        if (evaluated >= MOCK_EVAL_SAMPLES) {
+          d.evaluation = makeMockEvaluation()
+          d.samples = request.samples
+        }
+        this.sendDetector()
+        return
+      }
 
       if (collected < request.samples) {
         collected = Math.min(request.samples, collected + Math.ceil(request.samples / 24))
@@ -591,6 +671,15 @@ class MockServer {
               OBSTACLE: Math.round(request.samples * 2.0),
               LANE: request.samples,
             },
+            weatherCounts: request.weatherMix
+              ? {
+                  clear: Math.round(request.samples * 0.3),
+                  drizzle: Math.round(request.samples * 0.12),
+                  rain: Math.round(request.samples * 0.13),
+                  fog: Math.round(request.samples * 0.33),
+                  heavy_fog: Math.round(request.samples * 0.12),
+                }
+              : { clear: request.samples },
           }
           d.datasetFile = {
             exists: true,
@@ -967,9 +1056,24 @@ class MockServer {
       obstacles: this.obstacles,
     }
     if (this.map?.signals?.length) frame.signals = this.computePhases()
+    frame.weather = this.currentWeather()
     const detections = this.buildDetections()
     if (detections) frame.detections = detections
     this.send(frame)
+  }
+
+  /** いま効いている天候。視程の式は `percep/weather.py` の `visibility_m` に合わせる。 */
+  private currentWeather(): WeatherState {
+    let rain = this.params.weatherRain
+    let fog = this.params.weatherFog
+    if (this.params.weatherAuto) {
+      const phase = (this.simTime / MOCK_WEATHER_PERIOD_SEC) % 1
+      rain = Math.max(0, Math.sin(2 * Math.PI * phase)) ** 2
+      fog = Math.max(0, Math.sin(2 * Math.PI * (phase - 0.5))) ** 2
+    }
+    const far = 120
+    const visibility = fog <= 1e-3 ? far : far * (MOCK_MIN_VISIBILITY_M / far) ** (fog * fog)
+    return { rain, fog, visibility }
   }
 
   /** 認識結果のダミー。**運転席カメラのボックスと路面の車線オーバーレイを */

@@ -59,11 +59,15 @@ export function ControlPanel() {
     prevTab.current = tab
   }
 
-  const [leaving, setLeaving] = useState<number | null>(null)
-  const leaveTimer = useRef<number | null>(null)
+  // ★ 退場中のバナーは**同時に複数ありうる**ので、id ごとに持つこと。
+  //    1 つの ref で使い回すと、180ms 以内に 2 つ閉じたときに先の削除が
+  //    キャンセルされ、1 つ目が is-leaving を外されたまま画面に残る。
+  const [leaving, setLeaving] = useState<ReadonlySet<number>>(() => new Set())
+  const leaveTimers = useRef(new Map<number, number>())
   useEffect(
     () => () => {
-      if (leaveTimer.current !== null) window.clearTimeout(leaveTimer.current)
+      for (const timer of leaveTimers.current.values()) window.clearTimeout(timer)
+      leaveTimers.current.clear()
     },
     [],
   )
@@ -72,13 +76,21 @@ export function ControlPanel() {
       dismissError(id)
       return
     }
-    setLeaving(id)
-    if (leaveTimer.current !== null) window.clearTimeout(leaveTimer.current)
-    leaveTimer.current = window.setTimeout(() => {
-      leaveTimer.current = null
-      setLeaving((curr) => (curr === id ? null : curr))
-      dismissError(id)
-    }, 180)
+    if (leaveTimers.current.has(id)) return
+    setLeaving((curr) => new Set(curr).add(id))
+    leaveTimers.current.set(
+      id,
+      window.setTimeout(() => {
+        leaveTimers.current.delete(id)
+        setLeaving((curr) => {
+          if (!curr.has(id)) return curr
+          const next = new Set(curr)
+          next.delete(id)
+          return next
+        })
+        dismissError(id)
+      }, 180),
+    )
   }
 
   return (
@@ -137,7 +149,7 @@ export function ControlPanel() {
           {errors.map((e) => (
             <div
               key={e.id}
-              className={`m3-banner m3-banner--error${leaving === e.id ? ' is-leaving' : ''}`}
+              className={`m3-banner m3-banner--error${leaving.has(e.id) ? ' is-leaving' : ''}`}
             >
               <span className="m3-banner-icon">
                 <WarningIcon size={16} />

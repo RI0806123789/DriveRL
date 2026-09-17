@@ -2,7 +2,7 @@
 
 import { useEffect, useRef } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
-import { restartAnimation } from './motion'
+import { restartValueFlash } from './motion'
 
 export interface ValueFlashProps {
   children: ReactNode
@@ -23,7 +23,7 @@ export function ValueFlash({ children, className = '', title, style }: ValueFlas
     prev.current = now
     if (before === null || before === now) return
     el.dataset.dir = compareNumeric(before, now)
-    restartAnimation(el, 'is-flash')
+    restartValueFlash(el, 'is-flash')
   })
 
   return (

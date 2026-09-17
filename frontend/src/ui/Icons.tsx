@@ -198,3 +198,17 @@ export const PlugIcon = (p: IconProps) => (
     <path d="M12 17v3.5" />
   </Svg>
 )
+
+export const FogIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M7.5 11.5a3.5 3.5 0 0 1 .3-6.9 4.6 4.6 0 0 1 8.6 1.3 3 3 0 0 1 .4 5.6" />
+    <path d="M4.5 15h15M6.5 18.5h11" />
+  </Svg>
+)
+
+export const GaugeIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M4 17a8 8 0 1 1 16 0" />
+    <path d="M12 17l4.2-4.8" />
+  </Svg>
+)

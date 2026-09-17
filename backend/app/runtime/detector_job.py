@@ -13,6 +13,13 @@ from typing import Any, Protocol, TYPE_CHECKING
 import numpy as np
 
 from app import config
+from app.contracts import coerce_bool
+from app.percep.evaluate import (
+    COLLECT_WEATHERS,
+    EVAL_WEATHERS,
+    DetectorEvaluation,
+    evaluate_detector,
+)
 from app.percep.trainer import (
     DATASET_FILE,
     DatasetSummary,
@@ -37,6 +44,9 @@ BATCH_MIN, BATCH_MAX = 8, 128
 WIDTH_MIN, WIDTH_MAX = 0.25, 2.0
 SEED_MIN, SEED_MAX = 0, 999_999
 
+#: 弱点を測るのに使う枚数。銀座で 240 枚 2.6 秒だったので、400 枚で 5 秒前後。
+EVAL_SAMPLES = 400
+
 
 @dataclass(frozen=True)
 class DetectorTrainRequest:
@@ -49,6 +59,8 @@ class DetectorTrainRequest:
     batch_size: int = 32
     width: float = 1.0
     seed: int = 0
+    weather_mix: bool = True
+    focus_weak: bool = True
 
     @property
     def collects(self) -> bool:
@@ -67,6 +79,8 @@ class DetectorTrainRequest:
             "batchSize": int(self.batch_size),
             "width": float(self.width),
             "seed": int(self.seed),
+            "weatherMix": bool(self.weather_mix),
+            "focusWeak": bool(self.focus_weak),
         }
 
 
@@ -118,6 +132,13 @@ def parse_request(wire: Any) -> tuple[DetectorTrainRequest | None, str]:
     if preset_id is not None and not isinstance(preset_id, str):
         return None, "presetId は文字列で指定してください"
 
+    weather_mix = coerce_bool(wire.get("weatherMix", True))
+    if weather_mix is None:
+        return None, "weatherMix は真偽値で指定してください"
+    focus_weak = coerce_bool(wire.get("focusWeak", True))
+    if focus_weak is None:
+        return None, "focusWeak は真偽値で指定してください"
+
     return (
         DetectorTrainRequest(
             mode=str(mode),
@@ -127,6 +148,8 @@ def parse_request(wire: Any) -> tuple[DetectorTrainRequest | None, str]:
             batch_size=batch_size,
             width=width,
             seed=seed,
+            weather_mix=weather_mix,
+            focus_weak=focus_weak,
         ),
         "",
     )
@@ -163,11 +186,15 @@ class _Progress:
     preset_name: str | None = None
     progress: float = 0.0
     collected: int = 0
+    #: いまの段階の分母。0 なら収集の枚数（`request.samples`）を使う。
+    #: 採点は 400 枚で走るので、ここを分けないと「200 / 2,400 枚」と出てしまう。
+    stage_total: int = 0
     epoch: int = 0
     batch: int = 0
     batches: int = 0
     history: list[dict[str, float]] = field(default_factory=list)
     dataset: DatasetSummary | None = None
+    evaluation: DetectorEvaluation | None = None
     started_at: float = 0.0
     finished_at: float = 0.0
     warning: str = ""
@@ -249,7 +276,9 @@ class DetectorTrainingJob:
                 "message": p.message,
                 "progress": float(max(0.0, min(1.0, p.progress))),
                 "collected": int(p.collected),
-                "samples": int(p.request.samples) if p.request else 0,
+                "samples": int(
+                    p.stage_total or (p.request.samples if p.request else 0)
+                ),
                 "epoch": int(p.epoch),
                 "epochs": int(p.request.epochs) if p.request else 0,
                 "batch": int(p.batch),
@@ -261,6 +290,9 @@ class DetectorTrainingJob:
                 "presetName": p.preset_name,
                 "request": p.request.to_wire() if p.request else None,
                 "dataset": p.dataset.to_wire() if p.dataset is not None else None,
+                "evaluation": (
+                    p.evaluation.to_wire() if p.evaluation is not None else None
+                ),
             }
         payload["model"] = self.model_info()
         payload["datasetFile"] = self._dataset_file_info()
@@ -404,12 +436,15 @@ class DetectorTrainingJob:
             return data
 
         index, preset_name = self._resolve_map(request)
+        evaluation = self._evaluate(request, index, preset_name)
+
         self._update(
             state="collecting",
             preset_name=preset_name,
             message=f"{preset_name} を走らせて教師データを集めています",
             progress=0.0,
             collected=0,
+            stage_total=0,
         )
 
         started = time.perf_counter()
@@ -417,15 +452,19 @@ class DetectorTrainingJob:
             index,
             int(request.samples),
             seed=int(request.seed),
+            weathers=COLLECT_WEATHERS if request.weather_mix else ("clear",),
+            weather_focus=evaluation.weather_focus() if evaluation else None,
+            class_focus=evaluation.class_focus() if evaluation else None,
             on_progress=self._on_collect,
             should_cancel=self._should_cancel,
         )
         summary = summarize_dataset(data)
         logger.info(
-            "教師データを %d 枚集めました（%.0f 秒、クラス内訳 %s）",
+            "教師データを %d 枚集めました（%.0f 秒、クラス内訳 %s、天候内訳 %s）",
             summary.samples,
             time.perf_counter() - started,
             summary.class_counts,
+            summary.weather_counts,
         )
 
         self._update(
@@ -447,6 +486,57 @@ class DetectorTrainingJob:
                 )
             )
         return data
+
+    def _evaluate(
+        self, request: DetectorTrainRequest, index: "MapIndex", preset_name: str
+    ) -> DetectorEvaluation | None:
+        """収集の前に現行の認識器を採点する。認識器が無ければ採点せず None。"""
+        if not request.focus_weak:
+            return None
+
+        from app.percep.detector import Detector
+
+        detector = Detector.load(config.DETECTOR_PATH)
+        if detector is None:
+            self._update(
+                message="まだ認識器がないので、弱点は測らず一様に集めます"
+            )
+            return None
+
+        self._update(
+            state="evaluating",
+            preset_name=preset_name,
+            message="いまの認識器の弱点を測っています",
+            progress=0.0,
+            collected=0,
+            stage_total=EVAL_SAMPLES,
+        )
+        evaluation = evaluate_detector(
+            index,
+            detector,
+            samples=EVAL_SAMPLES,
+            seed=int(request.seed),
+            weathers=EVAL_WEATHERS if request.weather_mix else ("clear",),
+            on_progress=self._on_evaluate,
+            should_cancel=self._should_cancel,
+        )
+        logger.info(
+            "認識器を採点しました（%d 枚 / %.1f 秒 / 全体 %.1f%% / %s）",
+            evaluation.samples,
+            evaluation.elapsed_sec,
+            evaluation.overall_recall * 100.0,
+            evaluation.weakest(),
+        )
+        self._update(evaluation=evaluation)
+        self._hooks.notify(f"弱点を測りました: {evaluation.weakest()}")
+        return evaluation
+
+    def _on_evaluate(self, done: int, total: int) -> None:
+        self._update(
+            collected=int(done),
+            progress=float(done) / float(max(1, total)),
+            message=f"いまの認識器の弱点を測っています（{done} / {total} 枚）",
+        )
 
     def _resolve_map(self, request: DetectorTrainRequest) -> tuple["MapIndex", str]:
         """走らせるマップを決める。"""

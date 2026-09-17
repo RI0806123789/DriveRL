@@ -10,6 +10,7 @@ import { Ground } from './Ground'
 import { InteractionPlane } from './InteractionPlane'
 import { LaneDetectionOverlay } from './LaneDetectionOverlay'
 import { Obstacles } from './Obstacles'
+import { Rain } from './Rain'
 import { RoadMarkings } from './RoadMarkings'
 import { RoadNetwork } from './RoadNetwork'
 import { RouteLines } from './RouteLines'
@@ -19,6 +20,8 @@ import { Vehicles } from './Vehicles'
 import { DARK_SCENE } from './palette'
 import { usePalette } from './usePalette'
 import { sceneStats } from './sceneStats'
+import { advanceWeather, displayedWeather, weatherLook } from './weatherView'
+import { frameBuffer } from '../store/frameBuffer'
 import { useSimStore } from '../store/simStore'
 import { ConeIcon, CarIcon, MapIcon } from '../ui/Icons'
 import type { MapBounds } from '../types/protocol'
@@ -37,6 +40,10 @@ function mapSpan(bounds: MapBounds | null): number {
   if (!bounds) return DESIGN_SPAN_M
   return Math.max(bounds.maxX - bounds.minX, bounds.maxY - bounds.minY)
 }
+
+/** 天候を進める useFrame の優先度。**負にして他より先に走らせる**
+ *  （正にすると R3F が自動レンダリングをやめてしまうので 0 より下で分ける）。 */
+const WEATHER_PRIORITY = -1
 
 /** カメラの far 面 [m]。 */
 function cameraFarFor(span: number): number {
@@ -104,6 +111,7 @@ export function SimulatorView() {
           <LaneDetectionOverlay />
           <Vehicles maxVehicles={maxVehicles} castShadow={view.shadows} />
           <Obstacles castShadow={view.shadows} />
+          <Rain />
 
           <InteractionPlane bounds={bounds} />
           <CameraRig bounds={bounds} />
@@ -169,7 +177,7 @@ interface SunLightProps {
   castShadow: boolean
 }
 
-/** 背景色とフォグを配色に追従させる。 */
+/** 背景色とフォグを配色と天候に追従させる。 */
 function SceneAtmosphere({ span }: { span: number }) {
   const palette = usePalette()
   const gl = useThree((s) => s.gl)
@@ -177,19 +185,45 @@ function SceneAtmosphere({ span }: { span: number }) {
   const camera = useThree((s) => s.camera)
 
   const k = Math.max(1, span / DESIGN_SPAN_M)
+  const applied = useRef({ rain: -1, fog: -1, theme: '', eye: -1 })
 
   useEffect(() => {
-    gl.setClearColor(new THREE.Color(palette.sky))
-    const near = palette.fogNear * k
-    const far = palette.fogFar * k
-    if (scene.fog instanceof THREE.Fog) {
-      scene.fog.color.set(palette.sky)
-      scene.fog.near = near
-      scene.fog.far = far
-    } else {
-      scene.fog = new THREE.Fog(palette.sky, near, far)
+    // 天候は下の useFrame が塗り直すので、ここは「次に必ず塗り直す」印だけ付ける
+    applied.current.theme = ''
+  }, [palette, k])
+
+  // ★ 天候は 20Hz の frame で届くので zustand ではなく frameBuffer から読む。
+  //   表示用の値を進めるのは**ここだけ**（priority を若くして最初に走らせる）。
+  //   色と距離の差し替えは変わったときだけ（毎フレーム set すると無駄に重い）
+  useFrame((_, delta) => {
+    const weather = advanceWeather(frameBuffer.weather, delta)
+    const last = applied.current
+    // 高さが変わればフォグの距離も変わる（俯瞰と運転席で見え方を分けている）
+    const eye = Math.round(camera.position.y)
+    if (
+      last.theme === palette.sky &&
+      last.eye === eye &&
+      Math.abs(weather.rain - last.rain) < 0.01 &&
+      Math.abs(weather.fog - last.fog) < 0.01
+    ) {
+      return
     }
-  }, [gl, scene, palette, k])
+    applied.current = { rain: weather.rain, fog: weather.fog, theme: palette.sky, eye }
+
+    const look = weatherLook(weather, palette.fogNear * k, palette.fogFar * k, eye)
+    const tint = new THREE.Color(palette.sky)
+    if (look.rainTint > 0) tint.lerp(new THREE.Color(palette.rainSky), look.rainTint)
+    if (look.fogTint > 0) tint.lerp(new THREE.Color(palette.fogVeil), look.fogTint)
+
+    gl.setClearColor(tint)
+    if (scene.fog instanceof THREE.Fog) {
+      scene.fog.color.copy(tint)
+      scene.fog.near = look.fogNear
+      scene.fog.far = look.fogFar
+    } else {
+      scene.fog = new THREE.Fog(tint, look.fogNear, look.fogFar)
+    }
+  }, WEATHER_PRIORITY)
 
   useEffect(() => {
     const far = cameraFarFor(span)
@@ -205,14 +239,25 @@ function SceneAtmosphere({ span }: { span: number }) {
 /** 環境光。`args` ではなく個別の props で渡す。 */
 function SceneLights() {
   const palette = usePalette()
+  const hemi = useRef<THREE.HemisphereLight>(null)
+  const ambient = useRef<THREE.AmbientLight>(null)
+
+  // 雨と霧で暗くする。**強さだけを書き換える**（ライトを作り直さない）
+  useFrame(() => {
+    const dim = weatherLook(displayedWeather, palette.fogNear, palette.fogFar).dim
+    if (hemi.current) hemi.current.intensity = palette.hemiIntensity * dim
+    if (ambient.current) ambient.current.intensity = palette.ambientIntensity * dim
+  })
+
   return (
     <>
       <hemisphereLight
+        ref={hemi}
         color={palette.hemiSky}
         groundColor={palette.hemiGround}
         intensity={palette.hemiIntensity}
       />
-      <ambientLight intensity={palette.ambientIntensity} />
+      <ambientLight ref={ambient} intensity={palette.ambientIntensity} />
     </>
   )
 }
@@ -226,6 +271,12 @@ function SunLight({ cx, cz, extent, castShadow }: SunLightProps) {
   useEffect(() => {
     if (light.current && target.current) light.current.target = target.current
   }, [])
+
+  // 曇れば日差しも落ちる。強さだけを書き換える
+  useFrame(() => {
+    const dim = weatherLook(displayedWeather, palette.fogNear, palette.fogFar).dim
+    if (light.current) light.current.intensity = palette.sunIntensity * dim
+  })
 
   return (
     <>

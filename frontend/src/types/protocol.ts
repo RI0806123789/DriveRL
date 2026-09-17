@@ -52,6 +52,20 @@ export interface SimParams {
   obeySignals: boolean
   /** 最高速度標識に従わせるか。 */
   obeySpeedSigns: boolean
+  /** 雨の強さ 0.0〜1.0。画を濁らせるだけで視程は縮めない。 */
+  weatherRain: number
+  /** 霧の濃さ 0.0〜1.0。視程を縮める。 */
+  weatherFog: number
+  /** true の間はサーバーが simTime から天候を決める（上の 2 つは据え置かれる）。 */
+  weatherAuto: boolean
+}
+
+/** いま効いている天候（2.3 frame.weather） */
+export interface WeatherState {
+  rain: number
+  fog: number
+  /** 有効視程 [m]。擬似カメラの描画と正解ラベルが共有する唯一の値。 */
+  visibility: number
 }
 
 /** サーバーの実行状態 */
@@ -78,8 +92,26 @@ export interface InitMessage {
   protocolVersion: number
   presets: MapPreset[]
   config: SimConfig
+  /** 天候の選択肢。表示名だけクライアントが持ち、数値はサーバーが配る。 */
+  weatherPresets?: WeatherPreset[]
   params: SimParams
   status: StatusPayload
+}
+
+/** 天候の選択肢 1 つ。`rain` / `fog` の出典はバックエンドの `PRESETS`。 */
+export interface WeatherPreset {
+  id: string
+  rain: number
+  fog: number
+}
+
+/** 天候プリセットの表示名。**キーはバックエンドの `percep.weather.PRESETS` と同じ。** */
+export const WEATHER_LABELS: Record<string, string> = {
+  clear: '晴れ',
+  drizzle: '小雨',
+  rain: '雨',
+  fog: '霧',
+  heavy_fog: '濃霧',
 }
 
 export interface MapBounds {
@@ -252,6 +284,8 @@ export interface FrameMessage {
   signals?: number[]
   /** 車両ごとの認識結果。**キーはスロット番号の文字列**（JSON のキーは文字列のため）。 */
   detections?: Record<string, Detection[]>
+  /** いま効いている天候。weatherAuto の間は params ではなくこちらが正。 */
+  weather?: WeatherState
 }
 
 /** 2.4 status */
@@ -296,6 +330,7 @@ export interface MetricsMessage {
 export type DetectorState =
   | 'idle'
   | 'preparing'
+  | 'evaluating'
   | 'collecting'
   | 'training'
   | 'saving'
@@ -324,6 +359,10 @@ export interface DetectorRequest {
   width: number
   /** 収集の乱数種。`SimulationEnv` と行動のランダム化の両方に渡るので、 */
   seed: number
+  /** 晴れ以外の天候も混ぜて集めるか。走行中の天候とは無関係。 */
+  weatherMix: boolean
+  /** 収集前に現行の認識器を採点し、弱点を狙って集めるか。 */
+  focusWeak: boolean
 }
 
 /** 集めた教師データに何が写っているか。 */
@@ -334,6 +373,42 @@ export interface DetectorDataset {
   objectsPerImage: number
   /** クラス名（バックエンドの DetClass）-> 件数 */
   classCounts: Record<string, number>
+  /** 天候プリセット名 -> 枚数 */
+  weatherCounts: Record<string, number>
+}
+
+/** 収集前に測った、クラス 1 つぶんの成績。 */
+export interface DetectorClassScore {
+  cls: number
+  name: string
+  /** 真値にあった件数 */
+  truth: number
+  matched: number
+  /** matched / truth */
+  recall: number
+  /** 灯色・規制速度を持つクラスのみ 0 より大きい */
+  attributeTotal: number
+  attributeOk: number
+  attributeAccuracy: number
+}
+
+/** 収集前に測った、天候 1 つぶんの成績。 */
+export interface DetectorWeatherScore {
+  name: string
+  truth: number
+  matched: number
+  recall: number
+}
+
+/** 収集前の採点。**これから学習するモデルではなく、いまの認識器の成績**。 */
+export interface DetectorEvaluation {
+  samples: number
+  elapsedSec: number
+  overallRecall: number
+  classes: DetectorClassScore[]
+  weathers: DetectorWeatherScore[]
+  /** 弱点を 1 行で言ったもの */
+  weakest: string
 }
 
 /** ディスク上のファイルの情報 */
@@ -382,6 +457,8 @@ export interface DetectorMessage {
   paramCount: number
   presetName: string | null
   request: DetectorRequest | null
+  /** 収集前の採点。focusWeak が false か、認識器がまだ無いときは null。 */
+  evaluation: DetectorEvaluation | null
   dataset: DetectorDataset | null
   model: DetectorFileInfo
   datasetFile: DetectorFileInfo

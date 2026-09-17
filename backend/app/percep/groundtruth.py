@@ -30,6 +30,7 @@ from app.percep.types import (
     facing_viewer,
     pack_by_class_quota,
 )
+from app.percep.weather import CLEAR, Weather
 
 if TYPE_CHECKING:
     from app.sim.world import World
@@ -268,7 +269,12 @@ def _line_of_sight(map_index, eye: tuple[float, float], targets: np.ndarray) -> 
 
 
 def _detect_signals(
-    world: "World", slot: int, spec: CameraSpec, pose: CameraPose, scene: _StaticScene
+    world: "World",
+    slot: int,
+    spec: CameraSpec,
+    pose: CameraPose,
+    scene: _StaticScene,
+    max_distance: float,
 ) -> list[tuple[float, Detection]]:
     """前方の信号機。灯色は `world.signal_phases` の真値をそのまま入れる。"""
     out: list[tuple[float, Detection]] = []
@@ -289,7 +295,7 @@ def _detect_signals(
         eye[1],
         heading,
     )
-    candidates = np.flatnonzero((dist <= spec.far) & facing)
+    candidates = np.flatnonzero((dist <= max_distance) & facing)
     if candidates.size == 0:
         return out
 
@@ -332,7 +338,12 @@ def _detect_signals(
 
 
 def _detect_speed_signs(
-    world: "World", slot: int, spec: CameraSpec, pose: CameraPose, scene: _StaticScene
+    world: "World",
+    slot: int,
+    spec: CameraSpec,
+    pose: CameraPose,
+    scene: _StaticScene,
+    max_distance: float,
 ) -> list[tuple[float, Detection]]:
     """最高速度標識。規制速度は `MapSign.speed_limit` の真値。"""
     out: list[tuple[float, Detection]] = []
@@ -348,7 +359,7 @@ def _detect_speed_signs(
     facing = facing_viewer(
         board[:, 0], board[:, 1], scene.sign_heading, eye[0], eye[1], heading
     )
-    candidates = np.flatnonzero((dist <= spec.far) & facing)
+    candidates = np.flatnonzero((dist <= max_distance) & facing)
     if candidates.size == 0:
         return out
 
@@ -387,7 +398,7 @@ def _detect_speed_signs(
 
 
 def _detect_vehicles(
-    world: "World", slot: int, spec: CameraSpec, pose: CameraPose
+    world: "World", slot: int, spec: CameraSpec, pose: CameraPose, max_distance: float
 ) -> list[tuple[float, Detection]]:
     """他車両。車体の 8 頂点（路面と屋根の 4 隅）を投影して箱にする。"""
     out: list[tuple[float, Detection]] = []
@@ -401,7 +412,7 @@ def _detect_vehicles(
     dx = fleet.x[others].astype(np.float64) - eye[0]
     dy = fleet.y[others].astype(np.float64) - eye[1]
     dist = np.hypot(dx, dy)
-    near = others[dist <= spec.far]
+    near = others[dist <= max_distance]
     if near.size == 0:
         return out
 
@@ -447,7 +458,7 @@ def _detect_vehicles(
 
 
 def _detect_obstacles(
-    world: "World", slot: int, spec: CameraSpec, pose: CameraPose
+    world: "World", slot: int, spec: CameraSpec, pose: CameraPose, max_distance: float
 ) -> list[tuple[float, Detection]]:
     """ユーザーが置いたパイロン。円柱を視線に垂直な板で近似する。"""
     out: list[tuple[float, Detection]] = []
@@ -461,7 +472,7 @@ def _detect_obstacles(
     dist = np.hypot(dx, dy)
     height = float(config.OBSTACLE_HEIGHT)
 
-    near = np.flatnonzero(dist <= spec.far)
+    near = np.flatnonzero(dist <= max_distance)
     if near.size == 0:
         return out
     near = near[_line_of_sight(world.map_index, eye, xy[near].astype(np.float64))]
@@ -504,7 +515,7 @@ def _detect_obstacles(
 
 
 def _detect_lane(
-    world: "World", slot: int, spec: CameraSpec, pose: CameraPose
+    world: "World", slot: int, spec: CameraSpec, pose: CameraPose, max_distance: float
 ) -> tuple[float, Detection] | None:
     """走行車線。経路（＝車線中心線）への射影から作る。"""
     state = world.slots[int(slot)]
@@ -514,7 +525,10 @@ def _detect_lane(
     cum = state.route_cum
     arc = float(world.arc[int(slot)])
 
-    offsets = np.arange(0.0, LANE_LOOKAHEAD_M + 1e-6, LANE_SAMPLE_M, dtype=np.float64)
+    lookahead = min(float(LANE_LOOKAHEAD_M), float(max_distance))
+    if lookahead < LANE_SAMPLE_M * 2.0:
+        return None
+    offsets = np.arange(0.0, lookahead + 1e-6, LANE_SAMPLE_M, dtype=np.float64)
     targets = arc + offsets
     usable = int(np.count_nonzero(targets <= cum[-1]))
     if usable < 2:
@@ -564,7 +578,7 @@ def _detect_lane(
             cls=DetClass.LANE,
             x0=box[0], y0=box[1], x1=box[2], y1=box[3],
             confidence=1.0,
-            distance=min(visible_depth, float(spec.far)),
+            distance=min(visible_depth, float(max_distance)),
             lateral=float(world.lateral[int(slot)]),
             lane_points=lane_points,
         ),
@@ -572,7 +586,10 @@ def _detect_lane(
 
 
 def detect_ground_truth(
-    world: "World", slot: int, spec: CameraSpec = DEFAULT_CAMERA
+    world: "World",
+    slot: int,
+    spec: CameraSpec = DEFAULT_CAMERA,
+    weather: Weather = CLEAR,
 ) -> PerceptionResult:
     """world の真値から「理想の検出結果」を作る。"""
     slot = int(slot)
@@ -589,15 +606,16 @@ def detect_ground_truth(
         spec,
     )
     scene = _static_scene(world.map_index)
+    reach = weather.visibility_m(float(spec.far))
 
     per_class: dict[DetClass, list[Detection]] = {c: [] for c in DetClass}
     buckets: list[tuple[DetClass, list[tuple[float, Detection]]]] = [
-        (DetClass.TRAFFIC_LIGHT, _detect_signals(world, slot, spec, pose, scene)),
-        (DetClass.SPEED_SIGN, _detect_speed_signs(world, slot, spec, pose, scene)),
-        (DetClass.VEHICLE, _detect_vehicles(world, slot, spec, pose)),
-        (DetClass.OBSTACLE, _detect_obstacles(world, slot, spec, pose)),
+        (DetClass.TRAFFIC_LIGHT, _detect_signals(world, slot, spec, pose, scene, reach)),
+        (DetClass.SPEED_SIGN, _detect_speed_signs(world, slot, spec, pose, scene, reach)),
+        (DetClass.VEHICLE, _detect_vehicles(world, slot, spec, pose, reach)),
+        (DetClass.OBSTACLE, _detect_obstacles(world, slot, spec, pose, reach)),
     ]
-    lane = _detect_lane(world, slot, spec, pose)
+    lane = _detect_lane(world, slot, spec, pose, reach)
     if lane is not None:
         per_class[DetClass.LANE] = [lane[1]]
     for cls, items in buckets:
@@ -611,10 +629,13 @@ def detect_ground_truth(
 
 
 def detect_ground_truth_batch(
-    world: "World", slots: Sequence[int], spec: CameraSpec = DEFAULT_CAMERA
+    world: "World",
+    slots: Sequence[int],
+    spec: CameraSpec = DEFAULT_CAMERA,
+    weather: Weather = CLEAR,
 ) -> list[PerceptionResult]:
     """複数スロットぶんまとめて作る（教師データ収集用の薄いラッパ）。"""
-    return [detect_ground_truth(world, int(s), spec) for s in slots]
+    return [detect_ground_truth(world, int(s), spec, weather) for s in slots]
 
 
 def freespace_ground_truth(

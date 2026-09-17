@@ -20,6 +20,7 @@ from app.contracts import (
 )
 from app.percep.encoder import encode_observations
 from app.percep.types import DEFAULT_CAMERA, PerceptionResult
+from app.percep.weather import Weather, auto_weather
 from app.sim.signals import constrain_accel
 from app.sim.world import World
 
@@ -114,6 +115,15 @@ class SimulationEnv:
     def sim_time(self) -> float:
         """シミュレーション内の経過秒。信号の現示はこの時刻だけで決まる。"""
         return self.world.sim_time
+
+    @property
+    def weather(self) -> Weather:
+        """いま効いている天候。`weather_auto` なら時刻から導き、パラメータ側は見ない。"""
+        if self.params.weather_auto:
+            return auto_weather(self.world.sim_time)
+        return Weather(
+            rain=float(self.params.weather_rain), fog=float(self.params.weather_fog)
+        )
 
     @property
     def signal_phases(self) -> list[int]:
@@ -313,12 +323,14 @@ class SimulationEnv:
         """描画用スナップショット。経路は変化があったスロットのみ載る。"""
         frame = self.world.snapshot(tick, sim_time, include_routes=False)
         frame.detections = self._detections_wire()
+        frame.weather = self.weather.to_wire(float(self._camera_spec.far))
         return frame
 
     def full_snapshot(self, tick: int, sim_time: float) -> FrameSnapshot:
         """新規接続クライアント向けに全スロットの経路を含めたスナップショット。"""
         frame = self.world.snapshot(tick, sim_time, include_routes=True)
         frame.detections = self._detections_wire()
+        frame.weather = self.weather.to_wire(float(self._camera_spec.far))
         return frame
 
     def _detections_wire(self) -> dict[int, list[dict[str, Any]]]:
@@ -399,32 +411,47 @@ class SimulationEnv:
 
         self._ensure_percep()
         spec = self._camera_spec
+        weather = self.weather
         freespace: dict[int, np.ndarray] = {}
         results: list[PerceptionResult] | None = None
 
         if self._detector is not None and self._camera is not None:
             try:
-                images = self._camera.render(self.world, idx)
+                images = self._camera.render(
+                    self.world, idx, weather, int(self.world.sim_time * config.SIM_HZ)
+                )
                 results, free_arr = self._detector.detect_with_freespace(images, idx)
                 for i, slot in enumerate(idx):
                     freespace[int(slot)] = free_arr[i]
             except Exception:
+                # ★ ここで手放さないと「観測の出どころ: CNN の認識結果」と出したまま
+                #   真値で走り続ける（画面が嘘をつく）。おまけに毎ステップ擬似カメラを
+                #   描いて推論を試み続けるので、落ちた分だけ遅くなる。
+                #   直すには「モデル作成」タブから読み込み直す（reload_detector）。
+                self._detector = None
+                self._camera = None
                 if not self._detector_failed:
                     self._detector_failed = True
-                    logger.exception("認識器の推論に失敗しました。真値で代用します")
+                    logger.exception(
+                        "認識器の推論に失敗しました。以後は真値で代用します"
+                        "（「モデル作成」タブで学習し直すと元に戻ります）"
+                    )
                 results = None
                 freespace.clear()
 
         if results is None and config.PERCEP_FALLBACK_GROUND_TRUTH:
             if self._ground_truth is not None and self._freespace_gt is not None:
+                # 認識器を使う経路では CNN の出力をそのまま使う（画から判断させる）。
+                # 視程で頭打ちにするのは真値で代用するこちら側だけ。
+                reach = min(
+                    float(config.OBS_FREESPACE_MAX_DISTANCE),
+                    weather.visibility_m(float(spec.far)),
+                )
                 try:
-                    results = self._ground_truth(self.world, idx, spec)
+                    results = self._ground_truth(self.world, idx, spec, weather)
                     for slot in idx:
                         freespace[int(slot)] = self._freespace_gt(
-                            self.world,
-                            int(slot),
-                            spec,
-                            float(config.OBS_FREESPACE_MAX_DISTANCE),
+                            self.world, int(slot), spec, reach
                         )
                 except Exception:
                     if not self._ground_truth_failed:

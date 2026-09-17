@@ -1,6 +1,12 @@
 /** frame（20Hz）専用の可変バッファ。 */
 
-import type { FrameMessage, ObstacleState, Vec2, VehicleState } from '../types/protocol'
+import type {
+  FrameMessage,
+  ObstacleState,
+  Vec2,
+  VehicleState,
+  WeatherState,
+} from '../types/protocol'
 
 /** 補間に必要な 2 フレーム分 + 受信時刻を保持する箱 */
 export interface FrameBuffer {
@@ -30,7 +36,11 @@ export interface FrameBuffer {
   signals: number[]
   /** 現示が変わるたびに増える。3D 側はこれを見て灯色を塗り替える */
   signalVersion: number
+  /** いま効いている天候。weatherAuto の間は params ではなくこちらが正 */
+  weather: WeatherState
 }
+
+const CLEAR_WEATHER: WeatherState = { rain: 0, fog: 0, visibility: 120 }
 
 const EMPTY_ROUTES = new Map<number, Vec2[]>()
 const EMPTY_REVISIONS = new Map<number, number>()
@@ -49,6 +59,7 @@ export const frameBuffer: FrameBuffer = {
   obstacleVersion: 0,
   signals: [],
   signalVersion: 0,
+  weather: CLEAR_WEATHER,
 }
 
 /** 障害物集合の同一性を安く判定するための署名 */
@@ -110,6 +121,8 @@ export function pushFrame(frame: FrameMessage): void {
     }
   }
 
+  if (frame.weather) frameBuffer.weather = frame.weather
+
   frameBuffer.obstacles = frame.obstacles
   const sig = obstacleSignature(frame.obstacles)
   if (sig !== lastObstacleSig) {
@@ -133,6 +146,7 @@ export function resetFrameBuffer(): void {
   frameBuffer.obstacleVersion += 1
   frameBuffer.signals = []
   frameBuffer.signalVersion += 1
+  frameBuffer.weather = CLEAR_WEATHER
   lastObstacleSig = ''
 }
 

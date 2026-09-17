@@ -70,10 +70,22 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
     "obsDim": 57,
     "actionDim": 2
   },
+  "weatherPresets": [       // 天候の選択肢。**(rain, fog) の数値はここが唯一の出典**
+    { "id": "clear",     "rain": 0.0,  "fog": 0.0  },
+    { "id": "drizzle",   "rain": 0.35, "fog": 0.0  },
+    { "id": "rain",      "rain": 0.85, "fog": 0.0  },
+    { "id": "fog",       "rain": 0.0,  "fog": 0.75 },
+    { "id": "heavy_fog", "rain": 0.15, "fog": 0.95 }
+  ],
   "params": { /* 2.5 の SimParams と同じ形。現在値 */ },
   "status": { /* 2.4 の status ペイロードと同じ形 */ }
 }
 ```
+
+`weatherPresets` はクライアントが選択肢を並べるためのもので、**値は
+`backend/app/percep/weather.py` の `PRESETS` をそのまま流している**。
+上に書いた数値は例示であって出典ではない（表示名だけはクライアント側が持つ）。
+クライアントは選んだプリセットの `rain` / `fog` を `set_params` で送り返す。
 
 ### 2.2 `map` — マップ読込完了時に送信（サイズが大きい・低頻度）
 
@@ -192,6 +204,11 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
   "obstacles": [
     { "id": 3, "x": 1.0, "y": 2.0, "radius": 0.5 }
   ],
+  "weather": {                    // いま効いている天候（weatherAuto の間はサーバーが決める）
+    "rain": 0.35,                 // 雨の強さ 0.0〜1.0
+    "fog": 0.0,                   // 霧の濃さ 0.0〜1.0
+    "visibility": 120.0           // 有効視程 [m]。擬似カメラと正解ラベルが共有する
+  },
   "signals": [0, 2, 2, 1, ...],  // map.signals と同じ並び。0=青 / 1=黄 / 2=赤
   "detections": {                 // 画像認識の検出結果（キーは車両スロット番号の文字列）
     "3": [
@@ -223,6 +240,11 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
 - 一時停止（`set_render_paused`）中は `frame` を作らない。再開すると、止まっている間に
   変化した経路がまとめて次の `frame` に載る。**経路は「変化時のみ」送る仕様なので、
   ここで落とすと二度と届かない。**
+- `weather.visibility` は**擬似カメラの描画と正解ラベルの両方が使う唯一の視程**。
+  霧で遠方が白く沈むとき、正解ラベル側も同じ距離で打ち切られる
+  （見えないものにラベルが付くと、認識器から見てタスクが定義できなくなるため）。
+  `weatherAuto` が true の間、`params` の `weatherRain` / `weatherFog` は
+  **更新されない**ので、いま出ている天候はこの欄で見ること。
 
 **`detections`（画像認識の可視化）**
 
@@ -318,7 +340,10 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
     "rewardSignal": -60.0,    // 赤信号で停止線を越えたときの罰
     "rewardOverspeed": -5.0,  // 規制速度を超え始めたときの罰（-1000.0..0.0）
     "obeySignals": true,      // 信号に従わせるか（false なら罰だけで学習任せ）
-    "obeySpeedSigns": true    // 最高速度標識に従わせるか（false なら罰だけで学習任せ）
+    "obeySpeedSigns": true,   // 最高速度標識に従わせるか（false なら罰だけで学習任せ）
+    "weatherRain": 0.0,       // 雨の強さ 0.0〜1.0（画を濁らせる。視程は縮めない）
+    "weatherFog": 0.0,        // 霧の濃さ 0.0〜1.0（視程を縮める）
+    "weatherAuto": false      // true の間はサーバーが simTime から天候を決める
   }
 }
 ```
@@ -328,6 +353,11 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
 報酬がそれに支配されてしまう。車線逸脱の数え方と同じ考え方。
 `rewardSignal`（-60.0）より軽くしてあるのは、速度超過が事故に直結する度合いで
 赤信号無視に劣るためで、同格にすると停止挙動の学習を邪魔する。
+
+**天候は観測だけを濁らせる。報酬と終了条件は真値のまま**なので、霧で赤信号を
+見落として突っ込めば、そのとおり信号無視として罰が入る。
+`weatherAuto` が true のあいだ `weatherRain` / `weatherFog` は**送られてきた値のまま
+据え置かれる**（サーバーが上書きしない）。実際に効いている値は `frame.weather` で見ること。
 
 ### 2.6 `metrics` — 学習指標（既定 1Hz）
 
@@ -435,12 +465,12 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
 ```jsonc
 {
   "type": "detector",
-  "state": "collecting",   // idle|preparing|collecting|training|saving|done|error|cancelled
+  "state": "collecting",   // idle|preparing|evaluating|collecting|training|saving|done|error|cancelled
   "running": true,         // 学習スレッドが走っているか
   "message": "教師データを集めています（1200 / 2400 枚）",
   "progress": 0.5,         // ★ **いまの段階の**進捗。段階をまたいで通算しない
   "collected": 1200,
-  "samples": 2400,
+  "samples": 2400,         // ★ **いまの段階の**分母。採点中は採点に使う枚数（400）になる
   "epoch": 0,
   "epochs": 12,
   "batch": 0,
@@ -454,14 +484,33 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
   "presetName": "東京・銀座",
   "request": {             // 受け付けた依頼のエコー
     "mode": "full", "presetId": "ginza",
-    "samples": 2400, "epochs": 12, "batchSize": 32, "width": 1.0, "seed": 0
+    "samples": 2400, "epochs": 12, "batchSize": 32, "width": 1.0, "seed": 0,
+    "weatherMix": true,    // 晴れ以外の天候も混ぜて集めるか
+    "focusWeak": true      // 収集前に採点し、弱点を狙って集めるか
+  },
+  "evaluation": {          // 収集前の採点。測っていなければ null
+    "samples": 400,
+    "elapsedSec": 5.2,
+    "overallRecall": 0.584,
+    "classes": [
+      { "cls": 0, "name": "TRAFFIC_LIGHT", "truth": 231, "matched": 143,
+        "recall": 0.619, "attributeTotal": 143, "attributeOk": 85,
+        "attributeAccuracy": 0.594 }
+    ],
+    "weathers": [
+      { "name": "clear", "truth": 380, "matched": 307, "recall": 0.808 },
+      { "name": "fog",   "truth": 318, "matched": 51,  "recall": 0.160 }
+    ],
+    "weakest": "信号機 の成績が最も低い（37%）。霧でも落ちています"
   },
   "dataset": {             // 集めた教師データの内訳。集めていなければ null
     "samples": 2400,
     "objectCellRatio": 0.107,
     "objectsPerImage": 5.1,
     "classCounts": { "TRAFFIC_LIGHT": 2700, "SPEED_SIGN": 600,
-                     "VEHICLE": 1800, "OBSTACLE": 4800, "LANE": 2400 }
+                     "VEHICLE": 1800, "OBSTACLE": 4800, "LANE": 2400 },
+    "weatherCounts": { "clear": 720, "drizzle": 300, "rain": 300,
+                       "fog": 780, "heavy_fog": 300 }
   },
   "model": {               // data/detector/detector.keras
     "exists": true, "filename": "detector.keras", "sizeBytes": 1965573,
@@ -482,6 +531,18 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
 **`classCounts` で件数 0 のクラスは、学習しても検出できるようにならない。**
 症状は「走らせてみたら前の車を認識しない」という形でしか出ないので、
 サーバーは `warning` にも入れて返す。
+
+`collected` / `samples` は**いまの段階のもの**で、段階をまたいで通算しない。
+採点中（`evaluating`）は「200 / 400 枚」、収集中（`collecting`）は「1,200 / 2,400 枚」と
+分母が変わる。片方だけを段階に追随させると、採点しているのに収集の枚数が分母に出る。
+
+**`evaluation` は「いまの認識器の成績」であって、これから学習するモデルの成績ではない。**
+収集の**前**に現行の `detector.keras` を採点したもので、その結果がそのまま次の収集の
+重みになる（成績の低いクラス・天候ほど多く集める）。`focusWeak` が false のとき、
+および認識器がまだ 1 つも無いときは `null`。
+`classes[].recall` は「真値にある物体のうち検出できた割合」、
+`attributeAccuracy` は「検出できたもののうち灯色・規制速度まで合っていた割合」で、
+属性を持たないクラス（車両・障害物・車線）では `attributeTotal` が 0 になる。
 
 `model.inUse` は**ファイルがあるか**ではなく**いま実際に使っているか**である。
 マップを読み込んだ瞬間（`SimulationEnv` が認識器を読むとき）や、学習完了後の
@@ -509,7 +570,8 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
 { "type": "start_detector_training",                          // 認識器（CNN）を学習する
   "request": { "mode": "full", "presetId": "ginza",
                "samples": 2400, "epochs": 12, "batchSize": 32,
-               "width": 1.0, "seed": 0 } }
+               "width": 1.0, "seed": 0,
+               "weatherMix": true, "focusWeak": true } }
 { "type": "cancel_detector_training" }                        // 中断（すぐには止まらない）
 { "type": "ping" }                                            // → {"type":"pong","t":<server epoch ms>}
 ```
@@ -539,6 +601,12 @@ asyncio 側から触ると更新中の重みを壊す）。
 - 値域（2.9 の `limits`）を外れた値は**丸めずに** `INVALID_MESSAGE` で弾く。
   `set_params` と違い、押した瞬間に数十分動き出す操作なので、
   指定と違う値で走り出すほうが危ないため。
+- `weatherMix` は晴れ以外の天候（小雨・雨・霧・濃霧）も混ぜて集めるかどうか。
+  **走行中の天候（`params.weatherRain` / `weatherFog`）とは無関係**で、
+  収集は収集で天候を選び直す。
+- `focusWeak` は収集の前に現行の認識器を採点し、**成績の低いクラスと天候を多めに
+  集める**かどうか。採点の結果は `detector.evaluation` に載る。認識器がまだ無い
+  初回は採点をとばして一様に集める（採点する相手がいないため）。
 - **認識器の学習中は `load_map` を受け付けない**（`DETECTOR_TRAINING` で断る）。
   ジョブは開始時に借りたマップの参照を握り続けるので、通すと
   「収集は元のエリアのまま、画面だけ新しいエリア」という食い違いが起きる。
