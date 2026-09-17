@@ -236,13 +236,15 @@ opacity だけ**（出典はこの文書。以前は `ui/motion.ts` の冒頭に
 幅・高さ・影を毎フレーム変える演出を足すとシミュレータ側のフレームが落ちます。
 例外はタブのインジケータ（絶対配置の 1 要素なのでレイアウトが波及しない）。
 
-★ **いまこの規約を破っているものが 2 つあります**（どちらも今回の天候・弱点収集とは
-別の、パネル刷新のときに入ったもの）。直すときはここを消すこと。
+★ **一度この規約を破っていたので、直した形を残しておきます。**
 
-| どこ | 何が起きるか |
+| どこ | 守ること |
 |---|---|
-| `styles/global.css` の `.m3-collapse` | `grid-template-rows` と `margin-block-start` を 250ms かけて動かす。`Collapse` はカードの中身を丸ごと包むので、開閉のたびにパネル全体が 250ms レイアウトし直される |
-| `ui/motion.ts` の `restartAnimation()` | `void el.offsetWidth` で同期レイアウトを強制する。`ValueFlash` が毎秒のメトリクス更新ごとに呼ぶので、パネルを開いていると**毎秒 10〜15 回**の強制リフローになる |
+| `Collapse`（`.m3-collapse`）| **高さ（`grid-template-rows`）と margin を遷移させない。** カードの中身を丸ごと包むので、遷移させると開閉のたびにパネル全体が 250ms レイアウトし直されます。高さは 1 回で切り替え、滑らかさは `.m3-collapse-inner` の transform と opacity で出します |
+| `ValueFlash`（`restartValueFlash()`）| **`void el.offsetWidth` で巻き戻さない。** 数字は毎秒届き、パネル 1 枚に 9 個あるので、毎秒 10〜15 回の強制リフローになります。`getAnimations()` を**アニメーション名で絞って**時計を戻すこと（名前を見ないと、選択中のチップの拡大まで巻き戻します）。**`requestAnimationFrame` で付け直す形も不可**で、前面でないタブでは rAF が回らず、クラスが外れたまま戻りません |
+
+押した瞬間だけの演出（`startRipple` → `restartAnimation()`）は `void el.offsetWidth` のままです。
+pointerdown のときしか走らないので、1 回ぶんのリフローは無視できます。
 
 **バックエンド無しでフロントだけ触るとき**は `npm run dev` で開いて URL に `?mock=1` を
 付けます（DEV ビルドのみ。本番では `isMockRequested()` が常に false を返す）。

@@ -1805,16 +1805,17 @@ button.m3-chip:active:not(:disabled) {
   }
 }
 
+/* 高さ（grid-template-rows）と margin は**遷移させない**。
+   Collapse はカードの中身を丸ごと包むので、遷移させるとパネル全体が
+   その間ずっとレイアウトし直され、同じメインスレッドの 3D のフレームを削る。
+   高さは 1 回で切り替え、滑らかさは transform と opacity だけで出す。 */
 .m3-collapse {
   display: grid;
   grid-template-rows: 0fr;
   opacity: 0;
 
   margin-block-start: calc(-1 * var(--m3-collapse-gap, 10px));
-  transition:
-    grid-template-rows var(--m3-dur-medium) var(--m3-ease-emphasized),
-    margin-block-start var(--m3-dur-medium) var(--m3-ease-emphasized),
-    opacity var(--m3-dur-short) var(--m3-ease-standard);
+  transition: opacity var(--m3-dur-short) var(--m3-ease-standard);
 }
 .m3-collapse[data-open='true'] {
   grid-template-rows: 1fr;
@@ -1827,6 +1828,18 @@ button.m3-chip:active:not(:disabled) {
 
   padding: 3px;
   margin: -3px;
+
+  transform: translateY(-6px);
+  transition: transform var(--m3-dur-medium) var(--m3-ease-emphasized);
+}
+.m3-collapse[data-open='true'] .m3-collapse-inner {
+  transform: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .m3-collapse,
+  .m3-collapse-inner {
+    transition: none;
+  }
 }
 
 .m3-valueflash {
