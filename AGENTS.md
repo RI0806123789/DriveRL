@@ -55,7 +55,7 @@ Python は `backend/.venv`、Node は `frontend/`。詳しいコマンドは `CL
 cd frontend
 npm run typecheck   # tsc --noEmit
 npm run build       # typecheck + vite build
-npm run verify      # 3D の幾何検証 8 本（ブラウザ不要）
+npm run verify      # 3D の幾何検証 9 本（ブラウザ不要）
 ```
 
 `npm run verify` がある理由は、**3D の向きは間違っていても型チェックもビルドも通る**からです。

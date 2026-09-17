@@ -8,6 +8,12 @@ export interface ScenePalette {
   /** フォグの開始・終了距離 [m] */
   readonly fogNear: number
   readonly fogFar: number
+  /** 雨のときに空とフォグを寄せる色。暗く濁らせる */
+  readonly rainSky: string
+  /** 霧のときに空とフォグを寄せる色。擬似カメラ側の霧色と揃える */
+  readonly fogVeil: string
+  /** 雨粒の色 */
+  readonly rainDrop: string
   /** 地面の色 */
   readonly ground: string
   /** グリッドの色（中心線・目盛り） */
@@ -72,6 +78,9 @@ export const DARK_SCENE: ScenePalette = {
   sky: '#0e1216',
   fogNear: 600,
   fogFar: 2600,
+  rainSky: '#070a0d',
+  fogVeil: '#39424b',
+  rainDrop: '#9fb6c9',
   ground: '#1a1f24',
   gridMajor: '#4a545e',
   gridMinor: '#2b333b',
@@ -115,6 +124,9 @@ export const LIGHT_SCENE: ScenePalette = {
   sky: '#a9c4dd',
   fogNear: 700,
   fogFar: 2800,
+  rainSky: '#6d7a88',
+  fogVeil: '#ced2d6',
+  rainDrop: '#e8eef4',
   ground: '#9fa8a6',
   gridMajor: '#767f86',
   gridMinor: '#8f979d',

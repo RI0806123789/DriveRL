@@ -30,8 +30,8 @@ venv のパスを埋めるだけの薄いラッパーで、中身は `backend/ru
 cd frontend
 npm run typecheck       # tsc --noEmit
 npm run build           # typecheck + vite build
-npm run verify          # 幾何検証 8 本をまとめて実行（ブラウザ不要）
-npm run verify:signals  # 1 本だけ（他: speedsigns / camera / colors / vehicles / sun / detections / markings）
+npm run verify          # 幾何検証 9 本をまとめて実行（ブラウザ不要）
+npm run verify:signals  # 1 本だけ（他: speedsigns / camera / colors / vehicles / sun / detections / markings / weather）
 npm run icons           # PWA アイコンを再生成（public/icon-*.png。手で描かない）
 npm run dev             # Vite だけ立てる。?mock=1 でバックエンド無しでも動く（後述）
 
@@ -150,6 +150,20 @@ Web UI（`runtime/detector_job.py` →「モデル作成」タブ）が同じ関
   いま出ている天候は `frame.weather` で見ること（`docs/protocol.md` 2.3）
 - **観測だけが濁り、報酬と終了条件は真値のまま。** 霧で赤信号を見落として進めば、
   そのとおり信号無視として罰が入ります
+
+**3D 側（`scene/weatherView.ts`）にも同じ天候を描きます。** 擬似カメラだけに掛けると、
+利用者から見て**天候を切り替えても画面が何も変わりません**（実際にそうなっていました）。
+計算は React から切り離した純粋関数に置き、`npm run verify:weather` が数値で確かめます。
+
+- **視程をそのまま 3D のフォグにしないこと。** 視程は「運転席から前を見た距離」なので、
+  300m 上空の俯瞰へ適用すると**街が 1 つも見えない真っ暗な画**になります。
+  `fogLift()` が視点の高さで緩めます（運転席・追従は視程どおり、俯瞰は遠くが霞む程度）
+- **晴れの遠景フォグ（数 km）と霧（数十 m）は幾何補間でつなぐこと**（`blendDistance()`）。
+  線形に混ぜると桁が違いすぎて、霧が濃くなるまでほとんど効きません
+- **雨を 3D 空間の粒にしないこと。** 俯瞰では 1 画素にも満たず見えません。
+  カメラの直前に貼った板へシェーダーで描けば、俯瞰でも運転席でも同じように見えます
+- フォグ・明るさ・雨は `useFrame` から `frameBuffer.weather` を読んで**変わったときだけ**
+  差し替えます（20Hz の天候を zustand に入れない、という `frame` と同じ扱い）
 
 **不変条件**:
 
