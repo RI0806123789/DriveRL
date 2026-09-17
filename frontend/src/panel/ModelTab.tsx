@@ -5,6 +5,7 @@ import { send } from '../store/connection'
 import { formatBytes } from '../store/exportModel'
 import { useSimStore } from '../store/simStore'
 import type { DetectorHistoryPoint, DetectorMessage, DetectorMode } from '../types/protocol'
+import { WEATHER_LABELS } from '../types/protocol'
 import { MetricsChart } from './MetricsChart'
 import { Button } from '../ui/Button'
 import { Card } from '../ui/Card'
@@ -53,15 +54,6 @@ const CLASS_LABEL: Record<string, string> = {
   VEHICLE: '車両',
   OBSTACLE: '障害物',
   LANE: '車線',
-}
-
-/** 天候プリセットの日本語名。**バックエンドの `percep.weather.PRESETS` のキー。** */
-const WEATHER_LABEL: Record<string, string> = {
-  clear: '晴れ',
-  drizzle: '小雨',
-  rain: '雨',
-  fog: '霧',
-  heavy_fog: '濃霧',
 }
 
 /** 集める枚数から、おおよその所要時間を見積もる（銀座での実測が元）。 */
@@ -541,7 +533,7 @@ export function ModelTab() {
           <div className="m3-statgrid">
             {evaluation.weathers.map((w) => (
               <div className="m3-stat" key={w.name}>
-                <span className="m3-stat-label">{WEATHER_LABEL[w.name] ?? w.name}</span>
+                <span className="m3-stat-label">{WEATHER_LABELS[w.name] ?? w.name}</span>
                 <span
                   className={`m3-stat-value${w.recall < 0.5 ? ' m3-stat-value--error' : ''}`}
                 >
@@ -584,7 +576,7 @@ export function ModelTab() {
               <div className="m3-row m3-row--wrap">
                 {Object.entries(dataset.weatherCounts).map(([name, count]) => (
                   <Chip key={name} small>
-                    {WEATHER_LABEL[name] ?? name} {count.toLocaleString()} 枚
+                    {WEATHER_LABELS[name] ?? name} {count.toLocaleString()} 枚
                   </Chip>
                 ))}
               </div>

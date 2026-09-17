@@ -2,10 +2,23 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
 
 import numpy as np
+
+logger = logging.getLogger("autoware_sim")
+
+_WARNED: set[str] = set()
+
+
+def _warn_once(key: str, message: str) -> None:
+    """同じ失敗を初回だけログに残す（code_review B-15）。"""
+    if key in _WARNED:
+        return
+    _WARNED.add(key)
+    logger.error(message)
 
 __all__ = [
     "AUTO_PERIOD_SEC",
@@ -157,7 +170,13 @@ def apply_weather(
     _, height, width, _ = out.shape
 
     fog = float(min(max(weather.fog, 0.0), 1.0))
-    if fog > 1e-3 and depth is not None:
+    if fog > 1e-3 and depth is None:
+        _warn_once(
+            "fog_without_depth",
+            "奥行きが無いため霧を掛けられませんでした。視程だけが縮んだ画になり、"
+            "**見えているのに正解ラベルが付かない**物体が出ます（初回のみ記録）",
+        )
+    elif fog > 1e-3 and depth is not None:
         density = FOG_EXTINCTION / max(weather.visibility_m(far), 1e-3)
         keep = np.exp(np.multiply(depth, -density, dtype=np.float32))
         out *= keep[..., None]

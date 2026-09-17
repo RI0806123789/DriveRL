@@ -1147,7 +1147,8 @@ class PseudoCamera:
         hh = hh[idx]
         ell = ell[idx]
         lbl = lbl[idx]
-        depth = depth[idx]
+        if depth_buf is not None:
+            depth = depth[idx]
         y0 = np.clip(y0[idx], 0, h - 1)
         y1 = np.clip(y1[idx], 0, h - 1)
 

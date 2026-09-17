@@ -412,9 +412,6 @@ class SimulationEnv:
         self._ensure_percep()
         spec = self._camera_spec
         weather = self.weather
-        reach = min(
-            float(config.OBS_FREESPACE_MAX_DISTANCE), weather.visibility_m(float(spec.far))
-        )
         freespace: dict[int, np.ndarray] = {}
         results: list[PerceptionResult] | None = None
 
@@ -427,14 +424,29 @@ class SimulationEnv:
                 for i, slot in enumerate(idx):
                     freespace[int(slot)] = free_arr[i]
             except Exception:
+                # ★ ここで手放さないと「観測の出どころ: CNN の認識結果」と出したまま
+                #   真値で走り続ける（画面が嘘をつく）。おまけに毎ステップ擬似カメラを
+                #   描いて推論を試み続けるので、落ちた分だけ遅くなる。
+                #   直すには「モデル作成」タブから読み込み直す（reload_detector）。
+                self._detector = None
+                self._camera = None
                 if not self._detector_failed:
                     self._detector_failed = True
-                    logger.exception("認識器の推論に失敗しました。真値で代用します")
+                    logger.exception(
+                        "認識器の推論に失敗しました。以後は真値で代用します"
+                        "（「モデル作成」タブで学習し直すと元に戻ります）"
+                    )
                 results = None
                 freespace.clear()
 
         if results is None and config.PERCEP_FALLBACK_GROUND_TRUTH:
             if self._ground_truth is not None and self._freespace_gt is not None:
+                # 認識器を使う経路では CNN の出力をそのまま使う（画から判断させる）。
+                # 視程で頭打ちにするのは真値で代用するこちら側だけ。
+                reach = min(
+                    float(config.OBS_FREESPACE_MAX_DISTANCE),
+                    weather.visibility_m(float(spec.far)),
+                )
                 try:
                     results = self._ground_truth(self.world, idx, spec, weather)
                     for slot in idx:

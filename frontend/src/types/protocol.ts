@@ -105,6 +105,15 @@ export interface WeatherPreset {
   fog: number
 }
 
+/** 天候プリセットの表示名。**キーはバックエンドの `percep.weather.PRESETS` と同じ。** */
+export const WEATHER_LABELS: Record<string, string> = {
+  clear: '晴れ',
+  drizzle: '小雨',
+  rain: '雨',
+  fog: '霧',
+  heavy_fog: '濃霧',
+}
+
 export interface MapBounds {
   minX: number
   maxX: number

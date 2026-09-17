@@ -746,9 +746,13 @@ class SimulationEngine:
         metrics_interval = 1.0 / max(0.1, float(config.METRICS_HZ))
         metrics = None
         network = None
+        detector_active = None
         if (now - self._last_metrics_at) >= metrics_interval:
             self._last_metrics_at = now
             metrics = self._build_metrics(trainer.updates)
+            # 推論が落ちて真値へ落ちたことがあるので、載せ替えのときだけでなく
+            # ここでも取り直す（`model.inUse` は「いま実際に使っているか」）
+            detector_active = env.detector_active
             try:
                 network = trainer.network_snapshot()
             except Exception:  # noqa: BLE001 - 可視化のために学習を止めない
@@ -761,6 +765,8 @@ class SimulationEngine:
                 self._metrics = metrics
             if network is not None:
                 self._network = network
+            if detector_active is not None:
+                self._detector_active = detector_active
             render_paused = self._render_paused
 
         interval = 1.0 / max(1.0, float(config.FRAME_HZ))

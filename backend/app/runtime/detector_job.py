@@ -186,6 +186,9 @@ class _Progress:
     preset_name: str | None = None
     progress: float = 0.0
     collected: int = 0
+    #: いまの段階の分母。0 なら収集の枚数（`request.samples`）を使う。
+    #: 採点は 400 枚で走るので、ここを分けないと「200 / 2,400 枚」と出てしまう。
+    stage_total: int = 0
     epoch: int = 0
     batch: int = 0
     batches: int = 0
@@ -273,7 +276,9 @@ class DetectorTrainingJob:
                 "message": p.message,
                 "progress": float(max(0.0, min(1.0, p.progress))),
                 "collected": int(p.collected),
-                "samples": int(p.request.samples) if p.request else 0,
+                "samples": int(
+                    p.stage_total or (p.request.samples if p.request else 0)
+                ),
                 "epoch": int(p.epoch),
                 "epochs": int(p.request.epochs) if p.request else 0,
                 "batch": int(p.batch),
@@ -439,6 +444,7 @@ class DetectorTrainingJob:
             message=f"{preset_name} を走らせて教師データを集めています",
             progress=0.0,
             collected=0,
+            stage_total=0,
         )
 
         started = time.perf_counter()
@@ -503,6 +509,7 @@ class DetectorTrainingJob:
             message="いまの認識器の弱点を測っています",
             progress=0.0,
             collected=0,
+            stage_total=EVAL_SAMPLES,
         )
         evaluation = evaluate_detector(
             index,

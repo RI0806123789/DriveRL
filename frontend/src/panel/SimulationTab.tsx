@@ -5,6 +5,7 @@ import { send } from '../store/connection'
 import { frameBuffer } from '../store/frameBuffer'
 import { useSimStore } from '../store/simStore'
 import type { InteractionMode } from '../store/simStore'
+import { WEATHER_LABELS } from '../types/protocol'
 import { vehicleColor } from '../scene/vehicleColors'
 import { Button } from '../ui/Button'
 import { Card } from '../ui/Card'
@@ -70,15 +71,6 @@ const INTERACTIONS: Array<{ id: InteractionMode; label: string; icon: React.Reac
   { id: 'obstacle', label: '障害物を置く', icon: <ConeIcon size={16} /> },
   { id: 'vehicle', label: '車両を追加', icon: <CarIcon size={16} /> },
 ]
-
-/** 天候プリセットの表示名。**値そのものは init の weatherPresets が出典。** */
-const WEATHER_LABELS: Record<string, string> = {
-  clear: '晴れ',
-  drizzle: '小雨',
-  rain: '雨',
-  fog: '霧',
-  heavy_fog: '濃霧',
-}
 
 export function SimulationTab() {
   const params = useSimStore((s) => s.params)
