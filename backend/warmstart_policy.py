@@ -22,8 +22,11 @@ from app.rl.warmstart import (
     DEFAULT_EPOCHS,
     DEFAULT_LR,
     DEFAULT_STEPS,
+    WARMSTART_STD,
     collect_expert,
     fit_policy,
+    fit_value,
+    set_exploration,
 )
 from app.sim.env import SimulationEnv
 
@@ -61,6 +64,7 @@ def main() -> int:
     parser.add_argument("--lr", type=float, default=DEFAULT_LR)
     parser.add_argument("--vehicles", type=int, default=8)
     parser.add_argument("--check-steps", type=int, default=1200)
+    parser.add_argument("--std", type=float, default=WARMSTART_STD)
     parser.add_argument("--no-backup", action="store_true")
     args = parser.parse_args()
 
@@ -72,11 +76,14 @@ def main() -> int:
     env.reset_all()
 
     print(f"教師データを集めます（{args.preset} / {args.steps} ステップ）")
-    obs, actions = collect_expert(env, int(args.steps))
-    if obs.shape[0] == 0:
+    data = collect_expert(env, int(args.steps))
+    if len(data) == 0:
         print("走れる車両がいませんでした")
         return 1
-    print(f"  {obs.shape[0]} 件（アクセルの平均 {actions[:, 0].mean():+.3f}）")
+    print(
+        f"  {len(data)} 件（アクセルの平均 {data.actions[:, 0].mean():+.3f} / "
+        f"リターンの平均 {data.returns.mean():+.1f}）"
+    )
 
     hidden = peek_hidden_sizes(config.CHECKPOINT_PATH) if config.CHECKPOINT_PATH.exists() else None
     trainer = PPOTrainer(
@@ -95,16 +102,31 @@ def main() -> int:
         shutil.copy2(config.CHECKPOINT_PATH, backup)
         print(f"  元の重みを {backup.name} へ控えました")
 
-    print("\n回帰します")
-    result = fit_policy(
+    print("\n方策を回帰します")
+    fitted = fit_policy(
         trainer,
-        obs,
-        actions,
+        data,
         epochs=int(args.epochs),
         batch_size=int(args.batch),
         lr=float(args.lr),
     )
-    print(f"  損失 {result.first_loss:.5f} → {result.last_loss:.5f}")
+    print(f"  損失 {fitted.first_loss:.5f} → {fitted.last_loss:.5f}")
+
+    # ★ 価値関数も必ず合わせること。方策だけ差し替えると、走り出した瞬間に
+    #   予測と実測が食い違って advantage が暴れ、1〜2 更新で方策が吹き飛ぶ
+    print("\n価値関数を回帰します")
+    valued = fit_value(
+        trainer,
+        data,
+        epochs=int(args.epochs),
+        batch_size=int(args.batch),
+        lr=float(args.lr),
+    )
+    print(f"  損失 {valued.first_loss:.1f} → {valued.last_loss:.1f}")
+
+    if float(args.std) > 0:
+        std = set_exploration(trainer, float(args.std))
+        print(f"\n探索ノイズを {std:.3f} に揃えました")
 
     # ★ 集めた分の経験は方策と食い違うので必ず捨てる（PPO は方策オン）
     trainer.reset_rollout()
