@@ -1,19 +1,25 @@
 /** スマホ画面の 2D 地図の座標変換を検証する（ブラウザ不要）。 */
 
 import {
+  FIT_MIN_SPAN_M,
   ZOOM_MAX,
   ZOOM_MIN,
+  baseScale,
   boundsCenter,
   clampCenter,
   clampZoom,
   createProjection,
+  fitView,
+  layerPlacement,
+  lerpView,
   toCanvasX,
   toCanvasY,
   toEnu,
+  viewsClose,
   visibleBounds,
   zoomAround,
 } from '../src/panel/taxiMapMath.ts'
-import type { MapBounds } from '../src/types/protocol.ts'
+import type { MapBounds, Vec2 } from '../src/types/protocol.ts'
 
 let failures = 0
 
@@ -138,6 +144,165 @@ console.log('='.repeat(70))
     '中心はマップの範囲から出ない',
     far.centerX === GINZA.maxX && far.centerY === GINZA.minY,
     `(${far.centerX}, ${far.centerY})`,
+  )
+}
+
+console.log()
+console.log('='.repeat(70))
+console.log('配車に合わせた自動ズーム')
+console.log('='.repeat(70))
+
+{
+  const empty = fitView(GINZA, [], W, H)
+  const [cx, cy] = boundsCenter(GINZA)
+  check(
+    '収めるものが無ければマップ全体へ戻る',
+    empty.zoom === ZOOM_MIN && empty.centerX === cx && empty.centerY === cy,
+    `zoom ${empty.zoom}`,
+  )
+
+  const pair: Vec2[] = [
+    [-200, -150],
+    [120, 90],
+  ]
+  const fitted = fitView(GINZA, pair, W, H)
+  const p = createProjection(GINZA, W, H, fitted)
+  const inside = pair.every(([x, y]) => {
+    const cxp = toCanvasX(p, x)
+    const cyp = toCanvasY(p, y)
+    return cxp >= 0 && cxp <= W && cyp >= 0 && cyp <= H
+  })
+  check('2 点が画面の中に収まる', inside)
+  check(
+    '中心が 2 点の真ん中に来る',
+    Math.abs(fitted.centerX - (pair[0][0] + pair[1][0]) / 2) < 1e-9 &&
+      Math.abs(fitted.centerY - (pair[0][1] + pair[1][1]) / 2) < 1e-9,
+  )
+  check('全体表示より寄っている', fitted.zoom > ZOOM_MIN, `zoom ${fitted.zoom.toFixed(2)}`)
+
+  // 余白: 2 点がちょうど端に貼り付かないこと
+  const margin = Math.min(
+    toCanvasX(p, pair[0][0]),
+    W - toCanvasX(p, pair[1][0]),
+    toCanvasY(p, pair[1][1]),
+    H - toCanvasY(p, pair[0][1]),
+  )
+  check('端に貼り付かず余白が残る', margin > 10, `最小の余白 ${margin.toFixed(1)}px`)
+}
+
+{
+  // 1 点だけのときに寄りすぎないこと（乗車地点で待っている場面）
+  const single = fitView(GINZA, [[50, -50]], W, H)
+  const p = createProjection(GINZA, W, H, single)
+  const spanM = W / p.scale
+  check(
+    `1 点でも ${FIT_MIN_SPAN_M}m 程度は見渡せる`,
+    spanM >= FIT_MIN_SPAN_M * 0.9,
+    `画面の横幅 ${spanM.toFixed(0)}m`,
+  )
+}
+
+{
+  // 金沢（12.3km 四方）で 300m の区間へ寄る。**エリアが広いほど大きな倍率が要る**
+  const near = fitView(KANAZAWA, [[0, 0], [200, 220]], W, H)
+  check(
+    '広いマップでも寄れる（上限で頭打ちにならない）',
+    near.zoom < ZOOM_MAX,
+    `zoom ${near.zoom.toFixed(1)} / 上限 ${ZOOM_MAX}`,
+  )
+  const p = createProjection(KANAZAWA, W, H, near)
+  check('寄った先の 1px が 2m 未満', 1 / p.scale < 2, `${(1 / p.scale).toFixed(2)} m/px`)
+
+  const tightest = createProjection(KANAZAWA, W, H, { zoom: ZOOM_MAX, centerX: 0, centerY: 0 })
+  check(
+    '上限まで寄れば交差点 1 つぶん（200m 以下）は見える',
+    W / tightest.scale <= 200,
+    `画面の横幅 ${(W / tightest.scale).toFixed(0)}m`,
+  )
+}
+
+console.log()
+console.log('='.repeat(70))
+console.log('見え方の補間とレイヤの貼り替え')
+console.log('='.repeat(70))
+
+{
+  const from: { zoom: number; centerX: number; centerY: number } = { zoom: 1, centerX: 0, centerY: 0 }
+  const to = { zoom: 16, centerX: 300, centerY: -200 }
+  check('t=0 は始点そのもの', lerpView(from, to, 0).zoom === from.zoom)
+  check('t=1 は終点そのもの', Math.abs(lerpView(from, to, 1).zoom - to.zoom) < 1e-9)
+
+  const mid = lerpView(from, to, 0.5)
+  check(
+    '倍率は対数の中点（線形だと寄りが跳ねる）',
+    Math.abs(mid.zoom - 4) < 1e-9,
+    `zoom ${mid.zoom.toFixed(3)}（線形なら 8.5）`,
+  )
+  check('中心は線形の中点', Math.abs(mid.centerX - 150) < 1e-9 && Math.abs(mid.centerY + 100) < 1e-9)
+  check('範囲外の t は 0〜1 に丸める', lerpView(from, to, -5).zoom === from.zoom)
+
+  // 指数収束で寄せると必ず近づく（行き過ぎない）
+  let cur = from
+  for (let i = 0; i < 200; i++) cur = lerpView(cur, to, 0.1)
+  const p = createProjection(GINZA, W, H, to)
+  check('繰り返し寄せると目標に収束する', viewsClose(cur, to, p.scale), `zoom ${cur.zoom.toFixed(3)}`)
+}
+
+{
+  const a = { zoom: 4, centerX: 10, centerY: 10 }
+  const p = createProjection(GINZA, W, H, a)
+  check('同じ見え方は「近い」と判定する', viewsClose(a, a, p.scale))
+  check(
+    '1px 動いただけでも「まだ動いている」とみなす',
+    !viewsClose(a, { ...a, centerX: 10 + 2 / p.scale }, p.scale),
+  )
+}
+
+{
+  // 別の倍率で描いたレイヤを貼り直しても、地物の位置がずれないこと
+  const layerView = { zoom: 2, centerX: 0, centerY: 0 }
+  const currentView = { zoom: 5, centerX: 40, centerY: -25 }
+  const layer = createProjection(GINZA, W, H, layerView)
+  const current = createProjection(GINZA, W, H, currentView)
+  const place = layerPlacement(layer, current)
+
+  let worst = 0
+  for (const [x, y] of [[0, 0], [60, 40], [-120, 75]] as Vec2[]) {
+    // レイヤ内での位置 → 貼り付け後の画面位置
+    const inLayerX = toCanvasX(layer, x)
+    const inLayerY = toCanvasY(layer, y)
+    const pastedX = place.dx + (inLayerX / layer.width) * place.dw
+    const pastedY = place.dy + (inLayerY / layer.height) * place.dh
+    worst = Math.max(
+      worst,
+      Math.abs(pastedX - toCanvasX(current, x)),
+      Math.abs(pastedY - toCanvasY(current, y)),
+    )
+  }
+  check('貼り替えても地物が同じ画素に乗る', worst < 1e-6, `最大差 ${worst.toExponential(1)}px`)
+  check(
+    '倍率が上がったぶんだけ引き伸ばされる',
+    Math.abs(place.dw / layer.width - current.scale / layer.scale) < 1e-9,
+    `${(place.dw / layer.width).toFixed(3)} 倍`,
+  )
+}
+
+{
+  const same = createProjection(GINZA, W, H, { zoom: 3, centerX: 5, centerY: -5 })
+  const place = layerPlacement(same, same)
+  check(
+    '同じ見え方なら等倍で原点に貼る',
+    Math.abs(place.dx) < 1e-9 &&
+      Math.abs(place.dy) < 1e-9 &&
+      Math.abs(place.dw - W) < 1e-9 &&
+      Math.abs(place.dh - H) < 1e-9,
+  )
+}
+
+{
+  check(
+    '倍率 1 の 1px は、マップ全体を画面に収めた大きさ',
+    Math.abs(baseScale(GINZA, W, H) - createProjection(GINZA, W, H, { zoom: 1, centerX: 0, centerY: 0 }).scale) < 1e-12,
   )
 }
 

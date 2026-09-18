@@ -2411,3 +2411,101 @@ button.m3-chip:active:not(:disabled) {
     animation-duration: 1ms !important;
   }
 }
+
+/* --- 実用モードの画面遷移。**transform と opacity だけ**を動かす（決定 13 と同じ軸） --- */
+
+.taxi-headline {
+  animation: m3-taxi-line-in var(--m3-dur-medium) var(--m3-ease-emphasized-decel) both;
+}
+
+/* 乗れる・降りられる瞬間だけ、ゆっくり息をさせて気づかせる */
+.taxi-headline[data-alert='true'] {
+  animation:
+    m3-taxi-line-in var(--m3-dur-medium) var(--m3-ease-emphasized-decel) both,
+    m3-taxi-breathe 1.8s var(--m3-ease-standard) 240ms infinite;
+  transform-origin: left center;
+}
+
+.taxi-message {
+  animation: m3-taxi-line-in var(--m3-dur-short) var(--m3-ease-emphasized-decel) both;
+}
+
+.taxi-actions > * {
+  animation: m3-taxi-action-in var(--m3-dur-medium) var(--m3-ease-spring-soft) both;
+}
+.taxi-actions > *:nth-child(2) {
+  animation-delay: var(--m3-stagger);
+}
+
+@keyframes m3-taxi-line-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes m3-taxi-breathe {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.025);
+  }
+}
+
+@keyframes m3-taxi-action-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* 手で動かしたときだけ出る「自動に戻す」 */
+.taxi-map-recenter {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 7px 14px;
+  border: 1px solid var(--m3-outline-variant);
+  border-radius: var(--m3-shape-full);
+  background: color-mix(in srgb, var(--m3-surface-container-high) 92%, transparent);
+  backdrop-filter: blur(8px);
+  color: var(--m3-on-surface);
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    transform var(--m3-dur-medium) var(--m3-ease-spring),
+    opacity var(--m3-dur-short) var(--m3-ease-emphasized);
+}
+.taxi-map-recenter[data-visible='false'] {
+  opacity: 0;
+  transform: translateY(8px) scale(0.92);
+  pointer-events: none;
+}
+.taxi-map-recenter:hover {
+  transform: scale(1.04);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .taxi-headline,
+  .taxi-headline[data-alert='true'],
+  .taxi-message,
+  .taxi-actions > *,
+  .taxi-map-recenter {
+    animation: none !important;
+    transition-duration: 1ms !important;
+  }
+}

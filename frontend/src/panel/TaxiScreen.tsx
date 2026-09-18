@@ -106,7 +106,14 @@ export function TaxiScreen() {
         />
 
         <div className="taxi-phone-body">
-          <div className="taxi-headline">{headline}</div>
+          {/* ★ key は「段階」で切る。ETA を含めると毎秒アニメーションして落ち着かない */}
+          <div
+            className="taxi-headline"
+            key={`${taxi.phase}:${picking ?? '-'}:${ready}`}
+            data-alert={taxi.phase === 'waiting' || taxi.phase === 'arrived' ? 'true' : 'false'}
+          >
+            {headline}
+          </div>
 
           <div className="taxi-meta">
             {taxi.phase !== 'idle' && (
@@ -127,7 +134,11 @@ export function TaxiScreen() {
             )}
           </div>
 
-          {taxi.message && <div className="taxi-message">{taxi.message}</div>}
+          {taxi.message && (
+            <div className="taxi-message" key={taxi.message}>
+              {taxi.message}
+            </div>
+          )}
 
           {!status.mapLoaded && (
             <div className="taxi-warning">
@@ -136,7 +147,10 @@ export function TaxiScreen() {
             </div>
           )}
 
-          <div className="taxi-actions">
+          <div
+            className="taxi-actions"
+            key={`${riding}:${waiting}:${ready}:${picking ?? '-'}`}
+          >
             {riding ? (
               <Button variant="filled" block onClick={() => send({ type: 'alight_taxi' })}>
                 降車する

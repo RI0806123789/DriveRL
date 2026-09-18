@@ -1,14 +1,17 @@
 /** スマホ画面の 2D 地図（Canvas）。**3D シーンは使わず自前で描く**（決定 10）。 */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
-import { frameBuffer } from '../store/frameBuffer'
+import { frameBuffer, getLatestVehicle } from '../store/frameBuffer'
 import { pedestrian } from '../store/pedestrian'
 import { useSimStore } from '../store/simStore'
 import { usePalette } from '../scene/usePalette'
 import { vehicleColor } from '../scene/vehicleColors'
+import { TargetIcon } from '../ui/Icons'
 import type { Vec2 } from '../types/protocol'
 import {
+  ZOOM_MIN,
+  baseScale,
   boundsCenter,
   clampCenter,
   createProjection,
@@ -17,16 +20,27 @@ import {
   drawPin,
   drawRoads,
   drawRoute,
+  fitView,
+  layerPlacement,
+  lerpView,
   toEnu,
+  viewsClose,
   zoomAround,
 } from './taxiMapMath'
 import type { MapProjection, MapView } from './taxiMapMath'
 
-/** 動くもの（車両・自分）を描き直す間隔 [ms] */
-const REDRAW_MS = 200
+/** 止まっているときに描き直す間隔 [ms]。動いている間は毎フレーム描く */
+const IDLE_REDRAW_MS = 120
+
+/** 目標の見え方へ寄る速さ（1 秒あたりの寄り具合）。大きいほど機敏 */
+const FOLLOW_RATE = 3.4
 
 /** ドラッグとみなす移動量 [px] */
 const DRAG_THRESHOLD_PX = 4
+
+/** 道路と建物のレイヤを作り直す基準（倍率の比の対数と、画面幅に対するずれ） */
+const LAYER_ZOOM_TOLERANCE = 0.16
+const LAYER_SHIFT_RATIO = 0.22
 
 export type PickTarget = 'pickup' | 'dropoff' | null
 
@@ -40,15 +54,27 @@ export interface TaxiMapProps {
 
 export function TaxiMap({ picking, onPick, draftPickup, draftDropoff }: TaxiMapProps) {
   const map = useSimStore((s) => s.map)
-  const taxi = useSimStore((s) => s.taxi)
+  const phase = useSimStore((s) => s.taxi.phase)
   const palette = usePalette()
   const panelOpen = useSimStore((s) => s.panelOpen)
 
   const canvasRef = useRef<HTMLCanvasElement>(null)
-  const [view, setView] = useState<MapView>({ zoom: 1, centerX: 0, centerY: 0 })
   const [size, setSize] = useState({ width: 300, height: 300 })
 
+  // ★ 見え方は state に置かない。毎フレーム寄せるので、state にすると
+  //   60Hz でパネルごと再レンダリングされる（`frameBuffer` と同じ理由）
+  const viewRef = useRef<MapView>({ zoom: ZOOM_MIN, centerX: 0, centerY: 0 })
+  /** 自動で追いかけるのをやめているか（利用者が自分で動かしたあと） */
+  const manual = useRef(false)
+  const [manualShown, setManualShown] = useState(false)
+
+  const setManual = useCallback((on: boolean) => {
+    manual.current = on
+    setManualShown((prev) => (prev === on ? prev : on))
+  }, [])
+
   const staticLayer = useRef<HTMLCanvasElement | null>(null)
+  const staticAt = useRef<MapProjection | null>(null)
   const staticKey = useRef('')
   const drag = useRef<{ x: number; y: number; moved: number; view: MapView } | null>(null)
 
@@ -56,9 +82,16 @@ export function TaxiMap({ picking, onPick, draftPickup, draftDropoff }: TaxiMapP
   useEffect(() => {
     if (!map) return
     const [cx, cy] = boundsCenter(map.bounds)
-    setView({ zoom: 1, centerX: cx, centerY: cy })
+    viewRef.current = { zoom: ZOOM_MIN, centerX: cx, centerY: cy }
+    setManual(false)
     staticKey.current = ''
-  }, [map])
+    staticAt.current = null
+  }, [map, setManual])
+
+  // 段階が変わったら自動追従へ戻す（手で動かしたまま置き去りにしない）
+  useEffect(() => {
+    setManual(false)
+  }, [phase, picking, setManual])
 
   useEffect(() => {
     const el = canvasRef.current?.parentElement
@@ -75,25 +108,55 @@ export function TaxiMap({ picking, onPick, draftPickup, draftDropoff }: TaxiMapP
     return () => observer.disconnect()
   }, [])
 
-  const projection = useMemo<MapProjection | null>(
-    () => (map ? createProjection(map.bounds, size.width, size.height, view) : null),
-    [map, size.width, size.height, view],
+  const projectionFor = useCallback(
+    (view: MapView): MapProjection | null =>
+      map ? createProjection(map.bounds, size.width, size.height, view) : null,
+    [map, size.width, size.height],
   )
 
-  /** 道路と建物は動かないので、見え方が変わったときだけ描き直してキャッシュする */
+  /** 配車の段階に合わせて「収めたいもの」を決める（自動ズームの目標） */
+  const targetView = useCallback((): MapView | null => {
+    if (!map) return null
+    const taxi = useSimStore.getState().taxi
+    const car = taxi.vehicleId >= 0 ? getLatestVehicle(taxi.vehicleId) : null
+    const points: Vec2[] = []
+
+    if (taxi.phase === 'approaching' || taxi.phase === 'waiting') {
+      if (car) points.push([car.x, car.y])
+      if (taxi.pickup) points.push(taxi.pickup)
+    } else if (taxi.phase === 'riding') {
+      if (car) points.push([car.x, car.y])
+      if (taxi.dropoff) points.push(taxi.dropoff)
+    } else if (taxi.phase === 'arrived') {
+      if (taxi.dropoff) points.push(taxi.dropoff)
+      if (car) points.push([car.x, car.y])
+    } else if (draftPickup && draftDropoff && picking === null) {
+      // 2 点を選び終えたら、その区間が見えるところまで寄せる
+      points.push(draftPickup, draftDropoff)
+    }
+    return fitView(map.bounds, points, size.width, size.height)
+  }, [map, size.width, size.height, draftPickup, draftDropoff, picking])
+
+  /** 道路と建物は動かないので、見え方が大きく変わったときだけ描き直す */
   const ensureStaticLayer = useCallback(
-    (p: MapProjection): HTMLCanvasElement | null => {
+    (p: MapProjection, settled: boolean): HTMLCanvasElement | null => {
       if (!map) return null
-      const key = [
-        map.presetId,
-        p.scale.toFixed(5),
-        p.centerX.toFixed(2),
-        p.centerY.toFixed(2),
-        p.width,
-        p.height,
-        palette.roadSurface,
-      ].join('|')
-      if (staticLayer.current && staticKey.current === key) return staticLayer.current
+      const key = [map.presetId, p.width, p.height, palette.roadSurface].join('|')
+      const at = staticAt.current
+      const fresh = staticLayer.current !== null && staticKey.current === key && at !== null
+
+      let stale = !fresh
+      if (!stale && at !== null) {
+        const zoomGap = Math.abs(Math.log(p.scale / at.scale))
+        const shift =
+          Math.hypot(p.centerX - at.centerX, p.centerY - at.centerY) * p.scale
+        stale =
+          zoomGap > LAYER_ZOOM_TOLERANCE ||
+          shift > p.width * LAYER_SHIFT_RATIO ||
+          // 動きが落ち着いたら、ぼけたまま残さずピントを合わせ直す
+          (settled && (zoomGap > 1e-4 || shift > 0.5))
+      }
+      if (!stale) return staticLayer.current
 
       const layer = staticLayer.current ?? document.createElement('canvas')
       staticLayer.current = layer
@@ -104,91 +167,132 @@ export function TaxiMap({ picking, onPick, draftPickup, draftDropoff }: TaxiMapP
       if (!ctx) return null
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
       ctx.clearRect(0, 0, p.width, p.height)
+      const zoom = p.scale / baseScale(map.bounds, p.width, p.height)
       drawBuildings(ctx, p, map.buildings, palette.buildingLow)
-      drawRoads(ctx, p, map.edges, palette.roadSurface, Math.max(1, 1.2 * Math.sqrt(view.zoom)))
+      drawRoads(ctx, p, map.edges, palette.roadSurface, Math.max(1, 1.2 * Math.sqrt(zoom)))
       staticKey.current = key
+      staticAt.current = { ...p }
       return layer
     },
-    [map, palette.buildingLow, palette.roadSurface, view.zoom],
+    [map, palette.buildingLow, palette.roadSurface],
   )
 
-  const render = useCallback(() => {
-    const canvas = canvasRef.current
-    const p = projection
-    if (!canvas || !p) return
-    const dpr = Math.min(2, window.devicePixelRatio || 1)
-    const wantW = Math.round(p.width * dpr)
-    const wantH = Math.round(p.height * dpr)
-    if (canvas.width !== wantW || canvas.height !== wantH) {
-      canvas.width = wantW
-      canvas.height = wantH
-    }
-    const ctx = canvas.getContext('2d')
-    if (!ctx) return
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-    ctx.clearRect(0, 0, p.width, p.height)
+  const render = useCallback(
+    (settled: boolean) => {
+      const canvas = canvasRef.current
+      const p = projectionFor(viewRef.current)
+      if (!canvas || !p) return
+      const dpr = Math.min(2, window.devicePixelRatio || 1)
+      const wantW = Math.round(p.width * dpr)
+      const wantH = Math.round(p.height * dpr)
+      if (canvas.width !== wantW || canvas.height !== wantH) {
+        canvas.width = wantW
+        canvas.height = wantH
+      }
+      const ctx = canvas.getContext('2d')
+      if (!ctx) return
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+      ctx.clearRect(0, 0, p.width, p.height)
 
-    const layer = ensureStaticLayer(p)
-    if (layer) ctx.drawImage(layer, 0, 0, p.width, p.height)
+      const layer = ensureStaticLayer(p, settled)
+      const at = staticAt.current
+      if (layer && at) {
+        // ★ 寄っている途中はレイヤを貼り替えるだけにする。金沢の 58,120 本を
+        //   毎フレーム引き直すと、パネルだけで 1 フレームを使い切る
+        const place = layerPlacement(at, p)
+        ctx.drawImage(layer, place.dx, place.dy, place.dw, place.dh)
+      }
 
-    if (taxi.route && taxi.route.length >= 2) {
-      drawRoute(ctx, p, taxi.route, palette.taxiMarker, 2.5)
-    }
+      const taxi = useSimStore.getState().taxi
+      if (taxi.route && taxi.route.length >= 2) {
+        drawRoute(ctx, p, taxi.route, palette.taxiMarker, 2.5)
+      }
 
-    const pickup = draftPickup ?? taxi.pickup
-    const dropoff = draftDropoff ?? taxi.dropoff
-    if (pickup) drawPin(ctx, p, pickup[0], pickup[1], palette.vehicleReached, 4, true)
-    if (dropoff) drawPin(ctx, p, dropoff[0], dropoff[1], palette.vehicleCollided, 4, true)
+      const pickup = draftPickup ?? taxi.pickup
+      const dropoff = draftDropoff ?? taxi.dropoff
+      if (pickup) drawPin(ctx, p, pickup[0], pickup[1], palette.vehicleReached, 4, true)
+      if (dropoff) drawPin(ctx, p, dropoff[0], dropoff[1], palette.vehicleCollided, 4, true)
 
-    const curr = frameBuffer.curr
-    if (curr) {
-      for (const v of curr.vehicles) {
-        if (!v.active) continue
-        const isTaxi = v.id === taxi.vehicleId && taxi.phase !== 'idle'
+      const curr = frameBuffer.curr
+      if (curr) {
+        for (const v of curr.vehicles) {
+          if (!v.active) continue
+          const isTaxi = v.id === taxi.vehicleId && taxi.phase !== 'idle'
+          drawHeadingMark(
+            ctx,
+            p,
+            v.x,
+            v.y,
+            v.heading,
+            isTaxi ? palette.taxiMarker : vehicleColor(v.id),
+            isTaxi ? 7 : 5,
+            isTaxi ? palette.signText : undefined,
+          )
+        }
+      }
+
+      if (pedestrian.placed && !pedestrian.riding) {
         drawHeadingMark(
           ctx,
           p,
-          v.x,
-          v.y,
-          v.heading,
-          isTaxi ? palette.taxiMarker : vehicleColor(v.id),
-          isTaxi ? 7 : 5,
-          isTaxi ? palette.signText : undefined,
+          pedestrian.x,
+          pedestrian.y,
+          pedestrian.heading,
+          palette.pedestrianTop,
+          6,
+          palette.marking,
         )
       }
-    }
+    },
+    [projectionFor, ensureStaticLayer, palette, draftPickup, draftDropoff],
+  )
 
-    if (pedestrian.placed && !pedestrian.riding) {
-      drawHeadingMark(
-        ctx,
-        p,
-        pedestrian.x,
-        pedestrian.y,
-        pedestrian.heading,
-        palette.pedestrianTop,
-        6,
-        palette.marking,
-      )
-    }
-  }, [projection, ensureStaticLayer, taxi, palette, draftPickup, draftDropoff])
-
-  // ★ パネルが閉じている間はポーリングごと止める（code_review F-10）
+  // ★ パネルが閉じている間はループごと止める（code_review F-10）
   useEffect(() => {
-    if (!panelOpen) return
-    render()
-    const timer = window.setInterval(render, REDRAW_MS)
-    return () => window.clearInterval(timer)
-  }, [render, panelOpen])
+    if (!panelOpen || !map) return
+    let raf = 0
+    let lastDraw = 0
+    let lastTime = performance.now()
+
+    const loop = (now: number) => {
+      raf = requestAnimationFrame(loop)
+      const dt = Math.min(0.1, (now - lastTime) / 1000)
+      lastTime = now
+
+      let moving = false
+      if (!manual.current && drag.current === null) {
+        const target = targetView()
+        const p = projectionFor(viewRef.current)
+        if (target && p) {
+          if (!viewsClose(viewRef.current, target, p.scale)) {
+            viewRef.current = lerpView(
+              viewRef.current,
+              target,
+              1 - Math.exp(-FOLLOW_RATE * dt),
+            )
+            moving = true
+          }
+        }
+      }
+
+      if (moving || now - lastDraw >= IDLE_REDRAW_MS) {
+        lastDraw = now
+        render(!moving)
+      }
+    }
+    raf = requestAnimationFrame(loop)
+    return () => cancelAnimationFrame(raf)
+  }, [panelOpen, map, targetView, projectionFor, render])
 
   const pointFromEvent = useCallback(
     (e: { clientX: number; clientY: number }): Vec2 | null => {
       const canvas = canvasRef.current
-      const p = projection
+      const p = projectionFor(viewRef.current)
       if (!canvas || !p) return null
       const rect = canvas.getBoundingClientRect()
       return toEnu(p, e.clientX - rect.left, e.clientY - rect.top)
     },
-    [projection],
+    [projectionFor],
   )
 
   const onPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -197,27 +301,27 @@ export function TaxiMap({ picking, onPick, draftPickup, draftDropoff }: TaxiMapP
     } catch {
       /* 掴めなくてもドラッグ自体は成立する */
     }
-    drag.current = { x: e.clientX, y: e.clientY, moved: 0, view }
+    drag.current = { x: e.clientX, y: e.clientY, moved: 0, view: viewRef.current }
   }
 
   const onPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
     const start = drag.current
-    const p = projection
+    const p = projectionFor(viewRef.current)
     if (!start || !p || !map) return
     const dx = e.clientX - start.x
     const dy = e.clientY - start.y
     start.moved = Math.max(start.moved, Math.hypot(dx, dy))
     if (start.moved <= DRAG_THRESHOLD_PX) return
-    setView(
-      clampCenter(
-        {
-          zoom: start.view.zoom,
-          centerX: start.view.centerX - dx / p.scale,
-          centerY: start.view.centerY + dy / p.scale,
-        },
-        map.bounds,
-      ),
+    setManual(true)
+    viewRef.current = clampCenter(
+      {
+        zoom: start.view.zoom,
+        centerX: start.view.centerX - dx / p.scale,
+        centerY: start.view.centerY + dy / p.scale,
+      },
+      map.bounds,
     )
+    render(false)
   }
 
   const onPointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -236,17 +340,25 @@ export function TaxiMap({ picking, onPick, draftPickup, draftDropoff }: TaxiMapP
    */
   useEffect(() => {
     const canvas = canvasRef.current
-    const p = projection
-    if (!canvas || !p || !map) return
+    if (!canvas || !map) return
     const onWheel = (e: WheelEvent) => {
       e.preventDefault()
+      const p = projectionFor(viewRef.current)
+      if (!p) return
       const rect = canvas.getBoundingClientRect()
       const anchor = toEnu(p, e.clientX - rect.left, e.clientY - rect.top)
-      setView((prev) => zoomAround(prev, map.bounds, anchor, e.deltaY < 0 ? 1.2 : 1 / 1.2))
+      setManual(true)
+      viewRef.current = zoomAround(
+        viewRef.current,
+        map.bounds,
+        anchor,
+        e.deltaY < 0 ? 1.2 : 1 / 1.2,
+      )
+      render(false)
     }
     canvas.addEventListener('wheel', onWheel, { passive: false })
     return () => canvas.removeEventListener('wheel', onWheel)
-  }, [projection, map])
+  }, [map, projectionFor, render])
 
   return (
     <div className="taxi-map" data-picking={picking ? 'true' : 'false'}>
@@ -260,6 +372,18 @@ export function TaxiMap({ picking, onPick, draftPickup, draftDropoff }: TaxiMapP
           drag.current = null
         }}
       />
+
+      <button
+        type="button"
+        className="taxi-map-recenter"
+        data-visible={manualShown && map !== null ? 'true' : 'false'}
+        inert={!manualShown}
+        onClick={() => setManual(false)}
+      >
+        <TargetIcon size={13} />
+        自動に戻す
+      </button>
+
       {!map && <div className="taxi-map-empty">地図が読み込まれていません</div>}
     </div>
   )

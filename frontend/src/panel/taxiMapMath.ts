@@ -21,7 +21,24 @@ export interface MapProjection {
 }
 
 export const ZOOM_MIN = 1
-export const ZOOM_MAX = 40
+/**
+ * 倍率の上限。**マップの一辺に対する比なので、広いエリアほど大きな値が要る**
+ * （金沢は 12.3km 四方あり、40 倍では 300m 幅までしか寄れなかった）。
+ * 120 なら銀座で 7m 幅、金沢で 102m 幅まで寄れる。
+ */
+export const ZOOM_MAX = 120
+
+/** 倍率 1（マップ全体が収まる状態）の 1m あたりピクセル数。 */
+export function baseScale(
+  bounds: MapBounds,
+  width: number,
+  height: number,
+  padding = 6,
+): number {
+  const spanX = Math.max(1e-6, bounds.maxX - bounds.minX)
+  const spanY = Math.max(1e-6, bounds.maxY - bounds.minY)
+  return Math.min((width - padding * 2) / spanX, (height - padding * 2) / spanY)
+}
 
 /** マップ全体が収まる倍率を 1 として投影を作る。 */
 export function createProjection(
@@ -31,17 +48,10 @@ export function createProjection(
   view: MapView,
   padding = 6,
 ): MapProjection {
-  const spanX = Math.max(1e-6, bounds.maxX - bounds.minX)
-  const spanY = Math.max(1e-6, bounds.maxY - bounds.minY)
-  const fit = Math.min(
-    (width - padding * 2) / spanX,
-    (height - padding * 2) / spanY,
-  )
-  const zoom = clampZoom(view.zoom)
   return {
     width,
     height,
-    scale: fit * zoom,
+    scale: baseScale(bounds, width, height, padding) * clampZoom(view.zoom),
     centerX: view.centerX,
     centerY: view.centerY,
   }
@@ -94,6 +104,97 @@ export function clampCenter(view: MapView, bounds: MapBounds): MapView {
   }
 }
 
+/** 自動で寄るときに、最低これだけの範囲は見せる [m]（1 点だけのとき近づきすぎない） */
+export const FIT_MIN_SPAN_M = 150
+
+/**
+ * 指定した点が全部入る見え方を作る（配車の段階に合わせた自動ズーム）。
+ * 点が無ければマップ全体へ戻す。
+ */
+export function fitView(
+  bounds: MapBounds,
+  points: readonly Vec2[],
+  width: number,
+  height: number,
+  marginRatio = 0.26,
+): MapView {
+  const [cx, cy] = boundsCenter(bounds)
+  if (points.length === 0) return { zoom: ZOOM_MIN, centerX: cx, centerY: cy }
+
+  let x0 = Infinity
+  let y0 = Infinity
+  let x1 = -Infinity
+  let y1 = -Infinity
+  for (const [px, py] of points) {
+    if (px < x0) x0 = px
+    if (py < y0) y0 = py
+    if (px > x1) x1 = px
+    if (py > y1) y1 = py
+  }
+
+  const spanX = Math.max(FIT_MIN_SPAN_M, x1 - x0)
+  const spanY = Math.max(FIT_MIN_SPAN_M, y1 - y0)
+  const room = Math.max(0.05, 1 - marginRatio)
+  const want = Math.min((width * room) / spanX, (height * room) / spanY)
+
+  return clampCenter(
+    {
+      zoom: clampZoom(want / baseScale(bounds, width, height)),
+      centerX: (x0 + x1) / 2,
+      centerY: (y0 + y1) / 2,
+    },
+    bounds,
+  )
+}
+
+/**
+ * 見え方を補間する。**倍率は対数で混ぜる**（線形だと桁の違いで寄り方が跳ねる。
+ * 天候のフォグ距離と同じ理由）。
+ */
+export function lerpView(from: MapView, to: MapView, t: number): MapView {
+  const k = Math.max(0, Math.min(1, t))
+  const logFrom = Math.log(clampZoom(from.zoom))
+  const logTo = Math.log(clampZoom(to.zoom))
+  return {
+    zoom: Math.exp(logFrom + (logTo - logFrom) * k),
+    centerX: from.centerX + (to.centerX - from.centerX) * k,
+    centerY: from.centerY + (to.centerY - from.centerY) * k,
+  }
+}
+
+/** 2 つの見え方が実質同じか（画面上のずれと倍率比で見る）。 */
+export function viewsClose(
+  a: MapView,
+  b: MapView,
+  scale: number,
+  pixelEpsilon = 0.4,
+  zoomEpsilon = 0.004,
+): boolean {
+  const moved = Math.hypot(a.centerX - b.centerX, a.centerY - b.centerY) * scale
+  const ratio = Math.abs(Math.log(clampZoom(a.zoom) / clampZoom(b.zoom)))
+  return moved <= pixelEpsilon && ratio <= zoomEpsilon
+}
+
+/**
+ * 別の見え方で描いたレイヤを、いまの見え方へ貼るときの矩形。
+ * **道路と建物を毎フレーム描き直さないため**にある（金沢は 58,120 本ある）。
+ */
+export function layerPlacement(
+  layer: MapProjection,
+  current: MapProjection,
+): { dx: number; dy: number; dw: number; dh: number } {
+  const topLeft = toEnu(layer, 0, 0)
+  const bottomRight = toEnu(layer, layer.width, layer.height)
+  const dx = toCanvasX(current, topLeft[0])
+  const dy = toCanvasY(current, topLeft[1])
+  return {
+    dx,
+    dy,
+    dw: toCanvasX(current, bottomRight[0]) - dx,
+    dh: toCanvasY(current, bottomRight[1]) - dy,
+  }
+}
+
 /** ある点を固定したままズームする（ホイール操作）。 */
 export function zoomAround(
   view: MapView,
@@ -113,15 +214,22 @@ export function zoomAround(
   )
 }
 
-/** 道路。**始点と終点だけの直線に落とす**（金沢の 58,120 本を毎回なぞらないため） */
+/**
+ * 道路。**見えない区間と、縮尺に対して短すぎる区間は引かない**。
+ * 金沢は 58,120 本あり、全体表示で全部なぞると 1 フレームを使い切る。
+ * 引いた本数を返す（測るときの手がかり）。
+ */
 export function drawRoads(
   ctx: CanvasRenderingContext2D,
   p: MapProjection,
   edges: readonly MapEdge[],
   color: string,
   lineWidth: number,
-): void {
+  minPixels = 2.5,
+): number {
   const box = visibleBounds(p, 50)
+  const minSpanM = minPixels / p.scale
+  let drawn = 0
   ctx.save()
   ctx.strokeStyle = color
   ctx.lineWidth = lineWidth
@@ -140,13 +248,16 @@ export function drawRoads(
     ) {
       continue
     }
+    if (Math.hypot(b[0] - a[0], b[1] - a[1]) < minSpanM) continue
     ctx.moveTo(toCanvasX(p, a[0]), toCanvasY(p, a[1]))
     for (let i = 1; i < line.length; i++) {
       ctx.lineTo(toCanvasX(p, line[i][0]), toCanvasY(p, line[i][1]))
     }
+    drawn++
   }
   ctx.stroke()
   ctx.restore()
+  return drawn
 }
 
 /** 建物。**投影して 2px 未満になるものは描かない**（見えないのに件数だけかさむ） */
