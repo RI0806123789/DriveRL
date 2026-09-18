@@ -21,12 +21,18 @@ from app.contracts import (
 from app.percep.encoder import encode_observations
 from app.percep.types import DEFAULT_CAMERA, PerceptionResult
 from app.percep.weather import Weather, auto_weather
-from app.sim.signals import constrain_accel
+from app.sim.signals import constrain_accel, stop_speed_limit
 from app.sim.world import World
 
 logger = logging.getLogger("autoware_sim")
 
 __all__ = ["SimulationEnv"]
+
+AUTOPILOT_LOOKAHEAD_MIN_M = 6.0
+AUTOPILOT_LOOKAHEAD_SEC = 1.2
+
+AUTOPILOT_LANE_HALF_WIDTH_M = 2.4
+AUTOPILOT_HEADWAY_M = 2.5
 
 
 class SimulationEnv:
@@ -49,6 +55,9 @@ class SimulationEnv:
         self._obs = np.zeros((n, config.OBS_DIM), dtype=np.float32)
         self._episode_lateral = np.zeros(n, dtype=np.float64)
         self._episode_reward = np.zeros(n, dtype=np.float32)
+
+        # 実用モードで徴用している 1 台。**この間だけエピソードを閉じない**（決定 2）
+        self.commandeered_slot: int = -1
 
         self.latest_perception: dict[int, PerceptionResult] = {}
         self._camera_spec = DEFAULT_CAMERA
@@ -85,6 +94,80 @@ class SimulationEnv:
         self._reset_slot_stats(slot)
         self.params.vehicle_count = self.world.active_count
         return ok
+
+    def _autopilot(self, slot: int) -> tuple[float, float]:
+        """経路の先を追う操作を返す（徴用中のタクシー用）。
+
+        加速は全開で出し、信号・規制速度・カーブ・乗降地点での停車は
+        `constrain_accel` に任せる（環境の性質として効かせる、という既存の作法）。
+        """
+        world = self.world
+        state = world.slots[slot]
+        route = state.route
+        if route.shape[0] < 2:
+            return 0.0, 0.0
+        speed = float(world.fleet.speed[slot])
+        ahead = max(AUTOPILOT_LOOKAHEAD_MIN_M, speed * AUTOPILOT_LOOKAHEAD_SEC)
+        target = np.float32(state.arc_position + ahead)
+        tx = float(np.interp(target, state.route_cum, route[:, 0]))
+        ty = float(np.interp(target, state.route_cum, route[:, 1]))
+
+        heading = float(world.fleet.heading[slot])
+        want = math.atan2(ty - float(world.fleet.y[slot]), tx - float(world.fleet.x[slot]))
+        diff = math.atan2(math.sin(want - heading), math.cos(want - heading))
+        return 1.0, float(np.clip(diff / config.MAX_STEER, -1.0, 1.0))
+
+    def _lead_gap(self, slot: int) -> float:
+        """前方の同じ進路上にいる他車までの車間 [m]。いなければ inf。
+
+        経路追従は前走車を見ないので、**これが無いと停まっている車へ必ず追突する**
+        （学習が進んでいないモデルでは他車がその場に止まったままになる）。
+        """
+        fleet = self.world.fleet
+        idx = np.flatnonzero(fleet.active)
+        if idx.size <= 1:
+            return float("inf")
+        cos_h = math.cos(float(fleet.heading[slot]))
+        sin_h = math.sin(float(fleet.heading[slot]))
+        dx = fleet.x[idx].astype(np.float64) - float(fleet.x[slot])
+        dy = fleet.y[idx].astype(np.float64) - float(fleet.y[slot])
+        lon = dx * cos_h + dy * sin_h
+        lat = -dx * sin_h + dy * cos_h
+        ahead = (
+            (idx != slot)
+            & (lon > 0.0)
+            & (np.abs(lat) <= AUTOPILOT_LANE_HALF_WIDTH_M)
+        )
+        if not ahead.any():
+            return float("inf")
+        return float(lon[ahead].min())
+
+    def commandeer_vehicle(self, slot: int) -> None:
+        """実用モードの配車へ 1 台を徴用する。走行中のエピソードはここで打ち切る（決定 2）。"""
+        slot = int(slot)
+        if not (0 <= slot < config.MAX_VEHICLES):
+            return
+        self.commandeered_slot = slot
+        self._reset_slot_stats(slot)
+
+    def release_vehicle(self, slot: int) -> None:
+        """徴用を解除し、その場から新しい目的地へ向かう新規エピソードに戻す（決定 3）。"""
+        slot = int(slot)
+        self.commandeered_slot = -1
+        if not (0 <= slot < config.MAX_VEHICLES):
+            return
+        world = self.world
+        world.clear_stop_target(slot)
+        if not world.fleet.active[slot]:
+            return
+        route = world.route_onward(
+            float(world.fleet.x[slot]),
+            float(world.fleet.y[slot]),
+            float(world.fleet.heading[slot]),
+        )
+        if route is None or not world.install_route(slot, route, keep_pose=True):
+            world.respawn(slot)
+        self._reset_slot_stats(slot)
 
     def _reset_slot_stats(self, slot: int) -> None:
         """1 スロット分のエピソード統計を 0 に戻す。"""
@@ -140,6 +223,12 @@ class SimulationEnv:
         accel_cmd = np.where(active_before, act[:, 0], 0.0).astype(np.float32)
         steer_cmd = np.where(active_before, act[:, 1], 0.0).astype(np.float32)
 
+        # 徴用中の 1 台だけは経路追従で走らせる。**方策の実力に関わらず迎えに来させるため**で、
+        # 呼んでも来ないと実用モードが体験として成立しない
+        held = int(self.commandeered_slot)
+        if 0 <= held < n and active_before[held]:
+            accel_cmd[held], steer_cmd[held] = self._autopilot(held)
+
         params = self.params
         max_speed = max(float(params.max_speed), 1e-3)
 
@@ -152,6 +241,19 @@ class SimulationEnv:
             limit = np.minimum(limit, self.world.signal_speed_limits())
         if params.obey_speed_signs:
             limit = np.minimum(limit, self.world.posted_speed_limits())
+        limit = np.minimum(limit, self.world.stop_speed_limits())
+        if 0 <= held < n and active_before[held]:
+            limit[held] = min(
+                float(limit[held]),
+                float(
+                    stop_speed_limit(
+                        np.float64(self._lead_gap(held)),
+                        abs(config.MAX_DECEL),
+                        config.DT,
+                        margin_m=config.VEHICLE_LENGTH + AUTOPILOT_HEADWAY_M,
+                    )
+                ),
+            )
         accel_cmd = constrain_accel(
             accel_cmd,
             self.world.fleet.speed,
@@ -196,6 +298,11 @@ class SimulationEnv:
         self._episode_reward += rewards
 
         dones = (reached | collided | offroad | timeout) & active_before
+        held = int(self.commandeered_slot)
+        if 0 <= held < n:
+            # 徴用中の 1 台は乗降地点で止まるので、到達しても respawn させない
+            # （させると乗客を置いて別の街区へ飛ぶ）。衝突・逸脱は配車側が拾う
+            dones[held] = False
         episodes: list[EpisodeResult] = []
         for slot in np.flatnonzero(dones):
             slot = int(slot)

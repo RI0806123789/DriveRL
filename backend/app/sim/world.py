@@ -11,7 +11,13 @@ import numpy as np
 
 from app import config
 from app.contracts import FrameSnapshot, MapIndex, ObstacleSnapshot, VehicleSnapshot
-from app.sim.signals import RED, YELLOW, SignalController, signal_speed_limit
+from app.sim.signals import (
+    RED,
+    YELLOW,
+    SignalController,
+    signal_speed_limit,
+    stop_speed_limit,
+)
 from app.sim.vehicle import VehicleFleet
 
 __all__ = ["ObstacleState", "SlotState", "World"]
@@ -32,6 +38,8 @@ SIGNAL_LOOKAHEAD_COUNT = 3
 
 LANE_DEPARTURE_M = config.LANE_DEPARTURE_M
 LANE_RETURN_M = config.LANE_RETURN_M
+
+FORWARD_NODE_RADIUS_M = 150.0
 
 
 def _in_body_ellipse(
@@ -119,6 +127,8 @@ class World:
         self.collided_flags = np.zeros(n, dtype=bool)
         self.reached_flags = np.zeros(n, dtype=bool)
 
+        self.stop_arc = np.full(n, np.inf, dtype=np.float64)
+
         self._obstacle_xy = np.zeros((0, 2), dtype=np.float32)
         self._obstacle_r = np.zeros(0, dtype=np.float32)
 
@@ -170,7 +180,9 @@ class World:
                 return route
         return fallback
 
-    def _route_from_point(self, x: float, y: float) -> np.ndarray | None:
+    def _route_from_point(
+        self, x: float, y: float, *, heading: float | None = None
+    ) -> np.ndarray | None:
         """指定座標を道路にスナップし、そこから到達可能な目的地への経路を作る。"""
         try:
             snap_x, snap_y, _edge_id, _heading = self.map_index.nearest_road_point(
@@ -179,7 +191,13 @@ class World:
         except Exception:
             logger.debug("道路へのスナップに失敗しました: (%.1f, %.1f)", x, y, exc_info=True)
             return None
-        src = int(self.map_index.nearest_node(float(snap_x), float(snap_y)))
+        src = (
+            self._forward_node(float(snap_x), float(snap_y), heading)
+            if heading is not None
+            else None
+        )
+        if src is None:
+            src = int(self.map_index.nearest_node(float(snap_x), float(snap_y)))
 
         route: np.ndarray | None = None
         if self._node_xy.shape[0] > 1:
@@ -208,6 +226,76 @@ class World:
             head = np.array([[snap_x, snap_y]], dtype=np.float32)
             route = np.concatenate([head, route], axis=0)
         return route
+
+    def snap_to_road(self, x: float, y: float) -> tuple[float, float] | None:
+        """指定座標を最寄りの道路中心線上へスナップする（実用モードの乗降地点）。"""
+        try:
+            snap_x, snap_y, _edge_id, _heading = self.map_index.nearest_road_point(
+                float(x), float(y)
+            )
+        except Exception:
+            logger.debug("道路へのスナップに失敗しました: (%.1f, %.1f)", x, y, exc_info=True)
+            return None
+        return float(snap_x), float(snap_y)
+
+    def _forward_node(self, x: float, y: float, heading: float) -> int | None:
+        """進行方向の前方にある最寄りノード。**背後のノードを選ぶと逆走経路になる。**"""
+        if self._node_xy.shape[0] == 0:
+            return None
+        dx = self._node_xy[:, 0] - np.float32(x)
+        dy = self._node_xy[:, 1] - np.float32(y)
+        dist2 = dx * dx + dy * dy
+        ahead = (dx * math.cos(heading) + dy * math.sin(heading)) > 0.0
+        near = dist2 <= np.float32(FORWARD_NODE_RADIUS_M * FORWARD_NODE_RADIUS_M)
+        cand = np.flatnonzero(ahead & near)
+        if cand.size == 0:
+            return None
+        return int(self._node_ids[cand[int(np.argmin(dist2[cand]))]])
+
+    @staticmethod
+    def _with_endpoints(
+        route: np.ndarray, src: tuple[float, float], dst: tuple[float, float]
+    ) -> np.ndarray:
+        """経路の両端を、指定した出発地・目的地そのものへ伸ばす。"""
+        parts: list[np.ndarray] = [route]
+        if float(np.hypot(route[0, 0] - src[0], route[0, 1] - src[1])) > 0.5:
+            parts.insert(0, np.array([src], dtype=np.float32))
+        if float(np.hypot(route[-1, 0] - dst[0], route[-1, 1] - dst[1])) > 0.5:
+            parts.append(np.array([dst], dtype=np.float32))
+        return np.concatenate(parts, axis=0) if len(parts) > 1 else route
+
+    def route_onward(self, x: float, y: float, heading: float) -> np.ndarray | None:
+        """いまいる場所から、進行方向の先にある目的地への経路を作る（徴用の解除に使う）。"""
+        return self._route_from_point(x, y, heading=heading)
+
+    def route_between(
+        self,
+        src: tuple[float, float],
+        dst: tuple[float, float],
+        *,
+        heading: float | None = None,
+    ) -> np.ndarray | None:
+        """2 地点を道路へスナップし、その間の走行経路を作る（決定 7・12）。"""
+        src_snap = self.snap_to_road(*src)
+        dst_snap = self.snap_to_road(*dst)
+        if src_snap is None or dst_snap is None:
+            return None
+
+        src_node = (
+            self._forward_node(src_snap[0], src_snap[1], heading)
+            if heading is not None
+            else None
+        )
+        if src_node is None:
+            src_node = int(self.map_index.nearest_node(src_snap[0], src_snap[1]))
+        dst_node = int(self.map_index.nearest_node(dst_snap[0], dst_snap[1]))
+        if src_node == dst_node:
+            return None
+
+        route = self._route_from_nodes(src_node, dst_node)
+        if route is None:
+            return None
+        return self._with_endpoints(route, src_snap, dst_snap)
 
     def advance_time(self, dt: float) -> None:
         """シミュレーション内時刻を進め、信号の現示を更新する。"""
@@ -441,8 +529,13 @@ class World:
         np.cumsum(lengths, out=cum[1:])
         return cum
 
-    def _install_route(self, slot: int, route: np.ndarray) -> bool:
-        """経路をスロットに設定し、車両を経路始点に配置する。"""
+    def _install_route(
+        self, slot: int, route: np.ndarray, *, keep_pose: bool = False
+    ) -> bool:
+        """経路をスロットに設定し、車両を経路始点に配置する。
+
+        `keep_pose` のときは車体を動かさず経路だけ差し替える（実用モードの迎車・乗車後）。
+        """
         if route is None or route.shape[0] < 2:
             return False
         state = self.slots[slot]
@@ -462,6 +555,25 @@ class World:
         state.reached_goal = False
         state.route_dirty = True
 
+        if keep_pose:
+            arc, lateral, tangent, seg = self._project_slot(slot)
+            state.arc_position = arc
+            state.route_progress = seg
+            self.arc[slot] = np.float32(arc)
+            self.lateral[slot] = np.float32(lateral)
+            self.tangent[slot] = np.float32(tangent)
+        else:
+            heading = math.atan2(
+                float(route[1, 1] - route[0, 1]), float(route[1, 0] - route[0, 0])
+            )
+            self.fleet.reset_slot(slot, float(route[0, 0]), float(route[0, 1]), heading)
+            self.arc[slot] = np.float32(0.0)
+            self.lateral[slot] = np.float32(0.0)
+            self.tangent[slot] = np.float32(heading)
+        self.collided_flags[slot] = False
+        self.reached_flags[slot] = False
+        self.stop_arc[slot] = np.inf
+
         try:
             stops = self.map_index.signals_on_route(
                 [(float(px), float(py)) for px, py in state.route]
@@ -478,7 +590,11 @@ class World:
             state.signal_arcs = np.zeros(0, dtype=np.float32)
             state.signal_ids = np.zeros(0, dtype=np.int32)
         state.signals_floor = int(
-            np.searchsorted(state.signal_arcs, SPAWN_SIGNAL_SKIP_M, side="right")
+            np.searchsorted(
+                state.signal_arcs,
+                float(self.arc[slot]) + SPAWN_SIGNAL_SKIP_M,
+                side="right",
+            )
         )
         state.signals_passed = state.signals_floor
         try:
@@ -505,17 +621,36 @@ class World:
         state.outside_lane = False
         state.speed_violations = 0
         state.over_speed = False
-
-        heading = math.atan2(
-            float(route[1, 1] - route[0, 1]), float(route[1, 0] - route[0, 0])
-        )
-        self.fleet.reset_slot(slot, float(route[0, 0]), float(route[0, 1]), heading)
-        self.arc[slot] = np.float32(0.0)
-        self.lateral[slot] = np.float32(0.0)
-        self.tangent[slot] = np.float32(heading)
-        self.collided_flags[slot] = False
-        self.reached_flags[slot] = False
         return True
+
+    def install_route(
+        self, slot: int, route: np.ndarray, *, keep_pose: bool = False
+    ) -> bool:
+        """経路を差し替える（実用モードの配車から呼ぶ公開版）。"""
+        slot = int(slot)
+        if not (0 <= slot < config.MAX_VEHICLES):
+            return False
+        return self._install_route(slot, route, keep_pose=keep_pose)
+
+    def set_stop_target(self, slot: int, arc: float) -> None:
+        """その弧長で止まらせる（乗降地点）。赤信号と同じ式で速度上限を掛ける。"""
+        slot = int(slot)
+        if 0 <= slot < config.MAX_VEHICLES:
+            self.stop_arc[slot] = float(arc)
+
+    def clear_stop_target(self, slot: int) -> None:
+        slot = int(slot)
+        if 0 <= slot < config.MAX_VEHICLES:
+            self.stop_arc[slot] = np.inf
+
+    def stop_speed_limits(self) -> np.ndarray:
+        """停車指示のある車両が出してよい速度 [m/s]。指示が無ければ inf。"""
+        return stop_speed_limit(
+            self.stop_arc - self.arc.astype(np.float64),
+            abs(config.MAX_DECEL),
+            config.DT,
+            margin_m=0.0,
+        )
 
     def respawn(self, slot: int, *, at: tuple[float, float] | None = None) -> None:
         """スロットを再スポーンする。経路生成に失敗した場合は前の経路を保つ。"""
@@ -558,6 +693,7 @@ class World:
         self.fleet.steer[slot] = np.float32(0.0)
         self.collided_flags[slot] = False
         self.reached_flags[slot] = False
+        self.stop_arc[slot] = np.inf
 
     def set_active_count(self, n: int) -> None:
         """先頭 n スロットをアクティブにし、残りを非アクティブにする。"""

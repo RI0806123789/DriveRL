@@ -20,6 +20,7 @@ import type {
   SimConfig,
   SimParams,
   StatusPayload,
+  TaxiMessage,
   Vec2,
   VehicleState,
   WeatherPreset,
@@ -431,6 +432,32 @@ function buildRoute(v: MockVehicle): Vec2[] {
   return pts
 }
 
+const MOCK_IDLE_TAXI: TaxiMessage = {
+  type: 'taxi',
+  phase: 'idle',
+  vehicleId: -1,
+  pickup: null,
+  dropoff: null,
+  routeRevision: 0,
+  route: [],
+  etaSeconds: 0,
+  remainingDistanceM: 0,
+  message: '',
+}
+
+/** 乗降地点に「着いた」とみなす距離 [m] と、配車を受け付ける最短距離 [m] */
+const MOCK_TAXI_ARRIVE_M = 6
+const MOCK_TAXI_MIN_TRIP_M = 50
+/** ETA を出すときの速度の下限 [m/s] */
+const MOCK_TAXI_MIN_SPEED = 3.5
+
+/** ENU 座標を、いちばん近いグリッドノードへ寄せる（サーバーの道路スナップの代わり） */
+function snapToGrid(x: number, y: number): { gx: number; gy: number; point: Vec2 } {
+  const gx = clampGrid(Math.round((x + GRID_HALF) / GRID_SPACING))
+  const gy = clampGrid(Math.round((y + GRID_HALF) / GRID_SPACING))
+  return { gx, gy, point: [nodeX(gx), nodeY(gy)] }
+}
+
 const MOCK_EVAL_SAMPLES = 400
 
 const MOCK_WEATHER_PERIOD_SEC = 480
@@ -524,6 +551,8 @@ class MockServer {
     presetId: null,
     renderPaused: false,
     learning: true,
+    practicalMode: false,
+    taxiVehicleId: -1,
     message: '（開発用モック）マップを選択してください',
   }
   private map: MapMessage | null = null
@@ -550,6 +579,9 @@ class MockServer {
   private progress = 0
   private detector: DetectorMessage = makeIdleDetector()
   private detectorTimer: ReturnType<typeof setInterval> | null = null
+  /** 実用モードの配車。**擬似的な再現で、経路はグリッドに沿った折れ線** */
+  private taxi: TaxiMessage = { ...MOCK_IDLE_TAXI }
+  private taxiSentAt = 0
 
   constructor(emit: (json: string) => void) {
     this.emit = emit
@@ -935,6 +967,12 @@ class MockServer {
       v.x = nodeX(v.gx)
       v.y = nodeY(v.gy)
       if (v.gx === v.goalGx && v.gy === v.goalGy) {
+        // 徴用中の 1 台は乗降地点で止める（実機と同じく respawn しない）
+        if (v.id === this.taxi.vehicleId && this.taxi.phase !== 'idle') {
+          v.speed = 0
+          v.reachedGoal = true
+          return
+        }
         v.reachedGoal = true
         this.episodes += 1
         v.goalGx = Math.floor(this.rng() * GRID_N)
@@ -1020,6 +1058,7 @@ class MockServer {
 
     for (const v of this.vehicles) this.stepVehicle(v, dt)
     this.detectCollisions()
+    this.stepTaxi()
 
     if (this.status.renderPaused) return
 
@@ -1060,6 +1099,63 @@ class MockServer {
     const detections = this.buildDetections()
     if (detections) frame.detections = detections
     this.send(frame)
+  }
+
+  private sendTaxi(force = false): void {
+    const now = performance.now()
+    if (!force && now - this.taxiSentAt < 1000) return
+    this.taxiSentAt = now
+    this.send({ ...this.taxi, route: [...(this.taxi.route ?? [])] })
+  }
+
+  /** 配車の段階を進める。**実機と同じく、到着は「残り距離」で判定する。** */
+  private stepTaxi(): void {
+    if (this.taxi.phase === 'idle') return
+    const v = this.vehicles[this.taxi.vehicleId]
+    if (!v || !v.active) {
+      this.cancelTaxi('（モック）配車していた車両がいなくなりました')
+      return
+    }
+
+    const target = this.taxi.phase === 'riding' ? this.taxi.dropoff : this.taxi.pickup
+    if (!target) return
+    const remaining = remainingDistance(v)
+    this.taxi.remainingDistanceM = remaining
+    this.taxi.etaSeconds =
+      this.taxi.phase === 'waiting' || this.taxi.phase === 'arrived'
+        ? 0
+        : remaining / Math.max(MOCK_TAXI_MIN_SPEED, v.speed)
+
+    const near = Math.hypot(v.x - target[0], v.y - target[1]) <= MOCK_TAXI_ARRIVE_M
+    const before = this.taxi.phase
+    if (this.taxi.phase === 'approaching' && near) {
+      v.speed = 0
+      this.taxi.phase = 'waiting'
+      this.taxi.message = '（モック）乗車地点に到着しました。[Enter] で乗車できます'
+    } else if (this.taxi.phase === 'riding' && near) {
+      v.speed = 0
+      this.taxi.phase = 'arrived'
+      this.taxi.message = '（モック）目的地に到着しました。[Enter] で降車できます'
+    }
+    if (this.taxi.phase === 'waiting' || this.taxi.phase === 'arrived') v.speed = 0
+    this.sendTaxi(before !== this.taxi.phase)
+  }
+
+  private cancelTaxi(message: string): void {
+    const v = this.vehicles[this.taxi.vehicleId]
+    if (v) {
+      v.goalGx = Math.floor(this.rng() * GRID_N)
+      v.goalGy = Math.floor(this.rng() * GRID_N)
+      chooseNext(v, this.rng)
+      v.routeDirty = true
+    }
+    this.taxi = {
+      ...MOCK_IDLE_TAXI,
+      routeRevision: this.taxi.routeRevision + 1,
+      message,
+    }
+    this.sendStatus({ taxiVehicleId: -1 })
+    this.sendTaxi(true)
   }
 
   /** いま効いている天候。視程の式は `percep/weather.py` の `visibility_m` に合わせる。 */
@@ -1299,6 +1395,115 @@ class MockServer {
           return
         }
         this.finishDetectorJob('cancelled', '（モック）学習を中断しました')
+        break
+      }
+
+      case 'set_app_mode': {
+        const practical = msg.mode === 'taxi'
+        if (practical === (this.status.practicalMode ?? false)) return
+        if (!practical) this.cancelTaxi('（モック）開発モードに戻したため配車を終了しました')
+        this.sendStatus({
+          practicalMode: practical,
+          learning: !practical,
+          message: practical
+            ? '（モック）実用モードに入りました。学習は止まります'
+            : '（モック）開発モードに戻りました',
+        })
+        this.sendTaxi(true)
+        break
+      }
+
+      case 'request_taxi': {
+        if (!this.map) {
+          this.sendStatus({ message: '（モック）先にエリアを読み込んでください' })
+          return
+        }
+        if (this.taxi.phase !== 'idle') {
+          this.sendStatus({ message: '（モック）すでに配車中です' })
+          return
+        }
+        const pick = snapToGrid(msg.pickup[0], msg.pickup[1])
+        const drop = snapToGrid(msg.dropoff[0], msg.dropoff[1])
+        if (
+          Math.hypot(drop.point[0] - pick.point[0], drop.point[1] - pick.point[1]) <
+          MOCK_TAXI_MIN_TRIP_M
+        ) {
+          this.sendStatus({ message: '（モック）乗車地点と降車地点が近すぎます' })
+          return
+        }
+        let slot = -1
+        let best = Infinity
+        for (const v of this.vehicles) {
+          if (!v.active) continue
+          const d = Math.hypot(v.x - pick.point[0], v.y - pick.point[1])
+          if (d < best) {
+            best = d
+            slot = v.id
+          }
+        }
+        if (slot < 0) {
+          this.sendStatus({ message: '（モック）配車できる車両がいません' })
+          return
+        }
+        const v = this.vehicles[slot]
+        v.goalGx = pick.gx
+        v.goalGy = pick.gy
+        chooseNext(v, this.rng)
+        v.routeDirty = true
+        this.taxi = {
+          ...MOCK_IDLE_TAXI,
+          phase: 'approaching',
+          vehicleId: slot,
+          pickup: pick.point,
+          dropoff: drop.point,
+          route: buildRoute(v),
+          routeRevision: this.taxi.routeRevision + 1,
+          remainingDistanceM: remainingDistance(v),
+          // 最初の 1 通から出しておく（次の step まで「まもなく」と出てしまう）
+          etaSeconds: remainingDistance(v) / MOCK_TAXI_MIN_SPEED,
+          message: `（モック）車両 #${slot} が迎えに向かっています`,
+        }
+        this.sendStatus({ taxiVehicleId: slot })
+        this.sendTaxi(true)
+        break
+      }
+
+      case 'board_taxi': {
+        if (this.taxi.phase !== 'waiting') return
+        const v = this.vehicles[this.taxi.vehicleId]
+        const drop = this.taxi.dropoff
+        if (!v || !drop) return
+        const snapped = snapToGrid(drop[0], drop[1])
+        v.goalGx = snapped.gx
+        v.goalGy = snapped.gy
+        chooseNext(v, this.rng)
+        v.routeDirty = true
+        this.taxi = {
+          ...this.taxi,
+          phase: 'riding',
+          route: buildRoute(v),
+          routeRevision: this.taxi.routeRevision + 1,
+          message: '（モック）目的地へ向かっています',
+        }
+        this.sendTaxi(true)
+        break
+      }
+
+      case 'alight_taxi': {
+        if (this.taxi.phase !== 'riding' && this.taxi.phase !== 'arrived') return
+        this.cancelTaxi('（モック）降車しました')
+        break
+      }
+
+      case 'cancel_taxi': {
+        if (this.taxi.phase === 'idle') return
+        const v = this.vehicles[this.taxi.vehicleId]
+        if (msg.halt && v) v.speed = 0
+        this.cancelTaxi(
+          msg.halt
+            ? '（モック）緊急停止しました。自動運転を終了します'
+            : '（モック）配車を取り消しました',
+        )
         break
       }
 

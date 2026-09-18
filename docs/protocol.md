@@ -301,22 +301,29 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
   "mapLoaded": true,
   "presetId": "ginza",
   "renderPaused": false,      // 「一時停止」は描画のみ。学習は継続している
-  "learning": true,           // state=="running" かつ simSuspended でないとき
+  "learning": true,           // state=="running" かつ simSuspended でも practicalMode でもないとき
   "simSuspended": false,      // ★ 物理と PPO ごと止まっている（認識器の学習中）
   "suspendReason": "",        // simSuspended が true のときの理由
+  "practicalMode": false,     // ★ 実用モード。**物理は動くが学習だけ止まる**（2.10）
+  "taxiVehicleId": -1,        // 配車で徴用中の車両スロット。-1 なら無し
   "message": "マップを読み込みました"
 }
 ```
 
-`renderPaused` と `simSuspended` は**別物**である。
+`renderPaused` と `simSuspended` と `practicalMode` は**三者とも別物**である。
 
 | | 止まるもの | 誰が立てるか |
 |---|---|---|
 | `renderPaused` | 画面の描画（フレーム配信）だけ。**学習は続く** | 利用者の「一時停止」 |
 | `simSuspended` | 物理と PPO。フレームも止まる（画面と通信は生きている） | 認識器の学習（2.9） |
+| `practicalMode` | **重みの更新だけ**。物理・推論・フレームは動き続ける | 利用者のモード切替（3 章 `set_app_mode`） |
 
 `simSuspended` の間も WebSocket のコマンド・モデルの書き出し・進捗配信は動く。
 完了・中断すると**サーバー側が自動で降ろす**ので、利用者が再開させる操作は無い。
+
+`practicalMode` の間は `trainer.store()` / `maybe_update()` を呼ばない。全車が
+**その時点までに学習した重みの推論だけ**で走る（決定 5）。`metrics` は送られ続けるが
+`updates` が増えないのが正常。
 
 ### 2.5 `params` — パラメータ変更が反映されたときに送信
 
@@ -549,6 +556,52 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
 載せ替えで変わる。**ジョブが動いていなくても変わりうる**ので、配信側は
 ジョブの進捗ではなくこのメッセージ全体の中身を比べて送っている。
 
+### 2.10 `taxi` — 実用モード（自動運転タクシー）の配車状態
+
+操作パネルを実用モードに切り替えたときに使う。**接続直後に 1 通**送られ、以後は
+**段階が変わったときと 1Hz** で送られる。
+
+```jsonc
+{
+  "type": "taxi",
+  "phase": "approaching",   // idle|approaching|waiting|riding|arrived
+  "vehicleId": 2,           // 徴用している車両スロット。-1 なら無し
+  "pickup": [12.5, -30.2],  // 道路へスナップ済みの乗車地点。未設定なら null
+  "dropoff": [220.0, 88.4], // 同じく降車地点
+  "routeRevision": 3,       // ★ 経路が変わるたびに増える
+  "route": [[x, y], ...],   // いま向かっている経路。**routeRevision が変わった通だけ入る**
+  "etaSeconds": 42.5,       // 到着まで [秒]。毎ステップ引き直す
+  "remainingDistanceM": 310.2,
+  "message": "車両 #2 が迎えに向かっています"
+}
+```
+
+段階の進み方（決定 1〜4・15）:
+
+| phase | 何が起きているか | 次へ進む条件 |
+|---|---|---|
+| `idle` | 配車していない | `request_taxi` |
+| `approaching` | 乗車地点へ迎車中 | 経路の残りが 4m 以下かつ 0.8m/s 以下 |
+| `waiting` | 乗車地点で停車して待っている | `board_taxi` |
+| `riding` | 乗客を乗せて降車地点へ | 同じ到着条件 |
+| `arrived` | 降車地点で停車している | `alight_taxi` |
+
+- **配車は同時に 1 件だけ**（決定 8）。`taxi` は全接続へ同じ内容が配られる。
+- `route` は数百〜数千点になる（金沢の 3.5km で 1,770 点 ≒ 28KB）ので、
+  `frame.vehicles[].route` と同じく**変化時だけ**送る。クライアントは `routeRevision`
+  が変わらない限り前回の経路を保持すること。
+- 乗降地点は**サーバー側で最寄りの道路中心線へスナップされる**（決定 7）。
+  クライアントが送った座標そのままではなく、`pickup` / `dropoff` に入って返る値が正。
+- 徴用した 1 台は**エピソードを閉じない**。到達しても respawn せず、乗降地点で停車する。
+  衝突した場合はサーバーが配車を打ち切り、`phase` が `idle` に戻って `message` に理由が入る。
+- **徴用中の 1 台だけは PPO ではなく経路追従で走る**（`SimulationEnv._autopilot`）。
+  呼んでも来ないと実用モードが成立しないためで、**方策の出来に関わらず必ず迎えに来る**。
+  信号・規制速度・カーブ・前走車との車間・乗降地点での停車は `constrain_accel` が
+  そのまま効くので、赤信号は守るし制限速度も超えない。
+  徴用していない車両は従来どおり PPO の推論で走る。
+- 乗降地点の手前で止めるのに、赤信号と同じ速度上限（`u^2/(2a) + u·dt <= 距離`）を掛けている。
+  実測の停車精度は**乗車地点 0.05m / 降車地点 0.12m**（銀座）。
+
 ---
 
 ## 3. クライアント → サーバー
@@ -573,6 +626,12 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
                "width": 1.0, "seed": 0,
                "weatherMix": true, "focusWeak": true } }
 { "type": "cancel_detector_training" }                        // 中断（すぐには止まらない）
+{ "type": "set_app_mode", "mode": "taxi" }                    // "dev" | "taxi"。実用モードの出入り
+{ "type": "request_taxi",                                     // 乗降地点は道路へスナップされる
+  "pickup": [12.5, -30.2], "dropoff": [220.0, 88.4] }
+{ "type": "board_taxi" }                                      // phase=waiting のときだけ通る
+{ "type": "alight_taxi" }                                     // phase=riding / arrived で通る
+{ "type": "cancel_taxi", "halt": true }                        // halt=true は [space] の緊急停止
 { "type": "ping" }                                            // → {"type":"pong","t":<server epoch ms>}
 ```
 
@@ -617,6 +676,26 @@ asyncio 側から触ると更新中の重みを壊す）。
 - `cancel_detector_training` を送っても**すぐには止まらない**。いま処理中の
   バッチ（またはステップ）の切れ目まで進んでから終わる。
   **中断したモデルは保存しない**ので、それまでの認識器はそのまま残る。
+
+### 実用モードの操作（`set_app_mode` 以下）
+
+`set_app_mode` は**学習の可否だけ**を切り替える（物理は止めない）。切り替えの瞬間に
+配車は必ず畳まれ、溜めかけのロールアウトも捨てられる（走行の連続性が切れるため）。
+
+- `request_taxi` は**乗車地点と降車地点を 1 通でまとめて受け取る**。乗車地点に最も近い
+  車両から順に最大 4 台まで経路を試し、作れた 1 台を徴用する（決定 1）。
+- 断る理由（配車中・道路に寄せられない・50m 未満・来られる車両がいない）は
+  `error` ではなく **`status.message`** で返す。介入の失敗と同じ扱い（2.8 の但し書き）。
+- `cancel_taxi` の `halt` は [space] の緊急停止に対応する。その場で速度を 0 にしてから
+  徴用を解く。**乗車中でも降車扱いになる**（決定 4）。
+- 降車すると、その車両は**いまいる場所から新しい目的地へ向かう新規エピソード**として
+  走行に戻る（決定 3）。ワープはしない。
+- `request_taxi` の経路探索はエンジンスレッドで動く。実測は
+  **銀座 2.0ms / 金沢 18.8ms**（1 ステップの予算 50ms）。候補 4 台すべてで経路が
+  作れない最悪の場合、金沢では 0.2 秒ほどフレームが飛ぶ。
+
+`protocolVersion` は **1 のまま**である。上の追加はいずれもクライアントが無視できる
+（`taxi` は新しいメッセージ型、`status` の 2 項目は増えたキー）ため、破壊的変更ではない。
 
 不正なメッセージには `error` (`INVALID_MESSAGE`) を返し、接続は維持する。
 

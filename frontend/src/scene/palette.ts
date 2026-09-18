@@ -71,6 +71,13 @@ export interface ScenePalette {
 
   /** CNN が認識した車線（LaneDetectionOverlay）の帯・中心線の色。 */
   readonly laneOverlay: string
+
+  /** 徒歩キャラクター（実用モード）の肌・上衣・下衣 */
+  readonly pedestrianSkin: string
+  readonly pedestrianTop: string
+  readonly pedestrianBottom: string
+  /** 配車で徴用中の車両を指す色（乗車地点・降車地点の目印にも使う） */
+  readonly taxiMarker: string
 }
 
 /** 夜。もとからあった配色をそのまま残してある */
@@ -117,6 +124,11 @@ export const DARK_SCENE: ScenePalette = {
   obstacleBase: '#20262c',
 
   laneOverlay: '#ff4fd1',
+
+  pedestrianSkin: '#e3bb95',
+  pedestrianTop: '#4a8ede',
+  pedestrianBottom: '#2b3542',
+  taxiMarker: '#ffd54a',
 }
 
 /** 昼。 */
@@ -163,6 +175,11 @@ export const LIGHT_SCENE: ScenePalette = {
   obstacleBase: '#2f353a',
 
   laneOverlay: '#c2158f',
+
+  pedestrianSkin: '#d6a87a',
+  pedestrianTop: '#2f6bb8',
+  pedestrianBottom: '#39424e',
+  taxiMarker: '#e8a900',
 }
 
 /** テーマ名から配色を引く */

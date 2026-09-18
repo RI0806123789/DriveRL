@@ -30,8 +30,9 @@ venv のパスを埋めるだけの薄いラッパーで、中身は `backend/ru
 cd frontend
 npm run typecheck       # tsc --noEmit
 npm run build           # typecheck + vite build
-npm run verify          # 幾何検証 9 本をまとめて実行（ブラウザ不要）
-npm run verify:signals  # 1 本だけ（他: speedsigns / camera / colors / vehicles / sun / detections / markings / weather）
+npm run verify          # 幾何検証をまとめて実行（ブラウザ不要。本数の出典は package.json）
+npm run verify:signals  # 1 本だけ（他: speedsigns / camera / colors / vehicles / sun /
+                        #             detections / markings / weather / pedestrian / taximap）
 npm run icons           # PWA アイコンを再生成（public/icon-*.png。手で描かない）
 npm run dev             # Vite だけ立てる。?mock=1 でバックエンド無しでも動く（後述）
 
@@ -224,6 +225,48 @@ Web UI（`runtime/detector_job.py` →「モデル作成」タブ）が同じ関
 再開（`resume_sim()`）は**inbox 経由**。直前に積む `reload_detector` より先に再開すると、
 古い認識器のまま 1 ステップ進んでしまうためです（止めるのは即座、再開は順序つき）。
 
+### 実用モード（自動運転タクシー）
+
+操作パネル右上のトグルで**開発モード**（学習を回す）と**実用モード**（学習済みの重みで
+タクシーを呼ぶ）を切り替えます。`runtime/taxi.py` が配車 1 件ぶんの状態を持ち、
+契約は `docs/protocol.md` 2.10（`taxi` メッセージ）です。
+
+**止まるものが 3 つあり、どれも別物です**（`docs/protocol.md` 2.4 の表と同じ）:
+
+| | 止まるもの |
+|---|---|
+| `renderPaused` | フレーム配信だけ。学習は続く |
+| `simSuspended` | 物理と PPO ごと（認識器の学習中） |
+| `practicalMode` | **重みの更新だけ。** 物理・推論・配信は動き続ける |
+
+不変条件:
+
+- **徴用中の 1 台だけは PPO ではなく経路追従で走る**（`env._autopilot`）。
+  手元のモデルが停止方策に寄っていても**必ず迎えに来させる**ためで、これが無いと
+  「呼んでも来ない」画面になります（実測: 4,279 更新のモデルは銀座で 60 秒走らせても
+  0〜8m しか動かず、アクセル指令の平均が -0.64 でした）。
+  信号・規制速度・カーブ・乗降地点での停車は `constrain_accel` がそのまま効くので、
+  **赤信号は守るし制限速度も超えません。** 徴用していない車両は従来どおり推論のみ。
+- **経路追従には前走車との車間（`env._lead_gap`）が要る。** 経路しか見ないので、
+  これが無いと**止まっている車へ必ず追突します**（実測: 赤信号待ちの列に突っ込んで
+  「事故が起きたため配車を打ち切りました」で終わりました）。車間も赤信号と同じ式で、
+  車長 + 2.5m 手前で止まります。**徴用車だけに掛けること**（全車に掛けると
+  PPO の学習環境が変わってしまう）。
+- **徴用中はエピソードを閉じない**（`env.step` が `dones[held] = False`）。
+  閉じると乗降地点に着いた瞬間に respawn し、乗客を置いて別の街区へ飛びます。
+- **乗降地点で止めるのは赤信号と同じ式**（`signals.stop_speed_limit`）。
+  経路の終点を「越えてはいけない線」として速度上限を掛けるだけで、
+  専用の停止ロジックは持ちません（実測の停車精度: 乗車 0.05m / 降車 0.12m）。
+- **配車の経路探索はエンジンスレッドで走る。** 実測 銀座 2.0ms / 金沢 18.8ms（予算 50ms）。
+  候補 4 台すべてで経路が作れないと金沢で 0.2 秒ほど止まるので、
+  `taxi.ASSIGN_CANDIDATES` を増やすときはここを測り直すこと。
+- **モードを切り替えたら配車は必ず畳む**（`_apply_app_mode`）。畳まないと、
+  徴用したままの車両が開発モードの学習対象に戻り、経路も停車指示も残ります。
+- **歩行者はフロントだけが持つ**（`store/pedestrian.ts`）。サーバーは歩行者の位置を
+  知らないので、乗車の可否は「照準に入っているか」をフロントが判断して
+  `board_taxi` を送ります。位置も 60fps で動くため zustand には入れません
+  （`frameBuffer` と同じ作法）。
+
 ### フロントエンドの状態管理
 
 **学習指標の系列も `frame` と同じ扱いです。** `store/simStore.ts` の
@@ -244,6 +287,8 @@ React の再レンダリングは「マップ変更」「パラメータ変更�
 タブは `panel/ControlPanel.tsx` が `key={tab}` で**アンマウントして入れ替えます**。
 中身のローカル state は持ち越されないので、実行中の状態を見せたいものは
 サーバーから届いたもの（`detector.request` など）を初期値にすること。
+実用モードのスマホ画面（`panel/TaxiScreen.tsx`）も同じ枠で `key` を入れ替えるだけで、
+**タブ群とは排他**です（決定 9。両方を同時に出さない）。
 
 **`frameBuffer` を読む一覧は、必ず次の 2 つを守ること**（`code_review` F-10 / F-11）:
 
@@ -271,7 +316,8 @@ pointerdown のときしか走らないので、1 回ぶんのリフローは無
 
 **バックエンド無しでフロントだけ触るとき**は `npm run dev` で開いて URL に `?mock=1` を
 付けます（DEV ビルドのみ。本番では `isMockRequested()` が常に false を返す）。
-`store/mockServer.ts` が frame / metrics / network と、認識器の学習の疑似ジョブまで返すので、
+`store/mockServer.ts` が frame / metrics / network と、認識器の学習の疑似ジョブ、
+実用モードの配車（迎車 → 乗車 → 到着 → 降車）まで返すので、
 **サーバーを起動せずに見た目と遷移を確かめられます。** 実物のモデルが無いので
 書き出し・読み込みだけは塞いであります。
 

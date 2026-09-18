@@ -1,13 +1,15 @@
 /** 右側の操作パネル（memo 4章）。 */
 
 import { useEffect, useRef, useState } from 'react'
+import { send } from '../store/connection'
 import { useSimStore } from '../store/simStore'
-import type { PanelTab } from '../store/simStore'
+import type { AppMode, PanelTab } from '../store/simStore'
 import { prefersReducedMotion } from '../ui/motion'
 import { LearningTab } from './LearningTab'
 import { MapTab } from './MapTab'
 import { ModelTab } from './ModelTab'
 import { SimulationTab } from './SimulationTab'
+import { TaxiScreen } from './TaxiScreen'
 import { ViewTab } from './ViewTab'
 import { Tabs } from '../ui/Tabs'
 import type { TabItem } from '../ui/Tabs'
@@ -43,6 +45,8 @@ const CONNECTION_LABEL: Record<string, string> = {
 export function ControlPanel() {
   const tab = useSimStore((s) => s.tab)
   const setTab = useSimStore((s) => s.setTab)
+  const mode = useSimStore((s) => s.mode)
+  const setMode = useSimStore((s) => s.setMode)
   const connection = useSimStore((s) => s.connection)
   const usingMock = useSimStore((s) => s.usingMock)
   const protocolMismatch = useSimStore((s) => s.protocolMismatch)
@@ -57,6 +61,18 @@ export function ControlPanel() {
     paneDir.current =
       TAB_ORDER.indexOf(tab) > TAB_ORDER.indexOf(prevTab.current) ? 'next' : 'prev'
     prevTab.current = tab
+  }
+
+  const prevMode = useRef<AppMode>(mode)
+  if (prevMode.current !== mode) {
+    paneDir.current = mode === 'taxi' ? 'next' : 'prev'
+    prevMode.current = mode
+  }
+
+  const toggleMode = () => {
+    const next: AppMode = mode === 'dev' ? 'taxi' : 'dev'
+    setMode(next)
+    send({ type: 'set_app_mode', mode: next })
   }
 
   // ★ 退場中のバナーは**同時に複数ありうる**ので、id ごとに持つこと。
@@ -105,6 +121,8 @@ export function ControlPanel() {
               <span className="panel-brand-title">DriveRL</span>
               <span className="panel-brand-sub">マルチエージェント強化学習 自動運転</span>
             </span>
+
+            <ModeSwitch mode={mode} disabled={disabled} onToggle={toggleMode} />
           </div>
 
           <div className="panel-header-row">
@@ -116,9 +134,11 @@ export function ControlPanel() {
           </div>
         </header>
 
-        <div className="panel-tabs">
-          <Tabs items={TABS} value={tab} onChange={setTab} label="設定セクション" />
-        </div>
+        {mode === 'dev' && (
+          <div className="panel-tabs">
+            <Tabs items={TABS} value={tab} onChange={setTab} label="設定セクション" />
+          </div>
+        )}
 
         <div className="panel-body m3-scroll">
           {usingMock && (
@@ -164,12 +184,22 @@ export function ControlPanel() {
             </div>
           ))}
 
-          <div key={tab} className="panel-pane" data-dir={paneDir.current}>
-            {tab === 'simulation' && <SimulationTab />}
-            {tab === 'map' && <MapTab />}
-            {tab === 'learning' && <LearningTab />}
-            {tab === 'model' && <ModelTab />}
-            {tab === 'view' && <ViewTab />}
+          <div
+            key={mode === 'taxi' ? 'taxi' : tab}
+            className="panel-pane"
+            data-dir={paneDir.current}
+          >
+            {mode === 'taxi' ? (
+              <TaxiScreen />
+            ) : (
+              <>
+                {tab === 'simulation' && <SimulationTab />}
+                {tab === 'map' && <MapTab />}
+                {tab === 'learning' && <LearningTab />}
+                {tab === 'model' && <ModelTab />}
+                {tab === 'view' && <ViewTab />}
+              </>
+            )}
           </div>
         </div>
       </div>
@@ -187,6 +217,40 @@ export function ControlPanel() {
           接続できるようになると自動で復帰します。
         </div>
       </div>
+    </div>
+  )
+}
+
+interface ModeSwitchProps {
+  mode: AppMode
+  disabled: boolean
+  onToggle: () => void
+}
+
+/** 開発 / 実用 の切り替え。**動かすのは transform と opacity だけ**（決定 13）。 */
+function ModeSwitch({ mode, disabled, onToggle }: ModeSwitchProps) {
+  const taxi = mode === 'taxi'
+  return (
+    <div className="panel-mode">
+      <span className="panel-mode-label">
+        <span className="panel-mode-name" key={mode}>
+          {taxi ? '実用モード' : '開発モード'}
+        </span>
+        <span className="panel-mode-sub">{taxi ? 'タクシーを呼ぶ' : '学習を回す'}</span>
+      </span>
+      <button
+        type="button"
+        className="panel-mode-switch"
+        role="switch"
+        aria-checked={taxi}
+        aria-label="開発モードと実用モードを切り替える"
+        disabled={disabled}
+        onClick={onToggle}
+      >
+        <span className="panel-mode-track">
+          <span className="panel-mode-thumb" />
+        </span>
+      </button>
     </div>
   )
 }

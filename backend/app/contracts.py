@@ -606,3 +606,53 @@ class InterventionEvent:
 
     kind: str
     payload: dict[str, Any] = field(default_factory=dict)
+
+
+TAXI_PHASE_IDLE = "idle"
+TAXI_PHASE_APPROACHING = "approaching"
+TAXI_PHASE_WAITING = "waiting"
+TAXI_PHASE_RIDING = "riding"
+TAXI_PHASE_ARRIVED = "arrived"
+
+TAXI_PHASES: tuple[str, ...] = (
+    TAXI_PHASE_IDLE,
+    TAXI_PHASE_APPROACHING,
+    TAXI_PHASE_WAITING,
+    TAXI_PHASE_RIDING,
+    TAXI_PHASE_ARRIVED,
+)
+
+
+def _point_wire(point: tuple[float, float] | None) -> list[float] | None:
+    return None if point is None else [round(point[0], 3), round(point[1], 3)]
+
+
+@dataclass
+class TaxiStatus:
+    """docs/protocol.md 2.10 の taxi に対応。実用モードの配車 1 件ぶんの状態。"""
+
+    phase: str = TAXI_PHASE_IDLE
+    vehicle_id: int = -1
+    pickup: tuple[float, float] | None = None
+    dropoff: tuple[float, float] | None = None
+    route: list[tuple[float, float]] = field(default_factory=list)
+    route_revision: int = 0
+    eta_seconds: float = 0.0
+    remaining_distance_m: float = 0.0
+    message: str = ""
+
+    def to_wire(self, *, include_route: bool = False) -> dict[str, Any]:
+        """`route` は数百点になるので、版が変わったときだけ載せる（frame と同じ約束）。"""
+        payload: dict[str, Any] = {
+            "phase": self.phase,
+            "vehicleId": self.vehicle_id,
+            "pickup": _point_wire(self.pickup),
+            "dropoff": _point_wire(self.dropoff),
+            "routeRevision": self.route_revision,
+            "etaSeconds": round(self.eta_seconds, 1),
+            "remainingDistanceM": round(self.remaining_distance_m, 1),
+            "message": self.message,
+        }
+        if include_route:
+            payload["route"] = [[round(px, 2), round(py, 2)] for px, py in self.route]
+        return payload

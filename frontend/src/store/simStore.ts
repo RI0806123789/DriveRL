@@ -16,6 +16,7 @@ import type {
   SimConfig,
   SimParams,
   StatusPayload,
+  TaxiMessage,
   WeatherPreset,
 } from '../types/protocol'
 import { PROTOCOL_VERSION } from '../types/protocol'
@@ -47,6 +48,8 @@ function emptyMetricsSeries(): MetricsSeries {
 }
 
 export type PanelTab = 'simulation' | 'map' | 'learning' | 'model' | 'view'
+/** 開発モード（学習を回す） / 実用モード（学習済みモデルでタクシーを呼ぶ） */
+export type AppMode = 'dev' | 'taxi'
 /** 俯瞰（自由視点） / 追従（後方上空） / 運転席（一人称） */
 export type CameraMode = 'orbit' | 'follow' | 'driver'
 /** 3D 画面クリック時のふるまい（memo F-05） */
@@ -115,6 +118,21 @@ const DEFAULT_STATUS: StatusPayload = {
   renderPaused: false,
   learning: false,
   simSuspended: false,
+  practicalMode: false,
+  taxiVehicleId: -1,
+}
+
+const IDLE_TAXI: TaxiMessage = {
+  type: 'taxi',
+  phase: 'idle',
+  vehicleId: -1,
+  pickup: null,
+  dropoff: null,
+  routeRevision: 0,
+  route: [],
+  etaSeconds: 0,
+  remainingDistanceM: 0,
+  message: '',
 }
 
 export interface SimStore {
@@ -149,11 +167,15 @@ export interface SimStore {
   network: NetworkMessage | null
   /** 認識器（CNN）の学習状況。接続直後に 1 通届き、以後は進捗が動いたときだけ。 */
   detector: DetectorMessage | null
+  /** 実用モードの配車状態。`route` は届いた最新のものを保持し続ける */
+  taxi: TaxiMessage
   errors: ErrorEntry[]
 
   panelOpen: boolean
   /** 配色。**日の出・日の入りで自動的に切り替わる**（store/autoTheme.ts）。 */
   theme: ThemeName
+  /** 開発 / 実用。**切り替えるとタブ構成ごと入れ替わる**（決定 9） */
+  mode: AppMode
   tab: PanelTab
   cameraMode: CameraMode
   /** 追従対象のスロット番号 */
@@ -165,6 +187,7 @@ export interface SimStore {
 
   setPanelOpen(open: boolean): void
   togglePanel(): void
+  setMode(mode: AppMode): void
   setTab(tab: PanelTab): void
   setCameraMode(mode: CameraMode): void
   setFollowTarget(id: number): void
@@ -213,10 +236,12 @@ export const useSimStore = create<SimStore>((set, get) => ({
   latestMetrics: null,
   network: null,
   detector: null,
+  taxi: IDLE_TAXI,
   errors: [],
 
   panelOpen: true,
   theme: INITIAL_THEME,
+  mode: 'dev',
   tab: 'simulation',
   cameraMode: 'orbit',
   followTarget: 0,
@@ -237,6 +262,7 @@ export const useSimStore = create<SimStore>((set, get) => ({
 
   setPanelOpen: (open) => set({ panelOpen: open }),
   togglePanel: () => set((s) => ({ panelOpen: !s.panelOpen })),
+  setMode: (mode) => set({ mode }),
   setTab: (tab) => set({ tab }),
   setCameraMode: (cameraMode) => set({ cameraMode }),
   setFollowTarget: (followTarget) => set({ followTarget }),
@@ -262,6 +288,7 @@ export const useSimStore = create<SimStore>((set, get) => ({
       case 'init': {
         const init = msg as InitMessage
         resetFrameBuffer()
+        const status = init.status ?? DEFAULT_STATUS
         set({
           handshaked: true,
           protocolMismatch: init.protocolVersion !== PROTOCOL_VERSION,
@@ -269,7 +296,9 @@ export const useSimStore = create<SimStore>((set, get) => ({
           weatherPresets: init.weatherPresets ?? [],
           config: init.config ?? DEFAULT_CONFIG,
           params: init.params ?? DEFAULT_PARAMS,
-          status: init.status ?? DEFAULT_STATUS,
+          status,
+          // ★ リロードしてもサーバーのモードへ戻す（配車の途中で開発モードに落とさない）
+          mode: status.practicalMode ? 'taxi' : 'dev',
           pendingPresetId: null,
         })
         const cfg = init.config ?? DEFAULT_CONFIG
@@ -301,6 +330,13 @@ export const useSimStore = create<SimStore>((set, get) => ({
         set((s) => ({
           status: payload as StatusPayload,
           pendingPresetId: payload.state === 'loading_map' ? s.pendingPresetId : null,
+          // モードはサーバーが正。トグルの楽観的更新はここで確定する
+          mode:
+            payload.practicalMode === undefined
+              ? s.mode
+              : payload.practicalMode
+                ? 'taxi'
+                : 'dev',
         }))
         break
       }
@@ -332,6 +368,17 @@ export const useSimStore = create<SimStore>((set, get) => ({
 
       case 'detector': {
         set({ detector: msg as DetectorMessage })
+        break
+      }
+
+      case 'taxi': {
+        // 経路は版が変わった通にしか入らないので、無い通では前回のものを引き継ぐ
+        set((s) => ({
+          taxi: {
+            ...msg,
+            route: msg.route ?? (msg.routeRevision === s.taxi.routeRevision ? s.taxi.route : []),
+          },
+        }))
         break
       }
 

@@ -55,7 +55,7 @@ Python は `backend/.venv`、Node は `frontend/`。詳しいコマンドは `CL
 cd frontend
 npm run typecheck   # tsc --noEmit
 npm run build       # typecheck + vite build
-npm run verify      # 3D の幾何検証 9 本（ブラウザ不要）
+npm run verify      # 3D の幾何検証（ブラウザ不要。本数の出典は package.json の scripts）
 ```
 
 `npm run verify` がある理由は、**3D の向きは間違っていても型チェックもビルドも通る**からです。
@@ -142,6 +142,9 @@ npm run verify      # 3D の幾何検証 9 本（ブラウザ不要）
 - **`polygonOffset` の重ね順**を崩すと Z ファイティングで点滅する
 - **チェックポイントは必ず `weights_only=True` で読む。フォールバックしない**（`SECURITY.md` にも明記）
 - **`map/loader.py` と `public/sw.js` の `CACHE_VERSION` は、生成物の中身を変えたら上げる**
+- **実用モード（自動運転タクシー）では重みの更新だけが止まる。** 物理も推論も配信も動き続ける。
+  徴用した 1 台だけは PPO ではなく経路追従で走らせ、エピソードを閉じない
+  （閉じると乗降地点で respawn して乗客を置き去りにする）
 
 ---
 

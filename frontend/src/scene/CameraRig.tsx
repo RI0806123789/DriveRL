@@ -6,10 +6,12 @@ import { OrbitControls } from '@react-three/drei'
 import * as THREE from 'three'
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib'
 import { frameBuffer } from '../store/frameBuffer'
+import { pedestrian } from '../store/pedestrian'
 import { useSimStore } from '../store/simStore'
 import type { MapBounds } from '../types/protocol'
 import { computeAlpha, createPose, sampleVehicle } from './interpolation'
 import { driverEye, driverLookAt, firstActiveSlot, followEye, followLookAt } from './cameraMath'
+import { eyeLookAt, eyePosition } from './pedestrianGeometry'
 import { setCameraNotice } from './sceneStats'
 
 /** 追従・運転席それぞれの追従の速さ（1 秒あたりの寄り具合） */
@@ -51,6 +53,9 @@ export const CameraRig = memo(function CameraRig({ bounds }: CameraRigProps) {
 
   const mode = useSimStore((s) => s.cameraMode)
   const followTarget = useSimStore((s) => s.followTarget)
+  const appMode = useSimStore((s) => s.mode)
+  /** 実用モードで歩いている間は一人称に固定する（決定 11） */
+  const taxiWalk = appMode === 'taxi' && mode !== 'driver'
 
   const pose = useMemo(createPose, [])
   const desiredPos = useMemo(() => new THREE.Vector3(), [])
@@ -65,11 +70,14 @@ export const CameraRig = memo(function CameraRig({ bounds }: CameraRigProps) {
   useEffect(() => {
     const cam = camera as THREE.PerspectiveCamera
     if (!cam.isPerspectiveCamera) return
-    cam.fov = mode === 'driver' ? FOV_DRIVER : FOV_DEFAULT
-    cam.near = mode === 'driver' ? NEAR_DRIVER : NEAR_DEFAULT
+    const firstPerson = mode === 'driver' || taxiWalk
+    cam.fov = firstPerson ? FOV_DRIVER : FOV_DEFAULT
+    cam.near = firstPerson ? NEAR_DRIVER : NEAR_DEFAULT
     cam.updateProjectionMatrix()
-  }, [camera, mode])
+  }, [camera, mode, taxiWalk])
 
+  // 実用モードでも、立つ場所が決まるまでは俯瞰へ置いておく
+  // （置かないとカメラが初期位置のまま街を向かず、真っ白な画面になる）
   useEffect(() => {
     if (mode !== 'orbit') return
     camera.position.copy(overview.position)
@@ -88,6 +96,23 @@ export const CameraRig = memo(function CameraRig({ bounds }: CameraRigProps) {
   }, [mode, followTarget])
 
   useFrame((_state, delta) => {
+    // 歩いている間は補間せず、そのまま目線へ置く（動かしているのがフロント自身のため）。
+    // **立つ場所が決まるまでは俯瞰のまま**にする（原点は建物の中のことがある）
+    if (taxiWalk && pedestrian.placed) {
+      const eye = eyePosition(pedestrian.x, pedestrian.y, pedestrian.heading, pedestrian.bob)
+      const look = eyeLookAt(
+        pedestrian.x,
+        pedestrian.y,
+        pedestrian.heading,
+        pedestrian.pitch,
+        12,
+        pedestrian.bob,
+      )
+      camera.position.set(eye.x, eye.y, eye.z)
+      camera.lookAt(look.x, look.y, look.z)
+      return
+    }
+
     if (mode === 'orbit') return
 
     const paused = useSimStore.getState().status.renderPaused
@@ -126,7 +151,7 @@ export const CameraRig = memo(function CameraRig({ bounds }: CameraRigProps) {
   return (
     <OrbitControls
       ref={controls}
-      enabled={mode === 'orbit'}
+      enabled={mode === 'orbit' && !taxiWalk}
       enableDamping
       dampingFactor={0.08}
       maxPolarAngle={Math.PI * 0.49}
