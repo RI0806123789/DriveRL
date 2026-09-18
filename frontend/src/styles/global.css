@@ -458,6 +458,16 @@ p {
   --m3-pane-dx: -26px;
 }
 
+/* 実用モードのスマホ画面は、カードを積むのではなくパネルの残り全部を使う */
+.panel-pane[data-fill='true'] {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.panel-pane[data-fill='true'] > * {
+  height: 100%;
+  min-height: 0;
+}
+
 .panel-pane > * {
   animation: m3-pane-card-in var(--m3-dur-long) var(--m3-ease-emphasized-decel) both;
 }
@@ -2134,16 +2144,19 @@ button.m3-chip:active:not(:disabled) {
   outline-offset: 3px;
 }
 
-/* スマホ筐体 */
+/* スマホ筐体。**パネルの中いっぱいに広げる**（幅も高さも余らせない） */
 .taxi-phone {
   display: flex;
   justify-content: center;
-  padding: 2px 0 8px;
+  height: 100%;
+  min-height: 0;
+  padding: 2px 0 4px;
 }
 
 .taxi-phone-bezel {
   width: 100%;
-  max-width: 360px;
+  height: 100%;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -2195,16 +2208,19 @@ button.m3-chip:active:not(:disabled) {
   color: var(--m3-on-surface-variant);
 }
 
-/* 地図。**上部 2/3 を占める**（memo「スマホ画面上部 2/3 にマップ全体」） */
+/* 地図。**残りの高さを全部取る**（memo「スマホ画面上部 2/3 にマップ全体」） */
 .taxi-map {
   position: relative;
-  aspect-ratio: 1 / 1;
-  min-height: 200px;
+  flex: 1 1 auto;
+  min-height: 180px;
   border-radius: var(--m3-shape-lg);
   overflow: hidden;
   background: var(--m3-surface-container);
   border: 1px solid var(--m3-outline-variant);
   cursor: grab;
+  /* ホイールはこちらで拾ってブラウザのズームへ渡さない（追加要望 2） */
+  touch-action: none;
+  overscroll-behavior: contain;
 }
 .taxi-map[data-picking='true'] {
   cursor: crosshair;
@@ -2222,6 +2238,7 @@ button.m3-chip:active:not(:disabled) {
 }
 
 .taxi-phone-body {
+  flex: 0 0 auto;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -2331,11 +2348,20 @@ button.m3-chip:active:not(:disabled) {
   transform: translateY(-50%);
 }
 
-.taxi-hint {
+/* 速度計と操作の案内はここに縦へ積む（位置をずらさないよう 1 か所にまとめる） */
+.taxi-bottom {
   position: absolute;
   left: 50%;
   bottom: 28px;
   transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  max-width: calc(100% - 32px);
+}
+
+.taxi-hint {
   padding: 8px 18px;
   border-radius: var(--m3-shape-full);
   background: color-mix(in srgb, var(--m3-surface-container) 84%, transparent);
@@ -2345,7 +2371,7 @@ button.m3-chip:active:not(:disabled) {
   font-size: 12.5px;
   font-weight: 600;
   white-space: nowrap;
-  max-width: calc(100% - 32px);
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
 }
@@ -2356,13 +2382,10 @@ button.m3-chip:active:not(:disabled) {
 }
 
 .taxi-speed {
-  position: absolute;
-  left: 28px;
-  bottom: 28px;
   display: flex;
   align-items: baseline;
   gap: 4px;
-  padding: 10px 18px;
+  padding: 8px 22px;
   border-radius: var(--m3-shape-lg);
   background: color-mix(in srgb, var(--m3-surface-container) 84%, transparent);
   backdrop-filter: blur(12px);

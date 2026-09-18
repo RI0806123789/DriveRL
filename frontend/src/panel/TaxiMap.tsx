@@ -229,13 +229,24 @@ export function TaxiMap({ picking, onPick, draftPickup, draftDropoff }: TaxiMapP
     if (point) onPick(point)
   }
 
-  const onWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
+  /**
+   * ホイールの拡大縮小。**`passive: false` で自前に登録して `preventDefault()` する**
+   * （React の `onWheel` は passive なので止められず、Ctrl+ホイールでページごと
+   * 拡大されて地図が読めなくなる）。
+   */
+  useEffect(() => {
+    const canvas = canvasRef.current
     const p = projection
-    if (!p || !map) return
-    const anchor = pointFromEvent(e)
-    if (!anchor) return
-    setView(zoomAround(view, map.bounds, anchor, e.deltaY < 0 ? 1.2 : 1 / 1.2))
-  }
+    if (!canvas || !p || !map) return
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault()
+      const rect = canvas.getBoundingClientRect()
+      const anchor = toEnu(p, e.clientX - rect.left, e.clientY - rect.top)
+      setView((prev) => zoomAround(prev, map.bounds, anchor, e.deltaY < 0 ? 1.2 : 1 / 1.2))
+    }
+    canvas.addEventListener('wheel', onWheel, { passive: false })
+    return () => canvas.removeEventListener('wheel', onWheel)
+  }, [projection, map])
 
   return (
     <div className="taxi-map" data-picking={picking ? 'true' : 'false'}>
@@ -248,7 +259,6 @@ export function TaxiMap({ picking, onPick, draftPickup, draftDropoff }: TaxiMapP
         onPointerCancel={() => {
           drag.current = null
         }}
-        onWheel={onWheel}
       />
       {!map && <div className="taxi-map-empty">地図が読み込まれていません</div>}
     </div>

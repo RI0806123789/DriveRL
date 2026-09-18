@@ -188,6 +188,7 @@ export function ControlPanel() {
             key={mode === 'taxi' ? 'taxi' : tab}
             className="panel-pane"
             data-dir={paneDir.current}
+            data-fill={mode === 'taxi' ? 'true' : 'false'}
           >
             {mode === 'taxi' ? (
               <TaxiScreen />

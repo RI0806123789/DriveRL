@@ -80,15 +80,21 @@ export function TaxiHud() {
         </div>
       )}
 
-      {riding && (
-        <div className="taxi-speed">
-          <span className="taxi-speed-value">{sample.speedKph}</span>
-          <span className="taxi-speed-unit">km/h</span>
-        </div>
-      )}
+      {/* 速度計と操作の案内は同じ場所（中央下部）に積む */}
+      <div className="taxi-bottom">
+        {riding && (
+          <div className="taxi-speed">
+            <span className="taxi-speed-value">{sample.speedKph}</span>
+            <span className="taxi-speed-unit">km/h</span>
+          </div>
+        )}
 
-      <div className="taxi-hint" data-strong={canBoard || taxi.phase === 'arrived' ? 'true' : 'false'}>
-        {hint}
+        <div
+          className="taxi-hint"
+          data-strong={canBoard || taxi.phase === 'arrived' ? 'true' : 'false'}
+        >
+          {hint}
+        </div>
       </div>
     </div>
   )
