@@ -445,7 +445,7 @@ function handleEnter(): void {
     send({ type: 'alight_taxi' })
     return
   }
-  if (taxi.phase !== 'waiting') return
+  if (taxi.phase !== 'waiting' && taxi.phase !== 'approaching') return
   if (pedestrian.aimed !== taxi.vehicleId) return
   send({ type: 'board_taxi' })
 }

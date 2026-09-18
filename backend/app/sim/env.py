@@ -30,9 +30,18 @@ __all__ = ["SimulationEnv"]
 
 AUTOPILOT_LOOKAHEAD_MIN_M = 6.0
 AUTOPILOT_LOOKAHEAD_SEC = 1.2
+#: 経路から離れているときに詰める下限 [m]。遠くを見たままだと戻れずに膨らむ
+AUTOPILOT_LOOKAHEAD_FLOOR_M = 3.0
+#: これ以上曲がっている間は加速しない [rad]。
+#: **ここでブレーキまで踏ませないこと**（銀座で交差点内に止まり、かえって事故が増えた）
+AUTOPILOT_STRAIGHT_RAD = 0.22
+#: この速度までは、切っていても加速する [m/s]（曲がりながら発進できるように）
+AUTOPILOT_CREEP_MPS = 2.5
 
 AUTOPILOT_LANE_HALF_WIDTH_M = 2.4
 AUTOPILOT_HEADWAY_M = 2.5
+AUTOPILOT_LEAD_RANGE_M = 45.0
+AUTOPILOT_SAME_WAY_COS = 0.5
 
 
 class SimulationEnv:
@@ -58,6 +67,9 @@ class SimulationEnv:
 
         # 実用モードで徴用している 1 台。**この間だけエピソードを閉じない**（決定 2）
         self.commandeered_slot: int = -1
+        # 実用モードの間は全車を経路追従で走らせる。**学習中は必ず False**
+        # （PPO から見た環境が変わってしまう）
+        self.autopilot_all: bool = False
 
         self.latest_perception: dict[int, PerceptionResult] = {}
         self._camera_spec = DEFAULT_CAMERA
@@ -96,47 +108,83 @@ class SimulationEnv:
         return ok
 
     def _autopilot(self, slot: int) -> tuple[float, float]:
-        """経路の先を追う操作を返す（徴用中のタクシー用）。
+        """経路の先を追う操作を返す（Pure Pursuit）。
 
-        加速は全開で出し、信号・規制速度・カーブ・乗降地点での停車は
-        `constrain_accel` に任せる（環境の性質として効かせる、という既存の作法）。
+        加速の抑制（信号・規制速度・カーブ・車間・乗降地点）は `constrain_accel` に
+        任せる。ここが決めるのは「どこを見て、どれだけ切るか」だけ。
+
+        ★ 舵角は**目標点を通る円弧の曲率**から出すこと。角度差をそのまま舵角に
+        すると、急カーブで切り足りずに膨らんで建物へ突っ込む（金沢で実測）。
         """
         world = self.world
         state = world.slots[slot]
         route = state.route
         if route.shape[0] < 2:
             return 0.0, 0.0
+
         speed = float(world.fleet.speed[slot])
+        off_route = abs(float(world.lateral[slot]))
         ahead = max(AUTOPILOT_LOOKAHEAD_MIN_M, speed * AUTOPILOT_LOOKAHEAD_SEC)
+        # 経路から離れているほど近くを見る（遠くを見たままだと戻れない）
+        ahead = max(AUTOPILOT_LOOKAHEAD_FLOOR_M, ahead - off_route * 2.0)
+
         target = np.float32(state.arc_position + ahead)
         tx = float(np.interp(target, state.route_cum, route[:, 0]))
         ty = float(np.interp(target, state.route_cum, route[:, 1]))
 
         heading = float(world.fleet.heading[slot])
-        want = math.atan2(ty - float(world.fleet.y[slot]), tx - float(world.fleet.x[slot]))
-        diff = math.atan2(math.sin(want - heading), math.cos(want - heading))
-        return 1.0, float(np.clip(diff / config.MAX_STEER, -1.0, 1.0))
+        dx = tx - float(world.fleet.x[slot])
+        dy = ty - float(world.fleet.y[slot])
+        distance = math.hypot(dx, dy)
+        want = math.atan2(dy, dx)
+        alpha = math.atan2(math.sin(want - heading), math.cos(want - heading))
+
+        curvature = 2.0 * math.sin(alpha) / max(distance, 1.0)
+        steer = math.atan(config.WHEELBASE * curvature)
+        # 曲がっている間は加速しない（突っ込むほど膨らむ）。
+        # ★ ただし止まっているときは必ず出すこと。切ったまま停まると、
+        #   角度が変わらないので二度と発進できなくなる（銀座で 361 秒動かなくなった）
+        straight = abs(alpha) < AUTOPILOT_STRAIGHT_RAD
+        accel = 1.0 if (straight or speed < AUTOPILOT_CREEP_MPS) else 0.0
+        return accel, float(np.clip(steer / config.MAX_STEER, -1.0, 1.0))
+
+    def _autopilot_slots(self, active: np.ndarray) -> np.ndarray:
+        """経路追従で走らせるスロット。実用モードでは全車、それ以外は徴用した 1 台だけ。"""
+        if self.autopilot_all:
+            return np.flatnonzero(active)
+        held = int(self.commandeered_slot)
+        if 0 <= held < config.MAX_VEHICLES and active[held]:
+            return np.array([held], dtype=np.int64)
+        return np.zeros(0, dtype=np.int64)
 
     def _lead_gap(self, slot: int) -> float:
         """前方の同じ進路上にいる他車までの車間 [m]。いなければ inf。
 
         経路追従は前走車を見ないので、**これが無いと停まっている車へ必ず追突する**
         （学習が進んでいないモデルでは他車がその場に止まったままになる）。
+
+        ★ **同じ向きに走っている車だけ**を数えること。交差点で直交する車や対向車まで
+        「前走車」にすると、互いに相手の前方に居座って**双方が永久に止まる**
+        （実測で 444 秒動かなくなった）。交差する流れは信号が捌く。
         """
         fleet = self.world.fleet
         idx = np.flatnonzero(fleet.active)
         if idx.size <= 1:
             return float("inf")
-        cos_h = math.cos(float(fleet.heading[slot]))
-        sin_h = math.sin(float(fleet.heading[slot]))
+        heading = float(fleet.heading[slot])
+        cos_h = math.cos(heading)
+        sin_h = math.sin(heading)
         dx = fleet.x[idx].astype(np.float64) - float(fleet.x[slot])
         dy = fleet.y[idx].astype(np.float64) - float(fleet.y[slot])
         lon = dx * cos_h + dy * sin_h
         lat = -dx * sin_h + dy * cos_h
+        same_way = np.cos(fleet.heading[idx].astype(np.float64) - heading)
         ahead = (
             (idx != slot)
             & (lon > 0.0)
+            & (lon <= AUTOPILOT_LEAD_RANGE_M)
             & (np.abs(lat) <= AUTOPILOT_LANE_HALF_WIDTH_M)
+            & (same_way >= AUTOPILOT_SAME_WAY_COS)
         )
         if not ahead.any():
             return float("inf")
@@ -223,11 +271,12 @@ class SimulationEnv:
         accel_cmd = np.where(active_before, act[:, 0], 0.0).astype(np.float32)
         steer_cmd = np.where(active_before, act[:, 1], 0.0).astype(np.float32)
 
-        # 徴用中の 1 台だけは経路追従で走らせる。**方策の実力に関わらず迎えに来させるため**で、
-        # 呼んでも来ないと実用モードが体験として成立しない
+        # 経路追従で走らせる車。**方策の実力に体験を左右させないため**で、
+        # 実用モードでは街の車も止まったままにしない（詰まるとタクシーも来られない）
         held = int(self.commandeered_slot)
-        if 0 <= held < n and active_before[held]:
-            accel_cmd[held], steer_cmd[held] = self._autopilot(held)
+        piloted = self._autopilot_slots(active_before)
+        for slot in piloted:
+            accel_cmd[slot], steer_cmd[slot] = self._autopilot(int(slot))
 
         params = self.params
         max_speed = max(float(params.max_speed), 1e-3)
@@ -242,12 +291,14 @@ class SimulationEnv:
         if params.obey_speed_signs:
             limit = np.minimum(limit, self.world.posted_speed_limits())
         limit = np.minimum(limit, self.world.stop_speed_limits())
-        if 0 <= held < n and active_before[held]:
-            limit[held] = min(
-                float(limit[held]),
+        # ★ 車間は経路追従の車にだけ掛ける。学習中の車に掛けると
+        #   「追突しない世界」になり、PPO から見た環境が変わってしまう
+        for slot in piloted:
+            limit[slot] = min(
+                float(limit[slot]),
                 float(
                     stop_speed_limit(
-                        np.float64(self._lead_gap(held)),
+                        np.float64(self._lead_gap(int(slot))),
                         abs(config.MAX_DECEL),
                         config.DT,
                         margin_m=config.VEHICLE_LENGTH + AUTOPILOT_HEADWAY_M,

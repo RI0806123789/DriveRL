@@ -50,7 +50,10 @@ export function TaxiHud() {
   }, [taxi.vehicleId])
 
   const riding = taxi.phase === 'riding' || taxi.phase === 'arrived'
-  const canBoard = taxi.phase === 'waiting' && sample.aimed === taxi.vehicleId
+  // 迎車の途中でも、照準に入っていれば乗れる（乗車地点まで待たせない）
+  const canBoard =
+    (taxi.phase === 'waiting' || taxi.phase === 'approaching') &&
+    sample.aimed === taxi.vehicleId
 
   // ★ 乗れる／降りられることを最優先で出す。
   //   ポインタロックの案内を先に置くと、肝心の「いま押せるキー」が隠れる
@@ -64,7 +67,7 @@ export function TaxiHud() {
   } else if (taxi.phase === 'waiting') {
     hint = 'タクシーが待っています。近づいて照準を合わせ [Enter]'
   } else if (taxi.phase === 'approaching') {
-    hint = `タクシーが迎えに来ています（あと ${formatEta(taxi.etaSeconds)}）`
+    hint = `タクシーが迎えに来ています（あと ${formatEta(taxi.etaSeconds)}）　近づけば途中でも乗れます`
   } else if (taxi.phase === 'riding') {
     hint = `目的地まで ${formatEta(taxi.etaSeconds)}　[Space] で緊急停止`
   } else {

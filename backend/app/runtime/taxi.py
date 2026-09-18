@@ -96,8 +96,13 @@ class TaxiService:
         return None
 
     def board(self, env: "SimulationEnv") -> str | None:
-        """乗車する。降車地点への経路へ差し替える。"""
-        if self.status.phase != TAXI_PHASE_WAITING:
+        """乗車する。降車地点への経路へ差し替える。
+
+        **迎車の途中でも乗れる。** 乗車地点は利用者が地図上で押した点でしかないので、
+        そこまで来るのを待たせる理由がない（近くで拾えたならそれでよい）。
+        経路は必ず**いまいる場所から**作り直すので、途中で乗せても矛盾しない。
+        """
+        if self.status.phase not in (TAXI_PHASE_WAITING, TAXI_PHASE_APPROACHING):
             return "いまは乗車できません"
 
         slot = self.vehicle_id

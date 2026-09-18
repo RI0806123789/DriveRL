@@ -58,7 +58,7 @@ class ActorCritic(nn.Module):
         self.clamp_log_std()
 
     def _distribution(self, obs: torch.Tensor) -> Normal:
-        mu = self.mu_head(self.policy_trunk(obs))
+        mu = torch.tanh(self.mu_head(self.policy_trunk(obs)))
         log_std = torch.clamp(self.log_std, config.PPO_LOG_STD_MIN, config.PPO_LOG_STD_MAX)
         std = torch.exp(log_std).expand_as(mu)
         return Normal(mu, std)

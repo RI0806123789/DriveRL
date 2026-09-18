@@ -581,7 +581,7 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
 | phase | 何が起きているか | 次へ進む条件 |
 |---|---|---|
 | `idle` | 配車していない | `request_taxi` |
-| `approaching` | 乗車地点へ迎車中 | 経路の残りが 4m 以下かつ 0.8m/s 以下 |
+| `approaching` | 乗車地点へ迎車中 | 経路の残りが 4m 以下かつ 0.8m/s 以下、または `board_taxi` |
 | `waiting` | 乗車地点で停車して待っている | `board_taxi` |
 | `riding` | 乗客を乗せて降車地点へ | 同じ到着条件 |
 | `arrived` | 降車地点で停車している | `alight_taxi` |
@@ -633,7 +633,7 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
 { "type": "set_app_mode", "mode": "taxi" }                    // "dev" | "taxi"。実用モードの出入り
 { "type": "request_taxi",                                     // 乗降地点は道路へスナップされる
   "pickup": [12.5, -30.2], "dropoff": [220.0, 88.4] }
-{ "type": "board_taxi" }                                      // phase=waiting のときだけ通る
+{ "type": "board_taxi" }                                      // phase=waiting / approaching で通る
 { "type": "alight_taxi" }                                     // phase=riding / arrived で通る
 { "type": "cancel_taxi", "halt": true }                        // halt=true は [space] の緊急停止
 { "type": "ping" }                                            // → {"type":"pong","t":<server epoch ms>}

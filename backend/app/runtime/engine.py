@@ -522,6 +522,10 @@ class SimulationEngine:
                 return
             self._practical_mode = practical
 
+        if self._env is not None:
+            # 実用モードの間だけ街の車も経路追従にする（止まったままだと道が詰まる）
+            self._env.autopilot_all = practical
+
         self._taxi.cancel(
             self._env,
             "モードを切り替えたため配車を終了しました",
@@ -782,6 +786,8 @@ class SimulationEngine:
                 self._message = f"{preset_name} の環境構築に失敗しました"
                 self._latest_frame = None
             raise
+        with self._lock:
+            env.autopilot_all = self._practical_mode
         self._env = env
         self._map_index = map_index
 

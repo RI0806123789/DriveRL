@@ -30,7 +30,9 @@ PROJECT_WINDOW_FWD = 48
 VEHICLE_HIT_SEMI_LONG_M = config.VEHICLE_LENGTH * 0.9
 VEHICLE_HIT_SEMI_LAT_M = config.VEHICLE_WIDTH * 1.1
 
-SPAWN_CLEARANCE_M2 = (config.VEHICLE_LENGTH * 1.5) ** 2
+#: 再配置するとき、他車からこれだけ離す [m²]。**車 1 台分では足りない**
+#: （6.6m 先に湧くと、走ってきた車が次の瞬間に追突する）
+SPAWN_CLEARANCE_M2 = (config.VEHICLE_LENGTH * 4.0) ** 2
 SPAWN_ROUTE_TRIALS = 12
 SPAWN_SIGNAL_SKIP_M = 3.0
 
@@ -40,6 +42,8 @@ LANE_DEPARTURE_M = config.LANE_DEPARTURE_M
 LANE_RETURN_M = config.LANE_RETURN_M
 
 FORWARD_NODE_RADIUS_M = 150.0
+FORWARD_NODE_MIN_M = 14.0
+FORWARD_NODE_MAX_ANGLE_RAD = math.radians(60.0)
 
 
 def _in_body_ellipse(
@@ -151,22 +155,32 @@ class World:
             return None
         return np.asarray(pts, dtype=np.float32)
 
-    def _start_is_clear(self, route: np.ndarray, exclude: int) -> bool:
-        """経路の始点が、既に走っている車両と重なっていないか。"""
+    def _start_clearance(self, route: np.ndarray, exclude: int) -> float:
+        """経路の始点から、いちばん近い他車までの距離の二乗。他に誰もいなければ inf。"""
         if route is None or route.shape[0] < 1:
-            return False
+            return -1.0
         active = self.fleet.active.copy()
         active[exclude] = False
         idx = np.flatnonzero(active)
         if idx.size == 0:
-            return True
+            return float("inf")
         dx = self.fleet.x[idx] - np.float32(route[0, 0])
         dy = self.fleet.y[idx] - np.float32(route[0, 1])
-        return bool(np.min(dx * dx + dy * dy) >= SPAWN_CLEARANCE_M2)
+        return float(np.min(dx * dx + dy * dy))
+
+    def _start_is_clear(self, route: np.ndarray, exclude: int) -> bool:
+        """経路の始点が、既に走っている車両と重なっていないか。"""
+        return self._start_clearance(route, exclude) >= SPAWN_CLEARANCE_M2
 
     def _random_route(self, exclude: int = -1) -> np.ndarray | None:
-        """ランダムな出発地・目的地の組から経路を作る。"""
-        fallback: np.ndarray | None = None
+        """ランダムな出発地・目的地の組から経路を作る。
+
+        ★ 空いている始点が見つからないときは、**いちばん空いている候補**を返すこと。
+        最初に作れた経路をそのまま返すと、他車の真上に湧いて出合い頭の事故になる
+        （金沢のように到達可能な組が少ないマップで起きる）。
+        """
+        best: np.ndarray | None = None
+        best_clearance = -1.0
         for _ in range(SPAWN_ROUTE_TRIALS):
             src, dst = self.map_index.random_node_pair(self.rng, ROUTE_MIN_DISTANCE_M)
             if int(src) == int(dst):
@@ -174,11 +188,15 @@ class World:
             route = self._route_from_nodes(src, dst)
             if route is None:
                 continue
-            if fallback is None:
-                fallback = route
-            if exclude < 0 or self._start_is_clear(route, exclude):
+            if exclude < 0:
                 return route
-        return fallback
+            clearance = self._start_clearance(route, exclude)
+            if clearance >= SPAWN_CLEARANCE_M2:
+                return route
+            if clearance > best_clearance:
+                best_clearance = clearance
+                best = route
+        return best
 
     def _route_from_point(
         self, x: float, y: float, *, heading: float | None = None
@@ -253,15 +271,25 @@ class World:
         return float(self._node_xy[i, 0]), float(self._node_xy[i, 1])
 
     def _forward_node(self, x: float, y: float, heading: float) -> int | None:
-        """進行方向の前方にある最寄りノード。**背後のノードを選ぶと逆走経路になる。**"""
+        """進行方向の前方にあるノード。
+
+        **背後のノードを選ぶと逆走経路になり、真横や足元のノードを選ぶと
+        経路がその場から直角に始まる。** 後者は車が曲がりきれずに膨らみ、
+        対向車線や建物へ出て事故になる（旋回半径は最大舵角でも 4.4m ある）。
+        """
         if self._node_xy.shape[0] == 0:
             return None
         dx = self._node_xy[:, 0] - np.float32(x)
         dy = self._node_xy[:, 1] - np.float32(y)
-        dist2 = dx * dx + dy * dy
-        ahead = (dx * math.cos(heading) + dy * math.sin(heading)) > 0.0
-        near = dist2 <= np.float32(FORWARD_NODE_RADIUS_M * FORWARD_NODE_RADIUS_M)
-        cand = np.flatnonzero(ahead & near)
+        dist2 = (dx * dx + dy * dy).astype(np.float64)
+        forward = dx * math.cos(heading) + dy * math.sin(heading)
+        ok = (
+            (dist2 >= FORWARD_NODE_MIN_M**2)
+            & (dist2 <= FORWARD_NODE_RADIUS_M**2)
+            & (forward > 0.0)
+            & (forward >= np.sqrt(dist2) * math.cos(FORWARD_NODE_MAX_ANGLE_RAD))
+        )
+        cand = np.flatnonzero(ok)
         if cand.size == 0:
             return None
         return int(self._node_ids[cand[int(np.argmin(dist2[cand]))]])

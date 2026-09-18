@@ -1469,7 +1469,7 @@ class MockServer {
       }
 
       case 'board_taxi': {
-        if (this.taxi.phase !== 'waiting') return
+        if (this.taxi.phase !== 'waiting' && this.taxi.phase !== 'approaching') return
         const v = this.vehicles[this.taxi.vehicleId]
         const drop = this.taxi.dropoff
         if (!v || !drop) return
