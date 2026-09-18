@@ -228,7 +228,7 @@ class World:
         return route
 
     def snap_to_road(self, x: float, y: float) -> tuple[float, float] | None:
-        """指定座標を最寄りの道路中心線上へスナップする（実用モードの乗降地点）。"""
+        """指定座標を最寄りの道路中心線上へスナップする。"""
         try:
             snap_x, snap_y, _edge_id, _heading = self.map_index.nearest_road_point(
                 float(x), float(y)
@@ -237,6 +237,20 @@ class World:
             logger.debug("道路へのスナップに失敗しました: (%.1f, %.1f)", x, y, exc_info=True)
             return None
         return float(snap_x), float(snap_y)
+
+    def snap_to_road_node(self, x: float, y: float) -> tuple[float, float] | None:
+        """指定座標を最寄りの道路ノードへ寄せる（決定 7）。
+
+        **道路中心線上の任意の点ではなくノードにすること。** 経路はノード間で作るので、
+        区間の途中を目的地にすると「そこを通り過ぎて次の交差点まで行き、折り返して戻る」
+        経路になる。停車は経路の終点で掛けるため、車は目的地の前を減速せず通過する。
+        """
+        if self._node_xy.shape[0] == 0:
+            return None
+        dx = self._node_xy[:, 0] - np.float32(x)
+        dy = self._node_xy[:, 1] - np.float32(y)
+        i = int(np.argmin(dx * dx + dy * dy))
+        return float(self._node_xy[i, 0]), float(self._node_xy[i, 1])
 
     def _forward_node(self, x: float, y: float, heading: float) -> int | None:
         """進行方向の前方にある最寄りノード。**背後のノードを選ぶと逆走経路になる。**"""
@@ -251,6 +265,21 @@ class World:
         if cand.size == 0:
             return None
         return int(self._node_ids[cand[int(np.argmin(dist2[cand]))]])
+
+    @staticmethod
+    def _trim_tail(route: np.ndarray, dst: tuple[float, float]) -> np.ndarray:
+        """目的地にいちばん近い点より先を捨てる。
+
+        ノード間の経路は目的地の先の交差点まで伸びているので、切らずに目的地を
+        足すと**「目的地を通り過ぎてから折り返す」経路**になる。停車は経路の終点で
+        掛けるため、車は目的地の前を減速せずに通過してしまう。
+        """
+        if route.shape[0] < 3:
+            return route
+        dx = route[:, 0] - np.float32(dst[0])
+        dy = route[:, 1] - np.float32(dst[1])
+        i = int(np.argmin(dx * dx + dy * dy))
+        return route[: max(2, i + 1)]
 
     @staticmethod
     def _with_endpoints(
@@ -275,9 +304,13 @@ class World:
         *,
         heading: float | None = None,
     ) -> np.ndarray | None:
-        """2 地点を道路へスナップし、その間の走行経路を作る（決定 7・12）。"""
+        """出発地を道路へ、目的地を道路ノードへ寄せて走行経路を作る（決定 7・12）。
+
+        **目的地だけノードに合わせる**のは、経路がノード間で作られるため。
+        区間の途中に置くと、そこを通り過ぎてから折り返す経路になる。
+        """
         src_snap = self.snap_to_road(*src)
-        dst_snap = self.snap_to_road(*dst)
+        dst_snap = self.snap_to_road_node(*dst)
         if src_snap is None or dst_snap is None:
             return None
 
@@ -295,7 +328,8 @@ class World:
         route = self._route_from_nodes(src_node, dst_node)
         if route is None:
             return None
-        return self._with_endpoints(route, src_snap, dst_snap)
+        # ★ 別の道路から目的ノードへ入る経路もあるので、念のため折り返しを切り落とす
+        return self._with_endpoints(self._trim_tail(route, dst_snap), src_snap, dst_snap)
 
     def advance_time(self, dt: float) -> None:
         """シミュレーション内時刻を進め、信号の現示を更新する。"""

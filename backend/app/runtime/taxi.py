@@ -63,8 +63,10 @@ class TaxiService:
             return "すでに配車中です。降車してからもう一度呼んでください"
 
         world = env.world
-        pick = world.snap_to_road(*pickup)
-        drop = world.snap_to_road(*dropoff)
+        # ★ 乗降地点は**道路ノード**へ寄せる（決定 7）。区間の途中に置くと、
+        #   経路がそこを通り過ぎてから折り返す形になり、目的地の前で止まらない
+        pick = world.snap_to_road_node(*pickup)
+        drop = world.snap_to_road_node(*dropoff)
         if pick is None or drop is None:
             return "地図の道路に寄せられませんでした。道路に近い地点を選んでください"
         if math.hypot(drop[0] - pick[0], drop[1] - pick[1]) < MIN_TRIP_M:
