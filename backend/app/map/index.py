@@ -21,6 +21,9 @@ from app.map.lanes import RouteSegment, build_lane_route
 
 logger = logging.getLogger("autoware_sim")
 
+#: 経路上でこの距離より近い信号は同じ交差点のものとして 1 基にまとめる [m]
+SIGNAL_MERGE_M = 8.0
+
 _WARNED: set[str] = set()
 
 
@@ -272,7 +275,17 @@ class MapIndexImpl:
             (float(cum[nearest[i]]), int(cand[i])) for i in np.flatnonzero(hits)
         ]
         out.sort(key=lambda item: item[0])
-        return out
+
+        # ★ 同じ交差点の灯器が二重に拾われることがある（近接した別ノードに灯器が
+        #   立っている）。現示は node_id からオフセットを決めるので、重なった 2 基は
+        #   位相がずれ、**片方が青でも片方が赤**になる。前方の信号すべてに停止線を
+        #   引くため、車はそこから永久に動けなくなる（実測で 444 秒）。
+        merged: list[tuple[float, int]] = []
+        for arc, idx in out:
+            if merged and arc - merged[-1][0] < SIGNAL_MERGE_M:
+                continue
+            merged.append((arc, idx))
+        return merged
 
     def speed_limits_on_route(
         self,

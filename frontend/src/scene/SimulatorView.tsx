@@ -10,11 +10,14 @@ import { Ground } from './Ground'
 import { InteractionPlane } from './InteractionPlane'
 import { LaneDetectionOverlay } from './LaneDetectionOverlay'
 import { Obstacles } from './Obstacles'
+import { Pedestrian } from './Pedestrian'
 import { Rain } from './Rain'
 import { RoadMarkings } from './RoadMarkings'
 import { RoadNetwork } from './RoadNetwork'
 import { RouteLines } from './RouteLines'
 import { SpeedSigns } from './SpeedSigns'
+import { TaxiHud } from './TaxiHud'
+import { TaxiMarkers } from './TaxiMarkers'
 import { TrafficSignals } from './TrafficSignals'
 import { Vehicles } from './Vehicles'
 import { DARK_SCENE } from './palette'
@@ -57,6 +60,8 @@ export function SimulatorView() {
   const interaction = useSimStore((s) => s.interaction)
   const status = useSimStore((s) => s.status)
   const connection = useSimStore((s) => s.connection)
+  const appMode = useSimStore((s) => s.mode)
+  const taxiMode = appMode === 'taxi'
 
   const bounds = map?.bounds ?? null
   const extent = shadowExtent(bounds)
@@ -113,13 +118,18 @@ export function SimulatorView() {
           <Obstacles castShadow={view.shadows} />
           <Rain />
 
+          {taxiMode && <TaxiMarkers />}
+          {taxiMode && <Pedestrian />}
+
           <InteractionPlane bounds={bounds} />
           <CameraRig bounds={bounds} />
           <RenderStatsProbe />
         </Canvas>
       </div>
 
-      {interaction !== 'none' && (
+      {taxiMode && <TaxiHud />}
+
+      {!taxiMode && interaction !== 'none' && (
         <div className="stage-hint">
           {interaction === 'obstacle' ? <ConeIcon size={16} /> : <CarIcon size={16} />}
           {interaction === 'obstacle'

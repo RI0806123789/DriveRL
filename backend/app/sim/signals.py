@@ -15,6 +15,7 @@ __all__ = [
     "YELLOW",
     "RED",
     "signal_speed_limit",
+    "stop_speed_limit",
     "constrain_accel",
 ]
 
@@ -93,6 +94,20 @@ STOP_MARGIN_M = 1.0
 BRAKE_USE_RATIO = 0.8
 
 
+def stop_speed_limit(
+    distance: np.ndarray,
+    max_decel_abs: float,
+    dt: float = 0.05,
+    margin_m: float = STOP_MARGIN_M,
+) -> np.ndarray:
+    """距離 `distance` の手前 `margin_m` で止まりきれる速度の上限を返す。"""
+    brake = max(1e-3, float(max_decel_abs) * BRAKE_USE_RATIO)
+    dt = max(float(dt), 1e-6)
+    room = np.maximum(0.0, np.asarray(distance, dtype=np.float64) - float(margin_m))
+    at = brake * dt
+    return -at + np.sqrt(at * at + 2.0 * brake * room, dtype=np.float64)
+
+
 def signal_speed_limit(
     distance: np.ndarray,
     phase: np.ndarray,
@@ -106,8 +121,7 @@ def signal_speed_limit(
 
     room = np.maximum(0.0, distance - STOP_MARGIN_M)
 
-    at = brake * dt
-    stop_limit = -at + np.sqrt(at * at + 2.0 * brake * room, dtype=np.float64)
+    stop_limit = stop_speed_limit(distance, max_decel_abs, dt, STOP_MARGIN_M)
 
     v = speed.astype(np.float64)
     stopping_distance = (v * v) / (2.0 * brake) + v * dt

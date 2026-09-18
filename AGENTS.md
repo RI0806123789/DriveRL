@@ -55,7 +55,7 @@ Python は `backend/.venv`、Node は `frontend/`。詳しいコマンドは `CL
 cd frontend
 npm run typecheck   # tsc --noEmit
 npm run build       # typecheck + vite build
-npm run verify      # 3D の幾何検証 9 本（ブラウザ不要）
+npm run verify      # 3D の幾何検証（ブラウザ不要。本数の出典は package.json の scripts）
 ```
 
 `npm run verify` がある理由は、**3D の向きは間違っていても型チェックもビルドも通る**からです。
@@ -141,7 +141,16 @@ npm run verify      # 3D の幾何検証 9 本（ブラウザ不要）
 - **20Hz の `frame` は zustand に入れない。** 入れると毎秒 20 回ツリーが再レンダリングされる
 - **`polygonOffset` の重ね順**を崩すと Z ファイティングで点滅する
 - **チェックポイントは必ず `weights_only=True` で読む。フォールバックしない**（`SECURITY.md` にも明記）
+- **行動分布の平均は `tanh` で -1..1 に収める。** 環境は `clip(-1, 1)` した値しか見ないので、
+  制約を外すと平均が範囲外へ流れ、**アクセルを正にする選択肢が構造的に消えて**方策が
+  「止まる」に固まる（実測 -1.710。立て直しは `warmstart_policy.py`）
+- **方策を立て直すときは価値関数と探索の幅も必ずセットで直す。** 「止まる前提」の
+  価値を残したまま走り出すと、advantage の誤差で**2 更新で元へ戻る**（実測）
 - **`map/loader.py` と `public/sw.js` の `CACHE_VERSION` は、生成物の中身を変えたら上げる**
+- **実用モード（自動運転タクシー）では重みの更新だけが止まる。** 物理も推論も配信も動き続ける。
+  この間は**全車**を PPO ではなく経路追従（Pure Pursuit）で走らせ、徴用した 1 台は
+  エピソードを閉じない。**開発モードでは必ず経路追従を切ること**（学習環境が変わる）
+  （閉じると乗降地点で respawn して乗客を置き去りにする）
 
 ---
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import re
 import time
 from contextlib import asynccontextmanager
@@ -38,6 +39,8 @@ _EVENT_KINDS = {
 }
 
 _COMMAND_KINDS = {"save_checkpoint", "load_checkpoint", "reset_policy"}
+
+_TAXI_COMMANDS = {"board_taxi": "board", "alight_taxi": "alight"}
 
 EXPORT_TIMEOUT_SEC = 60.0
 
@@ -124,6 +127,7 @@ async def send_json(websocket: WebSocket, payload: dict[str, Any]) -> None:
 async def broadcast_loop() -> None:
     """フレーム・指標・通知を全接続へ配信する常駐タスク。"""
     last_seq = -1
+    last_taxi_seq = -1
     last_metrics_at = 0.0
     poll_interval = 1.0 / 60.0
     metrics_interval = 1.0 / config.METRICS_HZ
@@ -138,6 +142,10 @@ async def broadcast_loop() -> None:
             last_seq, frame = engine.take_frame(last_seq)
             if frame is not None:
                 await manager.broadcast({"type": "frame", **frame.to_wire()})
+
+            last_taxi_seq, taxi = engine.take_taxi(last_taxi_seq)
+            if taxi is not None:
+                await manager.broadcast({"type": "taxi", **taxi})
 
             now = time.perf_counter()
             if now - last_metrics_at >= metrics_interval:
@@ -265,6 +273,20 @@ async def handle_load_map(preset_id: str) -> None:
         await manager.broadcast({"type": "status", **engine.status_payload()})
 
 
+def _parse_point(value: Any) -> tuple[float, float] | None:
+    """`[x, y]` を有限な座標として読む。読めなければ None。"""
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        return None
+    try:
+        x = float(value[0])
+        y = float(value[1])
+    except (TypeError, ValueError):
+        return None
+    if not (math.isfinite(x) and math.isfinite(y)):
+        return None
+    return x, y
+
+
 async def handle_client_message(websocket: WebSocket, message: dict[str, Any]) -> None:
     kind = message.get("type")
 
@@ -342,6 +364,54 @@ async def handle_client_message(websocket: WebSocket, message: dict[str, Any]) -
     if kind in _EVENT_KINDS:
         payload = {k: v for k, v in message.items() if k != "type"}
         engine.submit_event(InterventionEvent(kind=kind, payload=payload))
+        return
+
+    if kind == "set_app_mode":
+        mode = message.get("mode")
+        if mode not in ("dev", "taxi"):
+            await send_json(
+                websocket,
+                {
+                    "type": "error",
+                    "code": "INVALID_MESSAGE",
+                    "message": 'mode には "dev" か "taxi" を指定してください',
+                },
+            )
+            return
+        engine.set_practical_mode(mode == "taxi")
+        return
+
+    if kind == "request_taxi":
+        pickup = _parse_point(message.get("pickup"))
+        dropoff = _parse_point(message.get("dropoff"))
+        if pickup is None or dropoff is None:
+            await send_json(
+                websocket,
+                {
+                    "type": "error",
+                    "code": "INVALID_MESSAGE",
+                    "message": "pickup / dropoff は [x, y] の有限な数値で指定してください",
+                },
+            )
+            return
+        engine.taxi_command(
+            "request",
+            {
+                "pickupX": pickup[0],
+                "pickupY": pickup[1],
+                "dropoffX": dropoff[0],
+                "dropoffY": dropoff[1],
+            },
+        )
+        return
+
+    if kind in _TAXI_COMMANDS:
+        engine.taxi_command(_TAXI_COMMANDS[kind])
+        return
+
+    if kind == "cancel_taxi":
+        halt = coerce_bool(message.get("halt")) or False
+        engine.taxi_command("halt" if halt else "cancel")
         return
 
     if kind == "start_detector_training":
@@ -624,6 +694,9 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
         await send_json(
             websocket, {"type": "detector", **engine.detector_job.snapshot()}
         )
+
+        # 配車は 1 件しか無い（決定 8）ので、経路つきの 1 通を全接続へ配り直す
+        engine.request_full_taxi()
 
         if _current_map_wire is not None:
             await send_json(websocket, {"type": "map", **_current_map_wire})

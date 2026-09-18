@@ -24,6 +24,7 @@ from app.contracts import (
     validate_hidden_sizes,
 )
 from app.runtime.detector_job import DetectorTrainingJob
+from app.runtime.taxi import TaxiService
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -88,6 +89,15 @@ class SimulationEngine:
         self._network: dict[str, Any] = {}
         self._params = SimParams()
         self._params_dirty: bool = False
+
+        # 実用モード（自動運転タクシー）。**この間は全車の学習を止めて推論だけで走る**（決定 5）
+        self._practical_mode: bool = False
+        self._taxi = TaxiService()
+        self._taxi_wire: dict[str, Any] | None = None
+        self._taxi_seq: int = 0
+        self._taxi_sent_revision: int = -1
+        self._taxi_last_phase: str = ""
+        self._taxi_vehicle_id: int = -1
 
         self.detector_job = DetectorTrainingJob(self)
 
@@ -172,6 +182,36 @@ class SimulationEngine:
         with self._lock:
             self._want_full_frame = True
 
+    def set_practical_mode(self, enabled: bool) -> None:
+        """実用モードに入る／出る（ステップ境界で適用する）。"""
+        self._inbox.put(("app_mode", bool(enabled)))
+
+    def taxi_command(self, action: str, payload: dict[str, Any] | None = None) -> None:
+        """配車の操作を積む（request / board / alight / cancel / halt）。"""
+        self._inbox.put(("taxi", (str(action), payload or {})))
+
+    def take_taxi(self, last_seq: int) -> tuple[int, dict[str, Any] | None]:
+        """前回配信した番号より新しい配車状態があれば返す（frame と同じ作法）。"""
+        with self._lock:
+            if self._taxi_wire is None or self._taxi_seq == last_seq:
+                return last_seq, None
+            return self._taxi_seq, dict(self._taxi_wire)
+
+    def request_full_taxi(self) -> None:
+        """経路を載せた配車状態を 1 通作らせる（新規接続向け）。"""
+        self._inbox.put(("publish_taxi", None))
+
+    def _publish_taxi(self) -> None:
+        """配車の状態を asyncio 側へ渡す。**経路は版が変わったときだけ載せる。**"""
+        status = self._taxi.status
+        with self._lock:
+            include_route = status.route_revision != self._taxi_sent_revision
+            self._taxi_sent_revision = status.route_revision
+            self._taxi_wire = status.to_wire(include_route=include_route)
+            self._taxi_seq += 1
+            self._taxi_vehicle_id = int(status.vehicle_id)
+            self._taxi_last_phase = status.phase
+
     def command(self, name: str) -> None:
         """"save_checkpoint" / "load_checkpoint" / "reset_policy" を送る。"""
         self._inbox.put((name, None))
@@ -240,9 +280,15 @@ class SimulationEngine:
                 "mapLoaded": self._latest_frame is not None or self._state == "running",
                 "presetId": self._preset_id,
                 "renderPaused": self._render_paused,
-                "learning": self._state == "running" and not self._sim_suspended,
+                "learning": (
+                    self._state == "running"
+                    and not self._sim_suspended
+                    and not self._practical_mode
+                ),
                 "simSuspended": self._sim_suspended,
                 "suspendReason": self._suspend_reason,
+                "practicalMode": self._practical_mode,
+                "taxiVehicleId": self._taxi_vehicle_id,
                 "message": self._message,
             }
 
@@ -416,6 +462,18 @@ class SimulationEngine:
                 else "認識器を読み込めなかったため、真値の検出結果で走り続けます"
             )
 
+        elif kind == "app_mode":
+            self._apply_app_mode(bool(payload))
+
+        elif kind == "taxi":
+            action, args = payload
+            self._handle_taxi(str(action), args or {})
+
+        elif kind == "publish_taxi":
+            with self._lock:
+                self._taxi_sent_revision = -1
+            self._publish_taxi()
+
         elif kind == "export":
             self._handle_export(payload)
 
@@ -456,6 +514,67 @@ class SimulationEngine:
 
         else:
             logger.warning("未知のコマンド: %s", kind)
+
+    def _apply_app_mode(self, practical: bool) -> None:
+        """開発モードと実用モードを切り替える。**配車は必ずここで畳む。**"""
+        with self._lock:
+            if self._practical_mode == practical:
+                return
+            self._practical_mode = practical
+
+        if self._env is not None:
+            # 実用モードの間だけ街の車も経路追従にする（止まったままだと道が詰まる）
+            self._env.autopilot_all = practical
+
+        self._taxi.cancel(
+            self._env,
+            "モードを切り替えたため配車を終了しました",
+            halt=practical,
+        )
+        if self._trainer is not None:
+            # 走行の連続性が切れるので、溜めかけのロールアウトは捨てる
+            self._trainer.reset_rollout()
+        self._publish_taxi()
+        self._notify(
+            "実用モードに入りました。学習は止まり、いまの重みのまま走ります"
+            if practical
+            else "開発モードに戻りました。学習を再開します"
+        )
+
+    def _handle_taxi(self, action: str, args: dict[str, Any]) -> None:
+        """配車の操作を適用する。断った理由は `status.message` で返す。"""
+        env = self._env
+        if env is None:
+            self._notify("マップが読み込まれていないため配車できません")
+            return
+        with self._lock:
+            practical = self._practical_mode
+        if not practical:
+            self._notify("実用モードでないため配車の操作を無視しました")
+            return
+
+        problem: str | None = None
+        if action == "request":
+            problem = self._taxi.request(
+                env,
+                (float(args["pickupX"]), float(args["pickupY"])),
+                (float(args["dropoffX"]), float(args["dropoffY"])),
+            )
+        elif action == "board":
+            problem = self._taxi.board(env)
+        elif action == "alight":
+            problem = self._taxi.alight(env)
+        elif action == "cancel":
+            self._taxi.cancel(env, "配車を取り消しました")
+        elif action == "halt":
+            self._taxi.cancel(env, "緊急停止しました。自動運転を終了します", halt=True)
+        else:
+            logger.warning("未知の配車操作: %s", action)
+            return
+
+        if problem:
+            self._notify(problem)
+        self._publish_taxi()
 
     def _sync_vehicle_count(self) -> None:
         """world の実台数を asyncio 側のパラメータへ映す。"""
@@ -651,6 +770,10 @@ class SimulationEngine:
         started = time.perf_counter()
         from app.sim.env import SimulationEnv
 
+        # 配車は古い env の車両を指しているので、地図ごと入れ替える前に畳む
+        self._taxi.cancel(self._env, "エリアを切り替えたため配車を終了しました")
+        self._publish_taxi()
+
         params = self.snapshot_params()
         try:
             env = SimulationEnv(map_index, params, seed=0)
@@ -663,6 +786,8 @@ class SimulationEngine:
                 self._message = f"{preset_name} の環境構築に失敗しました"
                 self._latest_frame = None
             raise
+        with self._lock:
+            env.autopilot_all = self._practical_mode
         self._env = env
         self._map_index = map_index
 
@@ -708,42 +833,57 @@ class SimulationEngine:
         env = self._env
         trainer = self._trainer
 
+        with self._lock:
+            practical = self._practical_mode
+
         obs = env.observations
         active = env.active_mask
 
         actions, log_probs, values = trainer.act(obs, active)
         result = env.step(actions)
 
-        trainer.store(
-            obs=obs,
-            actions=actions,
-            log_probs=log_probs,
-            values=values,
-            rewards=result.rewards,
-            dones=result.dones,
-            active=result.active,
-            truncated=result.truncated,
-        )
+        # 実用モードでは推論だけ回す。重みは触らない（決定 5）
+        if not practical:
+            trainer.store(
+                obs=obs,
+                actions=actions,
+                log_probs=log_probs,
+                values=values,
+                rewards=result.rewards,
+                dones=result.dones,
+                active=result.active,
+                truncated=result.truncated,
+            )
 
-        stats = trainer.maybe_update(result.obs, result.active)
-        if stats is not None:
-            self._last_update_stats = stats
-            if trainer.updates - self._last_autosave_updates >= self._autosave_every:
-                self._last_autosave_updates = trainer.updates
-                try:
-                    trainer.save(config.CHECKPOINT_PATH)
-                except Exception:
-                    logger.exception("チェックポイントの自動保存に失敗しました")
+            stats = trainer.maybe_update(result.obs, result.active)
+            if stats is not None:
+                self._last_update_stats = stats
+                if trainer.updates - self._last_autosave_updates >= self._autosave_every:
+                    self._last_autosave_updates = trainer.updates
+                    try:
+                        trainer.save(config.CHECKPOINT_PATH)
+                    except Exception:
+                        logger.exception("チェックポイントの自動保存に失敗しました")
 
-        for episode in result.episodes:
-            self._episode_log.append(episode)
-            self._total_episodes += 1
+            for episode in result.episodes:
+                self._episode_log.append(episode)
+                self._total_episodes += 1
 
         self._tick += 1
         self._sim_time = env.sim_time
 
         now = time.perf_counter()
         metrics_interval = 1.0 / max(0.1, float(config.METRICS_HZ))
+
+        if practical:
+            # ETA は毎ステップ引き直し、配信は段階が変わったときと 1Hz（決定 14）
+            self._taxi.update(env)
+            if (
+                self._taxi.status.phase != self._taxi_last_phase
+                or (now - self._last_metrics_at) >= metrics_interval
+            ):
+                self._publish_taxi()
+
         metrics = None
         network = None
         detector_active = None

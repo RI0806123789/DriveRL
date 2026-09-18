@@ -83,6 +83,10 @@ export interface StatusPayload {
   simSuspended?: boolean
   /** `simSuspended` が true のときの理由 */
   suspendReason?: string
+  /** 実用モード。**重みの更新だけが止まり、物理と推論は動き続ける**（2.10） */
+  practicalMode?: boolean
+  /** 配車で徴用中の車両スロット。-1 なら無し */
+  taxiVehicleId?: number
   message?: string
 }
 
@@ -465,6 +469,28 @@ export interface DetectorMessage {
   limits: DetectorLimits
 }
 
+/** 実用モードの配車の段階（2.10 taxi）。 */
+export type TaxiPhase = 'idle' | 'approaching' | 'waiting' | 'riding' | 'arrived'
+
+/** 2.10 taxi — 実用モードの配車状態（段階が変わったときと 1Hz）。 */
+export interface TaxiMessage {
+  type: 'taxi'
+  phase: TaxiPhase
+  /** 徴用している車両スロット。-1 なら無し */
+  vehicleId: number
+  /** 道路へスナップ済みの乗車地点（クライアントが送った座標ではない） */
+  pickup: Vec2 | null
+  dropoff: Vec2 | null
+  /** 経路が変わるたびに増える。**変わらない限り前回の経路を保持すること** */
+  routeRevision: number
+  /** いま向かっている経路。routeRevision が変わった通だけ入る */
+  route?: Vec2[]
+  /** 到着まで [秒]。毎ステップ引き直される */
+  etaSeconds: number
+  remainingDistanceM: number
+  message: string
+}
+
 /**
  * `docs/protocol.md` のエラーコード表が唯一の出典。**介入の失敗はここに足さない**
  * （`status.message` で返す約束。code_review E-14）。
@@ -532,6 +558,7 @@ export type ServerMessage =
   | MetricsMessage
   | NetworkMessage
   | DetectorMessage
+  | TaxiMessage
   | ErrorMessage
   | PongMessage
 
@@ -618,6 +645,35 @@ export interface SetNetworkMessage {
   hiddenSizes: number[]
 }
 
+/** 開発モードと実用モードを切り替える。**学習の可否だけが変わる**（物理は止まらない） */
+export interface SetAppModeMessage {
+  type: 'set_app_mode'
+  mode: 'dev' | 'taxi'
+}
+
+/** 配車を呼ぶ。乗降地点はサーバー側で最寄りの道路へスナップされる */
+export interface RequestTaxiMessage {
+  type: 'request_taxi'
+  pickup: Vec2
+  dropoff: Vec2
+}
+
+/** 乗車する（phase=waiting のときだけ通る） */
+export interface BoardTaxiMessage {
+  type: 'board_taxi'
+}
+
+/** 降車する（phase=riding / arrived で通る） */
+export interface AlightTaxiMessage {
+  type: 'alight_taxi'
+}
+
+/** 配車を取り消す。`halt` は [space] の緊急停止（その場で速度 0 にしてから解除） */
+export interface CancelTaxiMessage {
+  type: 'cancel_taxi'
+  halt?: boolean
+}
+
 /** クライアント → サーバーの全メッセージ */
 export type ClientMessage =
   | LoadMapMessage
@@ -635,6 +691,11 @@ export type ClientMessage =
   | SetNetworkMessage
   | StartDetectorTrainingMessage
   | CancelDetectorTrainingMessage
+  | SetAppModeMessage
+  | RequestTaxiMessage
+  | BoardTaxiMessage
+  | AlightTaxiMessage
+  | CancelTaxiMessage
   | PingMessage
 
 /** WebSocket の接続状態 */

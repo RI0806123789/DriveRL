@@ -458,6 +458,16 @@ p {
   --m3-pane-dx: -26px;
 }
 
+/* 実用モードのスマホ画面は、カードを積むのではなくパネルの残り全部を使う */
+.panel-pane[data-fill='true'] {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.panel-pane[data-fill='true'] > * {
+  height: 100%;
+  min-height: 0;
+}
+
 .panel-pane > * {
   animation: m3-pane-card-in var(--m3-dur-long) var(--m3-ease-emphasized-decel) both;
 }
@@ -2029,4 +2039,473 @@ button.m3-chip:active:not(:disabled) {
 .m3-numberinput:disabled {
   opacity: 0.38;
   cursor: not-allowed;
+}
+
+/* ===== 実用モード（自動運転タクシー） ===== */
+
+/* 開発 / 実用 のトグル。**transform と opacity だけを動かす**（決定 13） */
+.panel-mode {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;
+}
+
+.panel-mode-label {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  line-height: 1.25;
+  min-width: 72px;
+}
+
+.panel-mode-name {
+  font-size: 12.5px;
+  font-weight: 700;
+  white-space: nowrap;
+  animation: m3-mode-name-in var(--m3-dur-medium) var(--m3-ease-emphasized-decel) both;
+}
+
+.panel-mode-sub {
+  font-size: 10.5px;
+  color: var(--m3-on-surface-variant);
+  white-space: nowrap;
+}
+
+@keyframes m3-mode-name-in {
+  from {
+    opacity: 0;
+    transform: translateY(-5px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.panel-mode-switch {
+  appearance: none;
+  border: 0;
+  padding: 0;
+  background: none;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+.panel-mode-switch:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+}
+
+.panel-mode-track {
+  position: relative;
+  display: block;
+  width: 46px;
+  height: 26px;
+  border-radius: var(--m3-shape-full);
+  background: var(--m3-surface-container-highest);
+  border: 2px solid var(--m3-outline);
+  transition:
+    background-color var(--m3-dur-medium) var(--m3-ease-emphasized),
+    border-color var(--m3-dur-medium) var(--m3-ease-emphasized);
+}
+
+.panel-mode-thumb {
+  position: absolute;
+  top: 50%;
+  left: 3px;
+  width: 16px;
+  height: 16px;
+  border-radius: var(--m3-shape-full);
+  background: var(--m3-outline);
+  /* 大きさは変えず、transform だけで動かす（レイアウトを起こさない） */
+  transform: translate(0, -50%) scale(1);
+  transition:
+    transform var(--m3-dur-medium) var(--m3-ease-spring),
+    background-color var(--m3-dur-medium) var(--m3-ease-emphasized);
+}
+
+.panel-mode-switch[aria-checked='true'] .panel-mode-track {
+  background: var(--m3-secondary-container);
+  border-color: var(--m3-secondary);
+}
+.panel-mode-switch[aria-checked='true'] .panel-mode-thumb {
+  background: var(--m3-secondary);
+  transform: translate(20px, -50%) scale(1.22);
+}
+.panel-mode-switch:not(:disabled):active .panel-mode-thumb {
+  transform: translate(0, -50%) scale(1.3);
+}
+.panel-mode-switch[aria-checked='true']:not(:disabled):active .panel-mode-thumb {
+  transform: translate(17px, -50%) scale(1.4);
+}
+.panel-mode-switch:focus-visible .panel-mode-track {
+  outline: 2px solid var(--m3-primary);
+  outline-offset: 3px;
+}
+
+/* スマホ筐体。**パネルの中いっぱいに広げる**（幅も高さも余らせない） */
+.taxi-phone {
+  display: flex;
+  justify-content: center;
+  height: 100%;
+  min-height: 0;
+  padding: 2px 0 4px;
+}
+
+.taxi-phone-bezel {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 10px 10px;
+  border-radius: 34px;
+  background: var(--m3-surface-container-lowest);
+  border: 2px solid var(--m3-outline-variant);
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.32);
+}
+
+.taxi-status-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 2px 12px 0;
+  color: var(--m3-on-surface-variant);
+}
+
+.taxi-clock {
+  font-size: 12px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.taxi-status-icons {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.taxi-app-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 0 10px;
+}
+
+.taxi-app-title {
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+}
+
+.taxi-app-area {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--m3-on-surface-variant);
+}
+
+/* 地図。**残りの高さを全部取る**（memo「スマホ画面上部 2/3 にマップ全体」） */
+.taxi-map {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 180px;
+  border-radius: var(--m3-shape-lg);
+  overflow: hidden;
+  background: var(--m3-surface-container);
+  border: 1px solid var(--m3-outline-variant);
+  cursor: grab;
+  /* ホイールはこちらで拾ってブラウザのズームへ渡さない（追加要望 2） */
+  touch-action: none;
+  overscroll-behavior: contain;
+}
+.taxi-map[data-picking='true'] {
+  cursor: crosshair;
+  border-color: var(--m3-primary);
+}
+
+.taxi-map-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  color: var(--m3-on-surface-variant);
+}
+
+.taxi-phone-body {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 8px;
+}
+
+.taxi-headline {
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.taxi-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  font-size: 11.5px;
+  color: var(--m3-on-surface-variant);
+}
+.taxi-meta span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.taxi-message {
+  font-size: 12px;
+  padding: 8px 10px;
+  border-radius: var(--m3-shape-sm);
+  background: var(--m3-surface-container);
+  color: var(--m3-on-surface-variant);
+}
+
+.taxi-warning {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  padding: 8px 10px;
+  border-radius: var(--m3-shape-sm);
+  background: var(--m3-warning-container);
+  color: var(--m3-on-warning-container);
+}
+
+.taxi-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.taxi-note {
+  font-size: 11px;
+  color: var(--m3-on-surface-variant);
+  line-height: 1.5;
+}
+
+.taxi-home-bar {
+  width: 34%;
+  height: 4px;
+  margin: 2px auto 0;
+  border-radius: var(--m3-shape-full);
+  background: var(--m3-outline-variant);
+}
+
+/* 3D 画面に重ねる照準とヒント */
+.taxi-hud {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  pointer-events: none;
+}
+
+.taxi-crosshair {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 22px;
+  height: 22px;
+  transform: translate(-50%, -50%);
+  opacity: 0.75;
+  transition:
+    transform var(--m3-dur-short) var(--m3-ease-spring),
+    opacity var(--m3-dur-short) var(--m3-ease-emphasized);
+}
+.taxi-crosshair[data-aimed='true'] {
+  transform: translate(-50%, -50%) scale(1.35);
+  opacity: 1;
+}
+/* 夜の建物にも霧の中にも重なるので、配色ではなく白＋黒縁で固定する */
+.taxi-crosshair span {
+  position: absolute;
+  background: #ffffff;
+  box-shadow: 0 0 0 1.5px rgba(0, 0, 0, 0.72);
+}
+.taxi-crosshair span:first-child {
+  left: 50%;
+  top: 0;
+  width: 2px;
+  height: 100%;
+  transform: translateX(-50%);
+}
+.taxi-crosshair span:last-child {
+  top: 50%;
+  left: 0;
+  height: 2px;
+  width: 100%;
+  transform: translateY(-50%);
+}
+
+/* 速度計と操作の案内はここに縦へ積む（位置をずらさないよう 1 か所にまとめる） */
+.taxi-bottom {
+  position: absolute;
+  left: 50%;
+  bottom: 28px;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  max-width: calc(100% - 32px);
+}
+
+.taxi-hint {
+  padding: 8px 18px;
+  border-radius: var(--m3-shape-full);
+  background: color-mix(in srgb, var(--m3-surface-container) 84%, transparent);
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--m3-outline-variant);
+  color: var(--m3-on-surface);
+  font-size: 12.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.taxi-hint[data-strong='true'] {
+  background: var(--m3-secondary-container);
+  color: var(--m3-on-secondary-container);
+  border-color: color-mix(in srgb, var(--m3-secondary) 45%, transparent);
+}
+
+.taxi-speed {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 8px 22px;
+  border-radius: var(--m3-shape-lg);
+  background: color-mix(in srgb, var(--m3-surface-container) 84%, transparent);
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--m3-outline-variant);
+}
+.taxi-speed-value {
+  font-family: var(--m3-font-mono);
+  font-size: 30px;
+  font-weight: 700;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+.taxi-speed-unit {
+  font-size: 12px;
+  color: var(--m3-on-surface-variant);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .panel-mode-thumb,
+  .panel-mode-name,
+  .taxi-crosshair {
+    transition-duration: 1ms !important;
+    animation-duration: 1ms !important;
+  }
+}
+
+/* --- 実用モードの画面遷移。**transform と opacity だけ**を動かす（決定 13 と同じ軸） --- */
+
+.taxi-headline {
+  animation: m3-taxi-line-in var(--m3-dur-medium) var(--m3-ease-emphasized-decel) both;
+}
+
+/* 乗れる・降りられる瞬間だけ、ゆっくり息をさせて気づかせる */
+.taxi-headline[data-alert='true'] {
+  animation:
+    m3-taxi-line-in var(--m3-dur-medium) var(--m3-ease-emphasized-decel) both,
+    m3-taxi-breathe 1.8s var(--m3-ease-standard) 240ms infinite;
+  transform-origin: left center;
+}
+
+.taxi-message {
+  animation: m3-taxi-line-in var(--m3-dur-short) var(--m3-ease-emphasized-decel) both;
+}
+
+.taxi-actions > * {
+  animation: m3-taxi-action-in var(--m3-dur-medium) var(--m3-ease-spring-soft) both;
+}
+.taxi-actions > *:nth-child(2) {
+  animation-delay: var(--m3-stagger);
+}
+
+@keyframes m3-taxi-line-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes m3-taxi-breathe {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.025);
+  }
+}
+
+@keyframes m3-taxi-action-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* 手で動かしたときだけ出る「自動に戻す」 */
+.taxi-map-recenter {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 7px 14px;
+  border: 1px solid var(--m3-outline-variant);
+  border-radius: var(--m3-shape-full);
+  background: color-mix(in srgb, var(--m3-surface-container-high) 92%, transparent);
+  backdrop-filter: blur(8px);
+  color: var(--m3-on-surface);
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    transform var(--m3-dur-medium) var(--m3-ease-spring),
+    opacity var(--m3-dur-short) var(--m3-ease-emphasized);
+}
+.taxi-map-recenter[data-visible='false'] {
+  opacity: 0;
+  transform: translateY(8px) scale(0.92);
+  pointer-events: none;
+}
+.taxi-map-recenter:hover {
+  transform: scale(1.04);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .taxi-headline,
+  .taxi-headline[data-alert='true'],
+  .taxi-message,
+  .taxi-actions > *,
+  .taxi-map-recenter {
+    animation: none !important;
+    transition-duration: 1ms !important;
+  }
 }
