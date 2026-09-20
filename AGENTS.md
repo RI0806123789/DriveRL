@@ -161,9 +161,11 @@ npm run verify      # 3D の幾何検証（ブラウザ不要。本数の出典�
 - `memo/code_review.md` — 過去のレビュー指摘が番号付き（`B` / `F` / `X` / `P` / `Q` / `R` / `W` /
   `L` / `M` / `C` / `S` / `D` / `A` / `U`）で蓄積されている。コード中のコメントはこの番号を引いて
   参照している（例: 「`code_review B-15`」）
-- `memo/memo_1.0.md` — 要件定義。**コード中の「memo 4章」「memo 5章」という参照の出典**で、
-  `config.py` / `contracts.py` / `main.py` / `map/` / `rl/buffer.py` など 11 か所以上から参照されている
-- `memo/system-flow.drawio` — システム構成図（6 ページ）
+- `memo/memo_x.x/memo_1.0.md` — 要件定義。**コード中の「memo 5章」という参照の出典**で、
+  `contracts.py`（2 か所）/ `map/loader.py` / `runtime/engine.py` の docstring から参照されている
+  （件数の出典は `grep -rn "memo [0-9]章" backend/app`）
+- `memo/memo_x.x/memo_2.0.md` — 実用モード（自動運転タクシー）の要件定義
+- `memo/system_flow/system-flow.drawio` — システム構成図（6 ページ）
 
 **クローンしただけの環境にこれらは存在せず、その参照は追えません。**
 その場合は `README.md`「設計上の要点」と `CLAUDE.md` の不変条件を一次情報としてください。

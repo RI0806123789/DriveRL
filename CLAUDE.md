@@ -798,8 +798,8 @@ OSM キャッシュ・チェックポイント・認識器と教師データ・�
   `M` / `C` / `S` / `D` / `A` / `U`）で溜まっています。該当箇所を直すときは番号を引いて参照すること。
 - ★ **`memo/` は `.gitignore` されています**（`.gitignore` の `/memo`）。開発者の手元にしかありません。
   クローンしただけの環境には、`memo/code_review.md`（指摘の蓄積）も
-  `memo/memo_1.0.md`（**コード中の「memo 4章」「memo 5章」の出典**。`contracts.py` /
-  `map/loader.py` / `runtime/engine.py` などの docstring から参照されている。
+  `memo/memo_x.x/memo_1.0.md`（**コード中の「memo 5章」の出典**。`contracts.py` /
+  `map/loader.py` / `runtime/engine.py` の docstring から参照されている。
   件数は `grep -rn "memo [0-9]章" backend/app` が出典）も
   存在しません。**手元に `memo/` が無ければ、その参照は追えません。**
   その場合は `README.md`「設計上の要点」と、この CLAUDE.md の不変条件を一次情報としてください。
