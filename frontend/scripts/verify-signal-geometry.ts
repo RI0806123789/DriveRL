@@ -1,4 +1,4 @@
-/** 交通信号機の向きを検証する（ブラウザ不要）。 */
+/** 交通信号機（車両用・歩行者用）の向きを検証する（ブラウザ不要）。 */
 
 import * as THREE from 'three'
 import {
@@ -10,6 +10,14 @@ import {
   buildSignalPlacement,
   createLampGeometry,
 } from '../src/scene/signalGeometry.ts'
+import {
+  PED_MOUNT_HEIGHT,
+  PED_ROLE_GREEN,
+  PED_ROLE_RED,
+  PED_SIDE_MARGIN,
+  buildPedestrianSignalPlacement,
+  pedestrianWalkable,
+} from '../src/scene/pedestrianSignalGeometry.ts'
 
 let failures = 0
 
@@ -178,6 +186,66 @@ console.log('='.repeat(70))
     return false
   })
   check('ジオメトリに NaN が無い', !nan)
+}
+
+console.log('')
+console.log('='.repeat(70))
+console.log('歩行者用信号（縦 2 灯・現示は車両信号の裏返し）')
+console.log('='.repeat(70))
+
+{
+  // 東を向いて進む車の信号。停止線は原点、道路幅 10m
+  const signal = { nodeId: 1, x: 0, y: 0, heading: 0, roadWidth: 10 }
+  const { lamps, placements } = buildPedestrianSignalPlacement([signal], [{ id: 1, x: 0, y: 0 }])
+
+  check('1 基の車両信号に対して灯器が 2 基（横断歩道の両端）', placements.length === 2)
+  check('灯器 1 基につき 2 灯（赤・青）', lamps.length === 4)
+
+  const sides = placements.map((p) => toEnu(p.x, p.z).y)
+  check(
+    '灯器は道路の左右へ同じだけ離れて立つ',
+    Math.abs(sides[0] + sides[1]) < 1e-6 &&
+      Math.abs(Math.abs(sides[0]) - (signal.roadWidth / 2 + PED_SIDE_MARGIN)) < 1e-6,
+    `y=${sides.map((v) => v.toFixed(2)).join(' / ')}`,
+  )
+  check(
+    '灯器は停止線より交差点側（車の進行方向）にある',
+    placements.every((p) => toEnu(p.x, p.z).x > 0),
+  )
+
+  // ★ 渡ってくる人に正対すること。道路と同じ向きだと横からしか見えない
+  for (const p of placements) {
+    const enu = toEnu(p.x, p.z)
+    // 左側（ENU の +y）に立つ灯器は右（-y 方向）を向く
+    const want = enu.y > 0 ? -Math.PI / 2 : Math.PI / 2
+    check(
+      `${enu.y > 0 ? '左' : '右'}側の灯器は横断してくる人に正対する`,
+      Math.abs(angleDiff(p.facing, want)) < 1e-6,
+      `${((p.facing * 180) / Math.PI).toFixed(0)}°`,
+    )
+  }
+
+  const red = lamps.filter((l) => l.role === PED_ROLE_RED)
+  const green = lamps.filter((l) => l.role === PED_ROLE_GREEN)
+  check(
+    '赤が上・青が下（日本の歩行者信号の並び）',
+    red.every((r) => green.every((g) => r.position.y > g.position.y)),
+  )
+  check(
+    `灯器の高さは ${PED_MOUNT_HEIGHT}m 前後（見上げる位置）`,
+    lamps.every((l) => l.position.y > 2 && l.position.y < 3.2),
+  )
+  check(
+    'どの灯も対応する車両信号を指している',
+    lamps.every((l) => l.signalIndex === 0),
+  )
+}
+
+{
+  // ★ 歩行者信号は車両信号の裏返し。ここがずれると、車が走っている横を渡らせてしまう
+  check('車両が赤なら渡れる', pedestrianWalkable(2))
+  check('車両が青なら渡れない', !pedestrianWalkable(0))
+  check('車両が黄でも渡れない', !pedestrianWalkable(1))
 }
 
 console.log('')

@@ -2264,6 +2264,15 @@ button.m3-chip:active:not(:disabled) {
   gap: 4px;
 }
 
+/* 車を指すナンバープレート表記。**色は scene/licensePlate.ts をインラインで当てる** */
+.taxi-plate {
+  padding: 1px 7px;
+  border-radius: 3px;
+  border: 1px solid currentColor;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
 .taxi-message {
   font-size: 12px;
   padding: 8px 10px;
@@ -2494,6 +2503,246 @@ button.m3-chip:active:not(:disabled) {
   opacity: 0;
   transform: translateY(8px) scale(0.92);
   pointer-events: none;
+}
+
+/* ---------------------------------------------------------------- *
+ * 車載カメラ（実用モード）
+ * 動かすのは transform と opacity（と色）だけ。地図の上へ重ねるので
+ * オンオフでレイアウトは動かない＝パネルのリフローを起こさない。
+ * ---------------------------------------------------------------- */
+
+.taxi-camera {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 52%;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 3;
+}
+
+.taxi-camera-inner {
+  position: relative;
+  height: 100%;
+  background: #05070a;
+  border-bottom: 1px solid var(--m3-outline-variant);
+  /* 閉じている間は切り抜きの外へ退避させる（幅・高さは動かさない） */
+  transform: translateY(-101%);
+  opacity: 0;
+  transition:
+    transform var(--m3-dur-long) var(--m3-ease-emphasized),
+    opacity var(--m3-dur-short) var(--m3-ease-standard);
+}
+
+/* 開くときだけ弾ませる。閉じるのは素直に引き上げる（上の宣言が効く） */
+.taxi-camera[data-on='true'] .taxi-camera-inner {
+  transform: translateY(0);
+  opacity: 1;
+  transition:
+    transform var(--m3-dur-xlong) var(--m3-ease-spring),
+    opacity var(--m3-dur-short) linear;
+}
+
+.taxi-camera-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0;
+  transition: opacity var(--m3-dur-medium) var(--m3-ease-standard);
+}
+
+.taxi-camera-canvas[data-live='true'] {
+  opacity: 1;
+}
+
+/* 走査線。カメラが生きていることが一目で分かる */
+.taxi-camera-scan {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0;
+  background: linear-gradient(
+    to bottom,
+    transparent 46%,
+    rgba(150, 210, 255, 0.05) 49%,
+    rgba(150, 210, 255, 0.14) 50%,
+    rgba(150, 210, 255, 0.05) 51%,
+    transparent 54%
+  );
+}
+
+.taxi-camera[data-on='true'] .taxi-camera-scan {
+  animation: taxi-camera-scan 3.4s linear infinite;
+  animation-delay: var(--m3-dur-long);
+}
+
+@keyframes taxi-camera-scan {
+  0% {
+    transform: translateY(-100%);
+    opacity: 0;
+  }
+  12% {
+    opacity: 1;
+  }
+  88% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(100%);
+    opacity: 0;
+  }
+}
+
+.taxi-camera-bar {
+  position: absolute;
+  left: 8px;
+  top: 7px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px;
+  border-radius: var(--m3-shape-full);
+  background: rgba(5, 7, 10, 0.66);
+  color: rgba(238, 242, 246, 0.92);
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  /* 中身より一拍遅れて出す */
+  opacity: 0;
+  transform: translateY(-4px);
+  transition:
+    opacity var(--m3-dur-medium) var(--m3-ease-standard),
+    transform var(--m3-dur-medium) var(--m3-ease-emphasized-decel);
+}
+
+.taxi-camera[data-on='true'] .taxi-camera-bar {
+  opacity: 1;
+  transform: translateY(0);
+  transition-delay: var(--m3-dur-medium);
+}
+
+.taxi-camera-id {
+  opacity: 0.66;
+}
+
+.taxi-camera-rec {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--m3-outline);
+  transition: background-color var(--m3-dur-medium) var(--m3-ease-standard);
+}
+
+.taxi-camera-rec[data-live='true'] {
+  background: var(--m3-error);
+  animation: taxi-camera-rec 1.7s ease-in-out infinite;
+}
+
+@keyframes taxi-camera-rec {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.32;
+    transform: scale(0.72);
+  }
+}
+
+.taxi-camera-wait {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  color: var(--m3-on-surface-variant);
+}
+
+/* ---------- カメラの開閉ボタン ---------- */
+
+.taxi-camera-toggle {
+  margin-top: 8px;
+  width: 100%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 9px 14px;
+  border: 1px solid var(--m3-outline-variant);
+  border-radius: var(--m3-shape-lg);
+  background: transparent;
+  color: var(--m3-on-surface);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition:
+    background-color var(--m3-dur-medium) var(--m3-ease-emphasized),
+    border-color var(--m3-dur-medium) var(--m3-ease-emphasized),
+    color var(--m3-dur-medium) var(--m3-ease-emphasized),
+    transform var(--m3-dur-short) var(--m3-ease-spring);
+}
+
+.taxi-camera-toggle:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.taxi-camera-toggle:not(:disabled):active {
+  transform: scale(0.972);
+}
+
+.taxi-camera-toggle[data-on='true'] {
+  background: var(--m3-secondary-container);
+  border-color: transparent;
+  color: var(--m3-on-secondary-container);
+}
+
+.taxi-camera-toggle-icon {
+  display: inline-flex;
+  transition: transform var(--m3-dur-long) var(--m3-ease-spring);
+}
+
+.taxi-camera-toggle[data-on='true'] .taxi-camera-toggle-icon {
+  transform: rotate(-9deg) scale(1.1);
+}
+
+.taxi-camera-toggle-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--m3-outline);
+  opacity: 0.45;
+  transform: scale(0.6);
+  transition:
+    transform var(--m3-dur-medium) var(--m3-ease-spring),
+    opacity var(--m3-dur-medium) var(--m3-ease-standard),
+    background-color var(--m3-dur-medium) var(--m3-ease-standard);
+}
+
+.taxi-camera-toggle-dot[data-on='true'] {
+  background: var(--m3-error);
+  opacity: 1;
+  transform: scale(1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .taxi-camera-inner,
+  .taxi-camera[data-on='true'] .taxi-camera-inner,
+  .taxi-camera-bar,
+  .taxi-camera-canvas,
+  .taxi-camera-toggle,
+  .taxi-camera-toggle-icon,
+  .taxi-camera-toggle-dot {
+    transition-duration: 1ms !important;
+    transition-delay: 0s !important;
+  }
+  .taxi-camera[data-on='true'] .taxi-camera-scan,
+  .taxi-camera-rec[data-live='true'] {
+    animation: none;
+  }
 }
 .taxi-map-recenter:hover {
   transform: scale(1.04);

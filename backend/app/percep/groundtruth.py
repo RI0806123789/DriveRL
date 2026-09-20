@@ -17,6 +17,8 @@ from app.percep.types import (
     DEFAULT_CAMERA,
     LANE_LOOKAHEAD_M,
     LANE_POLYLINE_POINTS,
+    PEDESTRIAN_HALF_WIDTH,
+    PEDESTRIAN_HEIGHT,
     SIGN_BOARD_Z,
     SIGN_RADIUS,
     SIGNAL_BEYOND_MARGIN,
@@ -514,6 +516,60 @@ def _detect_obstacles(
     return out
 
 
+def _detect_pedestrians(
+    world: "World", slot: int, spec: CameraSpec, pose: CameraPose, max_distance: float
+) -> list[tuple[float, Detection]]:
+    """NPC 歩行者。視線に垂直な板（肩幅 × 身長）へ近似して箱にする。"""
+    out: list[tuple[float, Detection]] = []
+    xy = world.pedestrian_xy
+    if xy.shape[0] == 0:
+        return out
+
+    eye = (pose.eye_x, pose.eye_y)
+    dx = xy[:, 0] - eye[0]
+    dy = xy[:, 1] - eye[1]
+    dist = np.hypot(dx, dy)
+
+    near = np.flatnonzero(dist <= max_distance)
+    if near.size == 0:
+        return out
+    near = near[_line_of_sight(world.map_index, eye, xy[near])]
+    if near.size:
+        near = near[~_blocked_by_fleet(world, eye, xy[near], slot)]
+
+    for i in near:
+        i = int(i)
+        d = float(dist[i])
+        if d < 1e-3:
+            continue
+        ax, ay = -dy[i] / d, dx[i] / d
+        cx, cy = float(xy[i, 0]), float(xy[i, 1])
+        pts = np.array(
+            [
+                [cx - ax * PEDESTRIAN_HALF_WIDTH, cy - ay * PEDESTRIAN_HALF_WIDTH, 0.0],
+                [cx + ax * PEDESTRIAN_HALF_WIDTH, cy + ay * PEDESTRIAN_HALF_WIDTH, 0.0],
+                [cx - ax * PEDESTRIAN_HALF_WIDTH, cy - ay * PEDESTRIAN_HALF_WIDTH, PEDESTRIAN_HEIGHT],
+                [cx + ax * PEDESTRIAN_HALF_WIDTH, cy + ay * PEDESTRIAN_HALF_WIDTH, PEDESTRIAN_HEIGHT],
+            ],
+            dtype=np.float64,
+        )
+        box = _box_from_points(pose, spec, pts, require_all_in_front=False)
+        if box is None:
+            continue
+        out.append(
+            (
+                d,
+                Detection(
+                    cls=DetClass.PEDESTRIAN,
+                    x0=box[0], y0=box[1], x1=box[2], y1=box[3],
+                    confidence=1.0,
+                    distance=d,
+                ),
+            )
+        )
+    return out
+
+
 def _detect_lane(
     world: "World", slot: int, spec: CameraSpec, pose: CameraPose, max_distance: float
 ) -> tuple[float, Detection] | None:
@@ -614,6 +670,7 @@ def detect_ground_truth(
         (DetClass.SPEED_SIGN, _detect_speed_signs(world, slot, spec, pose, scene, reach)),
         (DetClass.VEHICLE, _detect_vehicles(world, slot, spec, pose, reach)),
         (DetClass.OBSTACLE, _detect_obstacles(world, slot, spec, pose, reach)),
+        (DetClass.PEDESTRIAN, _detect_pedestrians(world, slot, spec, pose, reach)),
     ]
     lane = _detect_lane(world, slot, spec, pose, reach)
     if lane is not None:
@@ -684,6 +741,8 @@ def freespace_ground_truth(
         )
     for obstacle in world.obstacles:
         blockers.append((float(obstacle.x), float(obstacle.y), float(obstacle.radius)))
+    for px, py in world.pedestrian_xy:
+        blockers.append((float(px), float(py), float(config.PEDESTRIAN_RADIUS)))
     if blockers:
         circles = np.asarray(blockers, dtype=np.float64)
         dirs = np.stack([np.cos(angles), np.sin(angles)], axis=1)

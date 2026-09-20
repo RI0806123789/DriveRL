@@ -2,9 +2,16 @@
 
 import type { VehicleState } from '../types/protocol'
 import { frameBuffer } from '../store/frameBuffer'
+import { TELEPORT_DISTANCE_M as TELEPORT_M, lerp, lerpAngle } from './interpolationMath'
 
-/** これ以上動いたら補間せず瞬間移動（respawn / スポーン扱い）[m] */
-export const TELEPORT_DISTANCE_M = 20
+export {
+  TELEPORT_DISTANCE_M,
+  angleDelta,
+  createPedestrianPose,
+  lerpAngle,
+  samplePedestrian,
+} from './interpolationMath'
+export type { PedestrianPose } from './interpolationMath'
 
 /** 補間結果。3D 側はこれを毎フレーム読んでメッシュに反映する */
 export interface VehiclePose {
@@ -24,23 +31,12 @@ export interface VehiclePose {
   /** 目的地 [x, y]（ENU） */
   goalX: number
   goalY: number
+  /** 制動指令が出ているか（ブレーキランプ）。**補間しない** */
+  braking: boolean
+  /** 方向指示器。-1=左 / 0=消灯 / +1=右。**補間しない** */
+  turnSignal: number
   /** この呼び出しで瞬間移動したか（カメラ側で減衰を切るのに使う） */
   teleported: boolean
-}
-
-/** 角度差を (-pi, pi] に畳む。heading は最短回りで補間しなければならない */
-export function angleDelta(from: number, to: number): number {
-  const d = to - from
-  return Math.atan2(Math.sin(d), Math.cos(d))
-}
-
-/** 角度の最短回り補間 */
-export function lerpAngle(from: number, to: number, t: number): number {
-  return from + angleDelta(from, to) * t
-}
-
-function lerp(a: number, b: number, t: number): number {
-  return a + (b - a) * t
 }
 
 /** 現在時刻における補間係数 alpha を求める。 */
@@ -77,6 +73,8 @@ export function sampleVehicle(
   out.active = true
   out.collided = cv.collided
   out.reachedGoal = cv.reachedGoal
+  out.braking = cv.braking ?? false
+  out.turnSignal = cv.turnSignal ?? 0
   out.goalX = cv.goal[0]
   out.goalY = cv.goal[1]
   out.teleported = false
@@ -93,7 +91,7 @@ export function sampleVehicle(
 
   const dx = cv.x - pv.x
   const dy = cv.y - pv.y
-  if (dx * dx + dy * dy > TELEPORT_DISTANCE_M * TELEPORT_DISTANCE_M) {
+  if (dx * dx + dy * dy > TELEPORT_M * TELEPORT_M) {
     out.x = cv.x
     out.y = cv.y
     out.heading = cv.heading
@@ -124,6 +122,8 @@ export function createPose(): VehiclePose {
     reachedGoal: false,
     goalX: 0,
     goalY: 0,
+    braking: false,
+    turnSignal: 0,
     teleported: false,
   }
 }

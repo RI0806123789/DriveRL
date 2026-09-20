@@ -11,6 +11,7 @@ import numpy as np
 
 from app import config
 from app.contracts import FrameSnapshot, MapIndex, ObstacleSnapshot, VehicleSnapshot
+from app.sim.pedestrians import PedestrianCrowd
 from app.sim.signals import (
     RED,
     YELLOW,
@@ -40,6 +41,21 @@ SIGNAL_LOOKAHEAD_COUNT = 3
 
 LANE_DEPARTURE_M = config.LANE_DEPARTURE_M
 LANE_RETURN_M = config.LANE_RETURN_M
+
+#: 誰にも見えていない歩行者を車の近くへ回す間隔 [秒]。毎ステップやる必要はない
+PEDESTRIAN_RECYCLE_SEC = 2.0
+
+#: これより強い制動指令が出ている間はブレーキランプを点ける。
+#: 0 にすると、方策が出す微小な負の値で点きっぱなしになる
+BRAKE_COMMAND_THRESHOLD = -0.05
+
+#: 方向指示器を出し始める距離 [m]（道交法施行令 21 条「30m 手前」）
+TURN_LOOKAHEAD_M = 30.0
+#: 先読み地点の接線を測る幅 [m]。1 点では接線が出ない
+TURN_TANGENT_SPAN_M = 3.0
+#: 出す／消すしきい値 [rad]。ヒステリシスを付けて、緩いカーブで点滅させない
+TURN_ON_RAD = 0.35
+TURN_OFF_RAD = 0.12
 
 FORWARD_NODE_RADIUS_M = 150.0
 FORWARD_NODE_MIN_M = 14.0
@@ -108,10 +124,12 @@ class World:
         self.map_index = map_index
         self.rng = rng
         self.fleet = VehicleFleet(config.MAX_VEHICLES)
+        self.crowd = PedestrianCrowd(map_index, rng)
         self.obstacles: list[ObstacleState] = []
         self.slots: list[SlotState] = [SlotState() for _ in range(config.MAX_VEHICLES)]
 
         self._next_obstacle_id = 0
+        self._recycled_at = 0.0
         self._signals_on_route_failed = False
         self._speed_limits_on_route_failed = False
         n = config.MAX_VEHICLES
@@ -130,6 +148,12 @@ class World:
 
         self.collided_flags = np.zeros(n, dtype=bool)
         self.reached_flags = np.zeros(n, dtype=bool)
+
+        self.braking = np.zeros(n, dtype=bool)
+        #: 方向指示器。-1=左 / 0=消灯 / +1=右
+        self.turn_signal = np.zeros(n, dtype=np.int8)
+        #: 直近の `check_collisions()` で歩行者に当たったスロット
+        self.pedestrian_hits = np.zeros(n, dtype=bool)
 
         self.stop_arc = np.full(n, np.inf, dtype=np.float64)
 
@@ -360,9 +384,36 @@ class World:
         return self._with_endpoints(self._trim_tail(route, dst_snap), src_snap, dst_snap)
 
     def advance_time(self, dt: float) -> None:
-        """シミュレーション内時刻を進め、信号の現示を更新する。"""
+        """シミュレーション内時刻を進め、信号の現示と歩行者を更新する。"""
         self.sim_time += float(dt)
         self.signal_phases = self.signals.phases(self.sim_time)
+        # ★ 現示を作り直した**あと**に渡すこと。1 ステップ古い色で渡らせない
+        self.crowd.step(float(dt), self.signal_phases)
+        if self.sim_time - self._recycled_at >= PEDESTRIAN_RECYCLE_SEC:
+            self._recycled_at = self.sim_time
+            self.crowd.recycle(self._active_vehicle_xy())
+
+    def set_pedestrian_count(self, count: int) -> None:
+        """街を歩く NPC 歩行者の人数を変える。"""
+        self.crowd.set_count(int(count), self._active_vehicle_xy())
+
+    def relocate_pedestrians(self) -> None:
+        """歩行者を街中へ置き直す（エピソードのリセット・教師データの散らし直し）。"""
+        self.crowd.relocate(self._active_vehicle_xy())
+
+    def _active_vehicle_xy(self) -> np.ndarray:
+        """走っている車両の座標 (K, 2)。歩行者を湧かせる場所を避けるのに使う。"""
+        idx = np.flatnonzero(self.fleet.active)
+        if idx.size == 0:
+            return np.zeros((0, 2), dtype=np.float64)
+        return np.column_stack(
+            (self.fleet.x[idx].astype(np.float64), self.fleet.y[idx].astype(np.float64))
+        )
+
+    @property
+    def pedestrian_xy(self) -> np.ndarray:
+        """いる歩行者の座標 (K, 2) float64。擬似カメラ・正解ラベル・衝突判定が使う。"""
+        return self.crowd.positions
 
     def next_signal(self, slot: int) -> tuple[float, int]:
         """そのスロットの前方にある直近の信号を (停止線までの距離 [m], 灯色) で返す。"""
@@ -902,15 +953,57 @@ class World:
             if self.fleet.active[slot]:
                 self.slots[slot].steps += 1
 
+    def set_braking(self, accel_cmd: np.ndarray) -> None:
+        """制動指令が出ているスロットを記録する（ブレーキランプ）。
+
+        **加速度の実測ではなく指令を見る。** エンジンブレーキや空気抵抗で減速しても
+        実車のブレーキランプは点かない。
+        """
+        cmd = np.asarray(accel_cmd, dtype=np.float32)
+        self.braking = (cmd < np.float32(BRAKE_COMMAND_THRESHOLD)) & self.fleet.active
+
+    def update_turn_signals(self) -> None:
+        """経路の先を見て方向指示器を出す。**`project_all()` の後に呼ぶこと**。
+
+        道交法施行令 21 条にならい、右左折の 30m 手前から出す。**ヒステリシスが要る**
+        （出すしきい値だけだと、緩いカーブを曲がっている間じゅう点いたり消えたりする）。
+        """
+        offsets = np.array(
+            [TURN_LOOKAHEAD_M - TURN_TANGENT_SPAN_M, TURN_LOOKAHEAD_M + TURN_TANGENT_SPAN_M],
+            dtype=np.float32,
+        )
+        pts = self.lookahead_points(offsets)
+        dx = (pts[:, 1, 0] - pts[:, 0, 0]).astype(np.float64)
+        dy = (pts[:, 1, 1] - pts[:, 0, 1]).astype(np.float64)
+        ahead = np.arctan2(dy, dx)
+        here = self.tangent.astype(np.float64)
+        diff = np.arctan2(np.sin(ahead - here), np.cos(ahead - here))
+
+        # 経路の終端では先読み点が重なって方位が出ない。そのときは消灯のまま
+        degenerate = np.hypot(dx, dy) < 1e-3
+        # ENU は反時計回りが正なので、方位が増える側が左折
+        want = np.where(diff > 0.0, np.int8(-1), np.int8(1))
+        magnitude = np.abs(diff)
+
+        signal = self.turn_signal.copy()
+        signal = np.where(magnitude >= TURN_ON_RAD, want, signal)
+        signal = np.where(magnitude < TURN_OFF_RAD, np.int8(0), signal)
+        signal = np.where(degenerate | ~self.fleet.active, np.int8(0), signal)
+        self.turn_signal = signal.astype(np.int8)
+
     def set_event_flags(self, collided: np.ndarray, reached: np.ndarray) -> None:
         """描画用の衝突／到達フラグを設定する（respawn 後も 1 フレームだけ残す）。"""
         self.collided_flags = np.asarray(collided, dtype=bool).copy()
         self.reached_flags = np.asarray(reached, dtype=bool).copy()
 
     def check_collisions(self) -> np.ndarray:
-        """建物・車両同士・障害物の 3 種類をまとめて判定する。shape (N,) bool。"""
+        """建物・車両同士・障害物・歩行者の 4 種類をまとめて判定する。shape (N,) bool。
+
+        歩行者との接触だけは `pedestrian_hits` にも残す（学習タブで分けて出すため）。
+        """
         n = config.MAX_VEHICLES
         hit = np.zeros(n, dtype=bool)
+        self.pedestrian_hits = np.zeros(n, dtype=bool)
         active = self.fleet.active
         idx = np.flatnonzero(active)
         if idx.size == 0:
@@ -954,6 +1047,24 @@ class World:
                 np.float64(config.VEHICLE_WIDTH * 0.5) + radius,
             ).any(axis=1)
 
+        people = self.pedestrian_xy
+        if people.shape[0] > 0:
+            px = self.fleet.x[idx].astype(np.float64)[:, None]
+            py = self.fleet.y[idx].astype(np.float64)[:, None]
+            cos_h = np.cos(self.fleet.heading[idx].astype(np.float64))[:, None]
+            sin_h = np.sin(self.fleet.heading[idx].astype(np.float64))[:, None]
+            radius = np.float64(config.PEDESTRIAN_RADIUS)
+            struck = _in_body_ellipse(
+                people[None, :, 0] - px,
+                people[None, :, 1] - py,
+                cos_h,
+                sin_h,
+                np.float64(config.VEHICLE_LENGTH * 0.5) + radius,
+                np.float64(config.VEHICLE_WIDTH * 0.5) + radius,
+            ).any(axis=1)
+            self.pedestrian_hits[idx] = struck
+            hit[idx] |= struck
+
         return hit
 
     def snapshot(self, tick: int, sim_time: float, include_routes: bool) -> FrameSnapshot:
@@ -988,6 +1099,8 @@ class World:
                         float(posted[slot]) if np.isfinite(posted[slot]) else 0.0
                     ),
                     speed_violations=int(state.speed_violations),
+                    braking=bool(self.braking[slot]),
+                    turn_signal=int(self.turn_signal[slot]),
                     route=route,
                 )
             )
@@ -999,4 +1112,5 @@ class World:
             sim_time=float(sim_time),
             vehicles=vehicles,
             obstacles=obstacles,
+            pedestrians=self.crowd.snapshot(),
         )

@@ -1,7 +1,7 @@
-/** docs/protocol.md v1 の TypeScript 表現。 */
+/** docs/protocol.md v2 の TypeScript 表現。 */
 
 /** プロトコルバージョン。init.protocolVersion がこれと違えば警告する */
-export const PROTOCOL_VERSION = 1
+export const PROTOCOL_VERSION = 2
 
 /** ENU 平面上の座標 [x（東）, y（北）]（メートル） */
 export type Vec2 = [number, number]
@@ -20,6 +20,8 @@ export interface MapPreset {
 export interface SimConfig {
   /** 事前確保するエージェントスロット数（擬似固定エージェント数方式） */
   maxVehicles: number
+  /** 街を歩く NPC 歩行者の上限 */
+  maxPedestrians?: number
   /** 物理・学習ステップの周波数 [Hz] */
   simHz: number
   obsDim: number
@@ -30,6 +32,8 @@ export interface SimConfig {
 export interface SimParams {
   /** アクティブにする車両数 (1..maxVehicles) */
   vehicleCount: number
+  /** 街を歩く NPC 歩行者の数 (0..maxPedestrians) */
+  pedestrianCount: number
   /** 実時間に対する倍率 (0.25..4.0) */
   simSpeed: number
   learningRate: number
@@ -236,6 +240,10 @@ export interface VehicleState {
   speedLimit: number
   /** このエピソード中に規制速度を超えた回数（超え始めた瞬間を 1 回と数える） */
   speedViolations: number
+  /** 制動指令が出ているか（ブレーキランプ）。**加速度の実測ではなく指令** */
+  braking?: boolean
+  /** 方向指示器。-1=左 / 0=消灯 / +1=右 */
+  turnSignal?: number
   /** 目的地までの経路。変化があったフレームのみ含まれる。省略時は前回値を保持 */
   route?: Vec2[]
 }
@@ -247,12 +255,29 @@ export interface ObstacleState {
   radius: number
 }
 
+/** 街を歩く NPC 歩行者 1 人（protocol.md 2.3）。 */
+export interface NpcPedestrianState {
+  /** スロット番号。消えるまで変わらない */
+  id: number
+  /** ENU x [m] */
+  x: number
+  /** ENU y [m] */
+  y: number
+  /** 体の向き [rad] */
+  heading: number
+  /** 手足の振りの位相 [rad]。**描画のためだけに送られる** */
+  stride: number
+  /** 車道を横断中か */
+  crossing: boolean
+}
+
 /** 画像認識の検出クラス。**バックエンドの `percep.DetClass` と同じ並び**。 */
 export const DET_TRAFFIC_LIGHT = 0
 export const DET_SPEED_SIGN = 1
 export const DET_VEHICLE = 2
 export const DET_OBSTACLE = 3
 export const DET_LANE = 4
+export const DET_PEDESTRIAN = 5
 
 /** 擬似カメラ画像から認識器が見つけた物体 1 個（protocol.md 2.3）。 */
 export interface Detection {
@@ -284,6 +309,8 @@ export interface FrameMessage {
   /** 常に全スロット分（maxVehicles 個） */
   vehicles: VehicleState[]
   obstacles: ObstacleState[]
+  /** 街を歩く NPC 歩行者。0 人のときは省略される。 */
+  pedestrians?: NpcPedestrianState[]
   /** 信号の現示。map.signals と同じ並びで 0=青 / 1=黄 / 2=赤。 */
   signals?: number[]
   /** 車両ごとの認識結果。**キーはスロット番号の文字列**（JSON のキーは文字列のため）。 */
@@ -320,6 +347,8 @@ export interface MetricsMessage {
   approxKl: number
   /** 直近エピソードのうち衝突終了の割合 */
   collisionRate: number
+  /** そのうち歩行者に当たった割合（`collisionRate` にも含まれる） */
+  pedestrianCollisionRate?: number
   goalRate: number
   stepsPerSec: number
   /** 1 エピソードあたりの信号無視回数 */
@@ -471,6 +500,24 @@ export interface DetectorMessage {
 
 /** 実用モードの配車の段階（2.10 taxi）。 */
 export type TaxiPhase = 'idle' | 'approaching' | 'waiting' | 'riding' | 'arrived'
+
+/** その段階で車に乗っているか。**`arrived` も乗ったまま**（降車は alight_taxi で確定する） */
+export function isRidingPhase(phase: TaxiPhase): boolean {
+  return phase === 'riding' || phase === 'arrived'
+}
+
+/** その段階で乗り込めるか（迎車の途中でも乗れる）。 */
+export function isBoardablePhase(phase: TaxiPhase): boolean {
+  return phase === 'approaching' || phase === 'waiting'
+}
+
+/**
+ * その段階で利用者を待っているか（ハザードを出す段階）。
+ * **段階から「いま何ができるか」を導くのはこの並びだけ**（`code_review` T-01）。
+ */
+export function isWaitingPhase(phase: TaxiPhase): boolean {
+  return phase === 'waiting' || phase === 'arrived'
+}
 
 /** 2.10 taxi — 実用モードの配車状態（段階が変わったときと 1Hz）。 */
 export interface TaxiMessage {

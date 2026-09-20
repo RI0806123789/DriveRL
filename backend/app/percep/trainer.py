@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 
 DATASET_FILE = "detector_dataset.npz"
 
-DATASET_VERSION = 2
+DATASET_VERSION = 3
 
 VALIDATION_SPLIT = 0.1
 
@@ -134,10 +134,11 @@ def cluster_vehicles(
 
 
 def scatter_obstacles(
-    env: "SimulationEnv", rng: np.random.Generator, *, dense: bool = False
+    env: "SimulationEnv", rng: np.random.Generator, *, focus: DetClass | None = None
 ) -> None:
     """各車両の前方にパイロンを置く。置かないと OBSTACLE の教師が 0 件になる。"""
     env.world.clear_obstacles()
+    dense = focus is DetClass.OBSTACLE
     per_vehicle = 3 if dense else 1
     reach = 16.0 if dense else 28.0
     for raw in np.flatnonzero(env.world.fleet.active):
@@ -153,6 +154,41 @@ def scatter_obstacles(
                 y + np.sin(heading) * ahead + np.cos(heading) * side,
                 float(config.OBSTACLE_RADIUS),
             )
+
+
+def scatter_pedestrians(
+    env: "SimulationEnv", rng: np.random.Generator, *, focus: DetClass | None = None
+) -> None:
+    """歩行者を車両の周りへ散らす。置かないと PEDESTRIAN の教師が 0 件になる。
+
+    ★ **街へ一様に撒かないこと。** 金沢は 12.3km 四方なので、64 人を一様に散らすと
+    1 枚の画に 1 人も写らない。走っている車の周りへ寄せて初めて教師になる。
+    """
+    world = env.world
+    slots = np.flatnonzero(world.fleet.active)
+    if slots.size == 0:
+        world.relocate_pedestrians()
+        return
+    dense = focus is DetClass.PEDESTRIAN
+    world.crowd.gather_near(
+        world.fleet.x[slots].astype(np.float64),
+        world.fleet.y[slots].astype(np.float64),
+        world.fleet.heading[slots].astype(np.float64),
+        reach=26.0 if dense else 115.0,
+        ahead_only=dense,
+    )
+
+
+def scatter_props(
+    env: "SimulationEnv", rng: np.random.Generator, *, focus: DetClass | None = None
+) -> None:
+    """パイロンと歩行者を置き直す。**必ずこの 1 本から呼ぶこと。**
+
+    別々に呼べるようにしておくと、片方だけ呼ぶ経路がいつか生まれ、狙ったクラスが
+    薄いまま集まる（実測で 600 ステップ中 278 ステップが薄いままだった）。
+    """
+    scatter_obstacles(env, rng, focus=focus)
+    scatter_pedestrians(env, rng, focus=focus)
 
 
 FACE_TOLERANCE = math.cos(math.radians(55.0))
@@ -234,7 +270,7 @@ def arrange_scene(
         _place_facing(env, rng, *_sign_approaches(env))
     else:
         cluster_vehicles(env, rng, tight=focus is DetClass.VEHICLE)
-    scatter_obstacles(env, rng, dense=focus is DetClass.OBSTACLE)
+    scatter_props(env, rng, focus=focus)
 
 
 def _weighted_choice(
@@ -287,6 +323,7 @@ def collect_dataset(
 
     params = SimParams()
     params.vehicle_count = config.MAX_VEHICLES
+    params.pedestrian_count = config.MAX_PEDESTRIANS
     env = SimulationEnv(map_index, params, seed=seed, compute_observations=False)
     camera = PseudoCamera(map_index, spec)
     rng = np.random.default_rng(seed)
@@ -310,7 +347,8 @@ def collect_dataset(
         """
         return _weighted_choice(rng, classes, class_focus) if class_focus else None
 
-    arrange_scene(env, rng, pick_focus())
+    focus = pick_focus()
+    arrange_scene(env, rng, focus)
 
     started = time.perf_counter()
     step = 0
@@ -350,9 +388,10 @@ def collect_dataset(
         step += 1
         if reset_every > 0 and step % reset_every == 0:
             env.reset_all()
-            arrange_scene(env, rng, pick_focus())
+            focus = pick_focus()
+            arrange_scene(env, rng, focus)
         elif step % SCATTER_EVERY == 0:
-            scatter_obstacles(env, rng)
+            scatter_props(env, rng, focus=focus)
 
         if on_progress is not None and step % 20 == 0:
             on_progress(min(collected, samples), samples, time.perf_counter() - started)

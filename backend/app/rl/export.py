@@ -148,6 +148,14 @@ def _observation_layout() -> list[dict[str, Any]]:
             f"(dx, dy) / {config.OBS_OBSTACLE_RANGE}m と信頼度",
         },
         {
+            "name": "pedestrians",
+            "size": config.OBS_PEDESTRIAN_DIM,
+            "source": "camera",
+            "description": f"認識した歩行者 {config.OBS_PEDESTRIAN_COUNT} 人について "
+            f"(dx, dy) / {config.OBS_PEDESTRIAN_RANGE}m と信頼度。"
+            "距離は既知の肩幅とバウンディングボックスの大きさから推定した単眼測距",
+        },
+        {
             "name": "freespace",
             "size": config.OBS_FREESPACE_DIM,
             "source": "camera",

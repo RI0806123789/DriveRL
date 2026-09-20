@@ -3,6 +3,7 @@
 import {
   DET_LANE,
   DET_OBSTACLE,
+  DET_PEDESTRIAN,
   DET_SPEED_SIGN,
   DET_TRAFFIC_LIGHT,
   DET_VEHICLE,
@@ -36,6 +37,8 @@ export function detectionLabel(det: Detection): string {
       return '車線'
     case DET_VEHICLE:
       return '車両'
+    case DET_PEDESTRIAN:
+      return '歩行者'
     case DET_OBSTACLE:
       return '障害物'
     default:
@@ -59,6 +62,8 @@ export function detectionColor(det: Detection): string {
       return '#4f9dff'
     case DET_LANE:
       return '#26c6da'
+    case DET_PEDESTRIAN:
+      return '#ffd24a'
     default:
       return '#ff7a3d'
   }

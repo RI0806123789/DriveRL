@@ -1,4 +1,4 @@
-/** 車両の姿勢と部品の取り付け位置を検証する（ブラウザ不要）。 */
+/** 車両の姿勢・部品の位置・ライト・ナンバープレートを検証する（ブラウザ不要）。 */
 
 import * as THREE from 'three'
 import {
@@ -13,8 +13,37 @@ import {
   makeBodyGeometry,
   makeCabinGeometry,
   makeNoseGeometry,
+  composeLightMatrix,
+  composePlateMatrix,
   makeWheelGeometry,
 } from '../src/scene/vehicleGeometry.ts'
+import {
+  DEFAULT_REGION,
+  PLATES_PER_VEHICLE,
+  PLATE_H,
+  PLATE_SLOTS,
+  PLATE_W,
+  plateRegion,
+  plateSerial,
+  plateLabel,
+  plateTextFor,
+  plateUvRow,
+  withPlateNames,
+} from '../src/scene/licensePlate.ts'
+import {
+  BLINK_HZ,
+  HEADLIGHT_FOG,
+  HEADLIGHT_RAIN,
+  LIGHTS_PER_VEHICLE,
+  LIGHT_HEAD,
+  LIGHT_SLOTS,
+  LIGHT_TAIL,
+  LIGHT_TURN,
+  blinkOn,
+  headlightsOn,
+  lightIntensity,
+  lightStateFor,
+} from '../src/scene/vehicleLights.ts'
 
 let failures = 0
 
@@ -209,6 +238,207 @@ for (const [name, geom, offset] of cases) {
   const hidden = new THREE.Matrix4().makeScale(0, 0, 0)
   const p = new THREE.Vector3(1, 1, 1).applyMatrix4(hidden)
   check('非表示スロットの行列が 1 点に潰れる', p.lengthSq() === 0)
+}
+
+console.log()
+console.log('='.repeat(70))
+console.log('ナンバープレート（日本の中型・自家用）')
+console.log('='.repeat(70))
+
+{
+  check('中型プレートの実寸は 330 × 165mm', PLATE_W === 0.33 && PLATE_H === 0.165)
+  check('前後に 1 枚ずつ', PLATES_PER_VEHICLE === 2)
+  check(
+    '前のプレートは車体の前、後ろのプレートは後ろ',
+    PLATE_SLOTS[0].position[0] > 0 && PLATE_SLOTS[1].position[0] < 0,
+  )
+  check(
+    'どちらも車体の中心線上（左右にずれていない）',
+    PLATE_SLOTS.every((p) => p.position[2] === 0),
+  )
+  check(
+    'バンパーの高さに収まる（地面より上・屋根より下）',
+    PLATE_SLOTS.every((p) => p.position[1] > 0.2 && p.position[1] < 1),
+  )
+}
+
+{
+  // ★ 後ろのプレートが前を向いていると、真後ろから見て裏面（無地）しか見えない
+  const scratch = createTransformScratch()
+  const base = new THREE.Matrix4()
+  const out = new THREE.Matrix4()
+  composeVehicleMatrix(scratch, 0, 0, 0, base)
+
+  const normals = PLATE_SLOTS.map((slot) => {
+    composePlateMatrix(scratch, base, slot.position, slot.yaw, out)
+    const n = new THREE.Vector3(1, 0, 0).transformDirection(out)
+    return n
+  })
+  check('前のプレートは車の前方を向く', normals[0].x > 0.99, `x=${normals[0].x.toFixed(2)}`)
+  check('後ろのプレートは真後ろを向く', normals[1].x < -0.99, `x=${normals[1].x.toFixed(2)}`)
+}
+
+{
+  // 一連指定番号は上位を中黒で埋め、4 桁のときだけハイフンを挟む
+  check('1 桁は中黒 3 つで埋める', plateSerial(0) === '・・・0', plateSerial(0))
+  check('車両 #7 は ・・・7', plateSerial(7) === '・・・7', plateSerial(7))
+  check('2 桁', plateSerial(12) === '・・12', plateSerial(12))
+  check('3 桁', plateSerial(123) === '・123', plateSerial(123))
+  check('4 桁だけハイフンが入る', plateSerial(1234) === '12-34', plateSerial(1234))
+  check('どの桁でも 4 文字幅に収まる', [0, 9, 42, 700, 8888].every((n) => plateSerial(n).length <= 5))
+}
+
+{
+  check('銀座は品川ナンバー', plateRegion('ginza') === '品川')
+  check('金沢は石川ナンバー', plateRegion('kanazawa') === '石川')
+  check('未知のプリセットは既定の地名', plateRegion('unknown') === DEFAULT_REGION)
+  check('プリセット未選択でも落ちない', plateRegion(null) === DEFAULT_REGION)
+
+  const text = plateTextFor(3, 'umeda')
+  check(
+    'プレートの文字が 4 つとも揃う',
+    text.region === 'なにわ' && text.classNumber === '300' && text.kana.length === 1 &&
+      text.serial === '・・・3',
+    `${text.region} ${text.classNumber} ${text.kana} ${text.serial}`,
+  )
+}
+
+{
+  // ★ Canvas は上から 0,1,2… と描くが、テクスチャの v は下から数える
+  const count = 8
+  const rows = Array.from({ length: count }, (_, i) => plateUvRow(i, count))
+  check('段は 0〜count-1 に収まる', rows.every((r) => r >= 0 && r < count))
+  check('車両ごとに違う段を使う', new Set(rows).size === count)
+  check('車両 #0 はいちばん上の段（v では最後）', rows[0] === count - 1, `row=${rows[0]}`)
+}
+
+{
+  // ★ 実用モードの画面は、サーバーの文言中の「車両 #N」をプレート表記へ差し替える
+  //   （地名の対応表はクライアントにしか無い）。書式は docs/protocol.md 2.10
+  check(
+    'プレートの 1 行表記',
+    plateLabel(0, 'ginza') === '品川 300 さ ・・・0',
+    plateLabel(0, 'ginza'),
+  )
+  const before = '車両 #1 が来られなくなったため、車両 #5 が向かっています'
+  const after = withPlateNames(before, 'kanazawa')
+  check(
+    '文中の「車両 #N」をすべて置き換える',
+    after === '石川 300 さ ・・・1 が来られなくなったため、石川 300 さ ・・・5 が向かっています',
+    after,
+  )
+  check(
+    '該当が無ければそのまま返す',
+    withPlateNames('目的地へ向かっています', 'ginza') === '目的地へ向かっています',
+  )
+  check(
+    'モックの接頭辞が付いていても置き換わる',
+    withPlateNames('（モック）車両 #2 が迎えに向かっています', 'ginza').includes('さ ・・・2'),
+  )
+}
+
+console.log()
+console.log('='.repeat(70))
+console.log('ライト（前照灯・制動灯・方向指示器）')
+console.log('='.repeat(70))
+
+function state(over: Partial<Parameters<typeof lightStateFor>[0]>) {
+  return lightStateFor({
+    braking: false,
+    turnSignal: 0,
+    hazard: false,
+    headlights: false,
+    blink: true,
+    ...over,
+  })
+}
+
+{
+  const kinds = LIGHT_SLOTS.map((s) => s.kind)
+  check(
+    '前 2 / 後ろ 2 / ウインカー 4 の 8 灯',
+    LIGHTS_PER_VEHICLE === 8 &&
+      kinds.filter((k) => k === LIGHT_HEAD).length === 2 &&
+      kinds.filter((k) => k === LIGHT_TAIL).length === 2 &&
+      kinds.filter((k) => k === LIGHT_TURN).length === 4,
+  )
+  check(
+    '前照灯は車体の前、尾灯は後ろ',
+    LIGHT_SLOTS.filter((s) => s.kind === LIGHT_HEAD).every((s) => s.position[0] > 0) &&
+      LIGHT_SLOTS.filter((s) => s.kind === LIGHT_TAIL).every((s) => s.position[0] < 0),
+  )
+  check(
+    'ウインカーは車体の左右いちばん外側',
+    LIGHT_SLOTS.filter((s) => s.kind === LIGHT_TURN).every(
+      (s) => Math.abs(s.position[2]) > 0.8,
+    ),
+  )
+  check(
+    'side の符号と取り付け位置の左右が一致する（右が +Z）',
+    LIGHT_SLOTS.every((s) => Math.sign(s.position[2]) === s.side),
+  )
+  check('すべての灯体が地面より上', LIGHT_SLOTS.every((s) => s.position[1] > 0))
+}
+
+{
+  // ★ 左のウインカーが右側に出ると、外から見て曲がる向きが逆になる
+  const scratch = createTransformScratch()
+  const base = new THREE.Matrix4()
+  const out = new THREE.Matrix4()
+  // ENU の東（heading 0）を向いた車。three では -Z が北＝進行方向の左
+  composeVehicleMatrix(scratch, 0, 0, 0, base)
+  const left = LIGHT_SLOTS.findIndex((s) => s.kind === LIGHT_TURN && s.side === -1)
+  composeLightMatrix(scratch, base, LIGHT_SLOTS[left].position, out)
+  const p = new THREE.Vector3().setFromMatrixPosition(out)
+  check(
+    '東を向いた車の左ウインカーは北側（three の -Z）に出る',
+    p.z < 0,
+    `z=${p.z.toFixed(2)}`,
+  )
+}
+
+{
+  check('晴れの昼は前照灯を点けない', !headlightsOn(0, 0, false))
+  check('夜は天候によらず点ける', headlightsOn(0, 0, true))
+  check(`小雨（${HEADLIGHT_RAIN} 以上）で点ける`, headlightsOn(0.35, 0, false))
+  check(`霧（${HEADLIGHT_FOG} 以上）で点ける`, headlightsOn(0, 0.75, false))
+  check('ごく弱い雨では点けない', !headlightsOn(0.1, 0, false))
+}
+
+{
+  const brake = state({ braking: true })
+  check('制動灯はブレーキ指令だけで点く（前照灯とは独立）', brake.brake && !brake.head)
+
+  const night = state({ headlights: true })
+  check('前照灯を点けると尾灯も点く', night.head && night.tail && !night.brake)
+
+  const tailIndex = LIGHT_SLOTS.findIndex((s) => s.kind === LIGHT_TAIL)
+  check(
+    '尾灯は制動灯より暗い（ブレーキが見分けられる）',
+    lightIntensity(tailIndex, night) < lightIntensity(tailIndex, state({ braking: true })),
+    `${lightIntensity(tailIndex, night)} < ${lightIntensity(tailIndex, state({ braking: true }))}`,
+  )
+
+  const left = state({ turnSignal: -1 })
+  check('左ウインカーは左だけ点く', left.left && !left.right)
+  const right = state({ turnSignal: 1 })
+  check('右ウインカーは右だけ点く', right.right && !right.left)
+  const off = state({ turnSignal: -1, blink: false })
+  check('点滅の消灯位相では消える', !off.left && !off.right)
+
+  // ★ 乗降を待っている間はハザード。方向指示器より優先する
+  const hazard = state({ hazard: true, turnSignal: 1 })
+  check('ハザードは左右同時に点く（方向指示器より優先）', hazard.left && hazard.right)
+}
+
+{
+  // 保安基準は毎分 60〜120 回（1〜2Hz）
+  check(`点滅は毎分 ${BLINK_HZ * 60} 回で 60〜120 回に収まる`, BLINK_HZ >= 1 && BLINK_HZ <= 2)
+  const period = 1000 / BLINK_HZ
+  check(
+    '点滅のデューティは半分',
+    blinkOn(0) && !blinkOn(period * 0.75) && blinkOn(period),
+  )
 }
 
 console.log()

@@ -681,6 +681,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 "presets": presets,
                 "config": {
                     "maxVehicles": config.MAX_VEHICLES,
+                    "maxPedestrians": config.MAX_PEDESTRIANS,
                     "simHz": config.SIM_HZ,
                     "obsDim": config.OBS_DIM,
                     "actionDim": config.ACTION_DIM,

@@ -253,6 +253,7 @@ _CLASS_LABELS: dict[DetClass, str] = {
     DetClass.VEHICLE: "車両",
     DetClass.OBSTACLE: "障害物",
     DetClass.LANE: "車線",
+    DetClass.PEDESTRIAN: "歩行者",
 }
 
 _WEATHER_LABELS: dict[str, str] = {
@@ -308,17 +309,18 @@ def evaluate_detector(
     """走らせながら現行の認識器を採点する。**教師データは作らない。**"""
     from app.percep.camera import PseudoCamera
     from app.percep.groundtruth import detect_ground_truth_batch
-    from app.percep.trainer import TrainingCancelled, cluster_vehicles, scatter_obstacles
+    from app.percep.trainer import TrainingCancelled, cluster_vehicles, scatter_props
     from app.sim.env import SimulationEnv
 
     params = SimParams()
     params.vehicle_count = config.MAX_VEHICLES
+    params.pedestrian_count = config.MAX_PEDESTRIANS
     env = SimulationEnv(map_index, params, seed=seed, compute_observations=False)
     camera = PseudoCamera(map_index, spec)
     rng = np.random.default_rng(seed)
 
     cluster_vehicles(env, rng)
-    scatter_obstacles(env, rng)
+    scatter_props(env, rng)
 
     names = [name for name in weathers if name in PRESETS] or ["clear"]
     per_class: dict[DetClass, _Tally] = {cls: _Tally() for cls in DetClass}
@@ -352,7 +354,7 @@ def evaluate_detector(
         if step % 12 == 0:
             env.reset_all()
             cluster_vehicles(env, rng)
-            scatter_obstacles(env, rng)
+            scatter_props(env, rng)
 
     return DetectorEvaluation(
         samples=int(collected),

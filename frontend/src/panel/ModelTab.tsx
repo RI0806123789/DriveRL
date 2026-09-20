@@ -54,6 +54,7 @@ const CLASS_LABEL: Record<string, string> = {
   VEHICLE: '車両',
   OBSTACLE: '障害物',
   LANE: '車線',
+  PEDESTRIAN: '歩行者',
 }
 
 /** 集める枚数から、おおよその所要時間を見積もる（銀座での実測が元）。 */

@@ -8,6 +8,8 @@ export interface MapView {
   /** 画面中心の ENU 座標 */
   centerX: number
   centerY: number
+  /** 地図を回す角度 [rad]。0 で北が上、`heading - π/2` で進行方向が上 */
+  rotation: number
 }
 
 /** ENU ↔ キャンバス座標の変換。**y は上下が反転する**（北が上） */
@@ -18,6 +20,11 @@ export interface MapProjection {
   scale: number
   centerX: number
   centerY: number
+  /** 地図を回す角度 [rad] */
+  rotation: number
+  /** `rotation` の余弦・正弦。毎フレーム数千回引くのでここに持つ */
+  cos: number
+  sin: number
 }
 
 export const ZOOM_MIN = 1
@@ -48,12 +55,16 @@ export function createProjection(
   view: MapView,
   padding = 6,
 ): MapProjection {
+  const rotation = Number.isFinite(view.rotation) ? view.rotation : 0
   return {
     width,
     height,
     scale: baseScale(bounds, width, height, padding) * clampZoom(view.zoom),
     centerX: view.centerX,
     centerY: view.centerY,
+    rotation,
+    cos: Math.cos(rotation),
+    sin: Math.sin(rotation),
   }
 }
 
@@ -62,36 +73,75 @@ export function clampZoom(zoom: number): number {
   return Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, zoom))
 }
 
+/** 角度を -π..π に畳む。 */
+export function normalizeAngle(angle: number): number {
+  return Math.atan2(Math.sin(angle), Math.cos(angle))
+}
+
+/** 角度を**近いほうへ回して**補間する（359° → 1° は +2°）。 */
+export function lerpAngle(from: number, to: number, t: number): number {
+  const k = Math.max(0, Math.min(1, t))
+  return from + normalizeAngle(to - from) * k
+}
+
+/** 進行方向を画面の上に向けるための回転角。 */
+export function rotationForHeading(heading: number): number {
+  return heading - Math.PI / 2
+}
+
 /** マップの中心（倍率 1 のときの見え方） */
 export function boundsCenter(bounds: MapBounds): Vec2 {
   return [(bounds.minX + bounds.maxX) / 2, (bounds.minY + bounds.maxY) / 2]
 }
 
-export function toCanvasX(p: MapProjection, x: number): number {
-  return p.width / 2 + (x - p.centerX) * p.scale
-}
-
-export function toCanvasY(p: MapProjection, y: number): number {
-  return p.height / 2 - (y - p.centerY) * p.scale
+/**
+ * ENU の点をキャンバス座標へ。
+ *
+ * ★ **回転が入ると x と y は独立に変換できない**ので、軸ごとの
+ * `toCanvasX()` / `toCanvasY()` は廃止した（片方だけ呼ぶと北向きの値が返り、
+ * 回っていることに気づけないまま座標がずれる）。
+ */
+export function toCanvas(p: MapProjection, x: number, y: number): Vec2 {
+  const dx = x - p.centerX
+  const dy = y - p.centerY
+  const rx = dx * p.cos + dy * p.sin
+  const ry = -dx * p.sin + dy * p.cos
+  return [p.width / 2 + rx * p.scale, p.height / 2 - ry * p.scale]
 }
 
 /** キャンバス座標を ENU へ戻す（地図をクリックして地点を選ぶのに使う）。 */
 export function toEnu(p: MapProjection, cx: number, cy: number): Vec2 {
+  const rx = (cx - p.width / 2) / p.scale
+  const ry = -(cy - p.height / 2) / p.scale
   return [
-    p.centerX + (cx - p.width / 2) / p.scale,
-    p.centerY - (cy - p.height / 2) / p.scale,
+    p.centerX + rx * p.cos - ry * p.sin,
+    p.centerY + rx * p.sin + ry * p.cos,
   ]
 }
 
-/** 見えている範囲の ENU 矩形（描画を間引くのに使う） */
+/** 見えている範囲の ENU 矩形（描画を間引くのに使う）。**回転すると広がる。** */
 export function visibleBounds(p: MapProjection, margin = 0): MapBounds {
-  const halfW = p.width / 2 / p.scale + margin
-  const halfH = p.height / 2 / p.scale + margin
+  let minX = Infinity
+  let maxX = -Infinity
+  let minY = Infinity
+  let maxY = -Infinity
+  for (const [cx, cy] of [
+    [0, 0],
+    [p.width, 0],
+    [0, p.height],
+    [p.width, p.height],
+  ]) {
+    const [x, y] = toEnu(p, cx, cy)
+    if (x < minX) minX = x
+    if (x > maxX) maxX = x
+    if (y < minY) minY = y
+    if (y > maxY) maxY = y
+  }
   return {
-    minX: p.centerX - halfW,
-    maxX: p.centerX + halfW,
-    minY: p.centerY - halfH,
-    maxY: p.centerY + halfH,
+    minX: minX - margin,
+    maxX: maxX + margin,
+    minY: minY - margin,
+    maxY: maxY + margin,
   }
 }
 
@@ -101,6 +151,7 @@ export function clampCenter(view: MapView, bounds: MapBounds): MapView {
     zoom: clampZoom(view.zoom),
     centerX: Math.min(bounds.maxX, Math.max(bounds.minX, view.centerX)),
     centerY: Math.min(bounds.maxY, Math.max(bounds.minY, view.centerY)),
+    rotation: view.rotation,
   }
 }
 
@@ -109,27 +160,34 @@ export const FIT_MIN_SPAN_M = 150
 
 /**
  * 指定した点が全部入る見え方を作る（配車の段階に合わせた自動ズーム）。
- * 点が無ければマップ全体へ戻す。
+ * 点が無ければマップ全体へ戻す。**枠は回転後の向きで測る。**
  */
 export function fitView(
   bounds: MapBounds,
   points: readonly Vec2[],
   width: number,
   height: number,
+  rotation = 0,
   marginRatio = 0.26,
 ): MapView {
   const [cx, cy] = boundsCenter(bounds)
-  if (points.length === 0) return { zoom: ZOOM_MIN, centerX: cx, centerY: cy }
+  if (points.length === 0) {
+    return { zoom: ZOOM_MIN, centerX: cx, centerY: cy, rotation }
+  }
 
+  const cos = Math.cos(rotation)
+  const sin = Math.sin(rotation)
   let x0 = Infinity
   let y0 = Infinity
   let x1 = -Infinity
   let y1 = -Infinity
   for (const [px, py] of points) {
-    if (px < x0) x0 = px
-    if (py < y0) y0 = py
-    if (px > x1) x1 = px
-    if (py > y1) y1 = py
+    const rx = px * cos + py * sin
+    const ry = -px * sin + py * cos
+    if (rx < x0) x0 = rx
+    if (ry < y0) y0 = ry
+    if (rx > x1) x1 = rx
+    if (ry > y1) y1 = ry
   }
 
   const spanX = Math.max(FIT_MIN_SPAN_M, x1 - x0)
@@ -137,11 +195,16 @@ export function fitView(
   const room = Math.max(0.05, 1 - marginRatio)
   const want = Math.min((width * room) / spanX, (height * room) / spanY)
 
+  // 回転した座標での中心を ENU へ戻す
+  const mx = (x0 + x1) / 2
+  const my = (y0 + y1) / 2
+
   return clampCenter(
     {
       zoom: clampZoom(want / baseScale(bounds, width, height)),
-      centerX: (x0 + x1) / 2,
-      centerY: (y0 + y1) / 2,
+      centerX: mx * cos - my * sin,
+      centerY: mx * sin + my * cos,
+      rotation,
     },
     bounds,
   )
@@ -149,9 +212,12 @@ export function fitView(
 
 /**
  * 見え方を補間する。**倍率は対数で混ぜる**（線形だと桁の違いで寄り方が跳ねる。
- * 天候のフォグ距離と同じ理由）。
+ * 天候のフォグ距離と同じ理由）。**向きは近いほうへ回す。**
+ *
+ * `tRotation` を分けられるのは、向きだけゆっくり追わせるため（車の方位は
+ * 交差点で一気に変わるので、寄り引きと同じ速さで回すと画面が振られる）。
  */
-export function lerpView(from: MapView, to: MapView, t: number): MapView {
+export function lerpView(from: MapView, to: MapView, t: number, tRotation = t): MapView {
   const k = Math.max(0, Math.min(1, t))
   const logFrom = Math.log(clampZoom(from.zoom))
   const logTo = Math.log(clampZoom(to.zoom))
@@ -159,40 +225,82 @@ export function lerpView(from: MapView, to: MapView, t: number): MapView {
     zoom: Math.exp(logFrom + (logTo - logFrom) * k),
     centerX: from.centerX + (to.centerX - from.centerX) * k,
     centerY: from.centerY + (to.centerY - from.centerY) * k,
+    rotation: lerpAngle(from.rotation, to.rotation, tRotation),
   }
 }
 
-/** 2 つの見え方が実質同じか（画面上のずれと倍率比で見る）。 */
+/** 2 つの見え方が実質同じか（画面上のずれと倍率比・向きで見る）。 */
 export function viewsClose(
   a: MapView,
   b: MapView,
   scale: number,
   pixelEpsilon = 0.4,
   zoomEpsilon = 0.004,
+  rotationEpsilon = 0.0015,
 ): boolean {
   const moved = Math.hypot(a.centerX - b.centerX, a.centerY - b.centerY) * scale
   const ratio = Math.abs(Math.log(clampZoom(a.zoom) / clampZoom(b.zoom)))
-  return moved <= pixelEpsilon && ratio <= zoomEpsilon
+  const turned = Math.abs(normalizeAngle(a.rotation - b.rotation))
+  return moved <= pixelEpsilon && ratio <= zoomEpsilon && turned <= rotationEpsilon
+}
+
+/** 別の見え方で描いたレイヤを、いまの見え方へ貼るときの変換。 */
+export interface LayerTransform {
+  /** レイヤの中心を置くキャンバス座標 */
+  x: number
+  y: number
+  /** `ctx.rotate()` に渡す角度 [rad] */
+  angle: number
+  /** `ctx.scale()` に渡す倍率 */
+  scale: number
 }
 
 /**
- * 別の見え方で描いたレイヤを、いまの見え方へ貼るときの矩形。
+ * 別の見え方で描いたレイヤを、いまの見え方へ貼るときの変換。
  * **道路と建物を毎フレーム描き直さないため**にある（金沢は 58,120 本ある）。
+ *
+ * 回転が入ると平行移動と拡大だけでは貼れないので、`drawImage` の引数ではなく
+ * 変換（移動・回転・拡大）を返す。貼る側は次の順で使う:
+ *
+ * ```
+ * ctx.translate(t.x, t.y); ctx.rotate(t.angle); ctx.scale(t.scale, t.scale)
+ * ctx.drawImage(layer, -w / 2, -h / 2, w, h)
+ * ```
  */
-export function layerPlacement(
+export function layerTransform(
   layer: MapProjection,
   current: MapProjection,
-): { dx: number; dy: number; dw: number; dh: number } {
-  const topLeft = toEnu(layer, 0, 0)
-  const bottomRight = toEnu(layer, layer.width, layer.height)
-  const dx = toCanvasX(current, topLeft[0])
-  const dy = toCanvasY(current, topLeft[1])
+): LayerTransform {
+  const [x, y] = toCanvas(current, layer.centerX, layer.centerY)
   return {
-    dx,
-    dy,
-    dw: toCanvasX(current, bottomRight[0]) - dx,
-    dh: toCanvasY(current, bottomRight[1]) - dy,
+    x,
+    y,
+    angle: current.rotation - layer.rotation,
+    scale: current.scale / layer.scale,
   }
+}
+
+/**
+ * レイヤ画像上の画素が、`layerTransform` で貼ったあとキャンバスのどこに来るか。
+ * **検証用**（貼り替えても地物が同じ画素に乗ることを数値で確かめる）。
+ */
+export function applyLayerTransform(
+  t: LayerTransform,
+  layerWidth: number,
+  layerHeight: number,
+  lx: number,
+  ly: number,
+): Vec2 {
+  const ox = (lx - layerWidth / 2) * t.scale
+  const oy = (ly - layerHeight / 2) * t.scale
+  const cos = Math.cos(t.angle)
+  const sin = Math.sin(t.angle)
+  return [t.x + ox * cos - oy * sin, t.y + ox * sin + oy * cos]
+}
+
+/** 回転して貼っても隅が欠けないレイヤの一辺 [px]（画面の対角）。 */
+export function layerSizeFor(width: number, height: number, rotated: boolean): number {
+  return rotated ? Math.ceil(Math.hypot(width, height)) : Math.ceil(Math.max(width, height))
 }
 
 /** ある点を固定したままズームする（ホイール操作）。 */
@@ -209,6 +317,7 @@ export function zoomAround(
       zoom: next,
       centerX: anchor[0] + (view.centerX - anchor[0]) * ratio,
       centerY: anchor[1] + (view.centerY - anchor[1]) * ratio,
+      rotation: view.rotation,
     },
     bounds,
   )
@@ -249,9 +358,11 @@ export function drawRoads(
       continue
     }
     if (Math.hypot(b[0] - a[0], b[1] - a[1]) < minSpanM) continue
-    ctx.moveTo(toCanvasX(p, a[0]), toCanvasY(p, a[1]))
+    const [sx, sy] = toCanvas(p, a[0], a[1])
+    ctx.moveTo(sx, sy)
     for (let i = 1; i < line.length; i++) {
-      ctx.lineTo(toCanvasX(p, line[i][0]), toCanvasY(p, line[i][1]))
+      const [px, py] = toCanvas(p, line[i][0], line[i][1])
+      ctx.lineTo(px, py)
     }
     drawn++
   }
@@ -288,9 +399,11 @@ export function drawBuildings(
     }
     if (x1 < box.minX || x0 > box.maxX || y1 < box.minY || y0 > box.maxY) continue
     if ((x1 - x0) * p.scale < minPixels && (y1 - y0) * p.scale < minPixels) continue
-    ctx.moveTo(toCanvasX(p, pts[0][0]), toCanvasY(p, pts[0][1]))
+    const [sx, sy] = toCanvas(p, pts[0][0], pts[0][1])
+    ctx.moveTo(sx, sy)
     for (let i = 1; i < pts.length; i++) {
-      ctx.lineTo(toCanvasX(p, pts[i][0]), toCanvasY(p, pts[i][1]))
+      const [px, py] = toCanvas(p, pts[i][0], pts[i][1])
+      ctx.lineTo(px, py)
     }
     ctx.closePath()
     drawn++
@@ -315,9 +428,11 @@ export function drawRoute(
   ctx.lineJoin = 'round'
   ctx.lineCap = 'round'
   ctx.beginPath()
-  ctx.moveTo(toCanvasX(p, route[0][0]), toCanvasY(p, route[0][1]))
+  const [sx, sy] = toCanvas(p, route[0][0], route[0][1])
+  ctx.moveTo(sx, sy)
   for (let i = 1; i < route.length; i++) {
-    ctx.lineTo(toCanvasX(p, route[i][0]), toCanvasY(p, route[i][1]))
+    const [px, py] = toCanvas(p, route[i][0], route[i][1])
+    ctx.lineTo(px, py)
   }
   ctx.stroke()
   ctx.restore()
@@ -334,10 +449,10 @@ export function drawHeadingMark(
   size: number,
   outline?: string,
 ): void {
-  const cx = toCanvasX(p, x)
-  const cy = toCanvasY(p, y)
-  // ENU の反時計回りは、y を反転したキャンバスでは時計回りになる
-  const a = -heading
+  const [cx, cy] = toCanvas(p, x, y)
+  // ENU の反時計回りは、y を反転したキャンバスでは時計回りになる。
+  // 地図を回していれば、そのぶんだけ戻す
+  const a = p.rotation - heading
   ctx.save()
   ctx.translate(cx, cy)
   ctx.rotate(a)
@@ -366,8 +481,7 @@ export function drawPin(
   radius: number,
   ring: boolean,
 ): void {
-  const cx = toCanvasX(p, x)
-  const cy = toCanvasY(p, y)
+  const [cx, cy] = toCanvas(p, x, y)
   ctx.save()
   ctx.beginPath()
   ctx.arc(cx, cy, radius, 0, Math.PI * 2)
@@ -381,5 +495,48 @@ export function drawPin(
     ctx.globalAlpha = 0.55
     ctx.stroke()
   }
+  ctx.restore()
+}
+
+/** 北を指す針が、キャンバス上で向く角度 [rad]（`ctx.rotate()` に渡す値）。 */
+export function northAngle(p: MapProjection): number {
+  return p.rotation
+}
+
+/**
+ * 北を示す針。**地図を回している間だけ出す**（`opacity` が 0 なら描かない）。
+ * 北向きに戻りきると消えるので、回していないときに画面の要素が増えない。
+ */
+export function drawCompass(
+  ctx: CanvasRenderingContext2D,
+  p: MapProjection,
+  x: number,
+  y: number,
+  radius: number,
+  needle: string,
+  dial: string,
+  opacity: number,
+): void {
+  if (opacity <= 0.01) return
+  ctx.save()
+  ctx.globalAlpha = Math.min(1, opacity)
+  ctx.translate(x, y)
+
+  ctx.beginPath()
+  ctx.arc(0, 0, radius, 0, Math.PI * 2)
+  ctx.fillStyle = dial
+  ctx.globalAlpha = Math.min(1, opacity) * 0.55
+  ctx.fill()
+  ctx.globalAlpha = Math.min(1, opacity)
+
+  ctx.rotate(northAngle(p))
+  ctx.beginPath()
+  ctx.moveTo(0, -radius * 0.78)
+  ctx.lineTo(radius * 0.42, radius * 0.5)
+  ctx.lineTo(0, radius * 0.24)
+  ctx.lineTo(-radius * 0.42, radius * 0.5)
+  ctx.closePath()
+  ctx.fillStyle = needle
+  ctx.fill()
   ctx.restore()
 }

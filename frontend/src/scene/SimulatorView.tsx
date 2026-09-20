@@ -9,13 +9,16 @@ import { DetectionOverlay } from './DetectionOverlay'
 import { Ground } from './Ground'
 import { InteractionPlane } from './InteractionPlane'
 import { LaneDetectionOverlay } from './LaneDetectionOverlay'
+import { NpcPedestrians } from './NpcPedestrians'
 import { Obstacles } from './Obstacles'
+import { PedestrianSignals } from './PedestrianSignals'
 import { Pedestrian } from './Pedestrian'
 import { Rain } from './Rain'
 import { RoadMarkings } from './RoadMarkings'
 import { RoadNetwork } from './RoadNetwork'
 import { RouteLines } from './RouteLines'
 import { SpeedSigns } from './SpeedSigns'
+import { TaxiCameraFeed } from './TaxiCameraFeed'
 import { TaxiHud } from './TaxiHud'
 import { TaxiMarkers } from './TaxiMarkers'
 import { TrafficSignals } from './TrafficSignals'
@@ -62,6 +65,7 @@ export function SimulatorView() {
   const connection = useSimStore((s) => s.connection)
   const appMode = useSimStore((s) => s.mode)
   const taxiMode = appMode === 'taxi'
+  const taxiCameraOn = useSimStore((s) => s.taxiCameraOn)
 
   const bounds = map?.bounds ?? null
   const extent = shadowExtent(bounds)
@@ -99,6 +103,13 @@ export function SimulatorView() {
               castShadow={view.shadows}
             />
           )}
+          {map && view.signals && (
+            <PedestrianSignals
+              signals={map.signals ?? []}
+              nodes={map.nodes}
+              castShadow={view.shadows}
+            />
+          )}
           <SpeedSigns />
           {map && view.buildings && (
             <Buildings
@@ -116,10 +127,12 @@ export function SimulatorView() {
           <LaneDetectionOverlay />
           <Vehicles maxVehicles={maxVehicles} castShadow={view.shadows} />
           <Obstacles castShadow={view.shadows} />
+          <NpcPedestrians castShadow={view.shadows} />
           <Rain />
 
           {taxiMode && <TaxiMarkers />}
           {taxiMode && <Pedestrian />}
+          {taxiMode && taxiCameraOn && <TaxiCameraFeed />}
 
           <InteractionPlane bounds={bounds} />
           <CameraRig bounds={bounds} />

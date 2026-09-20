@@ -5,6 +5,7 @@ import { useEffect, useState } from 'react'
 import { frameBuffer } from '../store/frameBuffer'
 import { pedestrian } from '../store/pedestrian'
 import { useSimStore } from '../store/simStore'
+import { isBoardablePhase, isRidingPhase } from '../types/protocol'
 
 /** ポーリング間隔 [ms]。pedestrian は 60fps で動くので、表示だけ間引いて読む */
 const POLL_MS = 150
@@ -49,11 +50,9 @@ export function TaxiHud() {
     return () => window.clearInterval(timer)
   }, [taxi.vehicleId])
 
-  const riding = taxi.phase === 'riding' || taxi.phase === 'arrived'
+  const riding = isRidingPhase(taxi.phase)
   // 迎車の途中でも、照準に入っていれば乗れる（乗車地点まで待たせない）
-  const canBoard =
-    (taxi.phase === 'waiting' || taxi.phase === 'approaching') &&
-    sample.aimed === taxi.vehicleId
+  const canBoard = isBoardablePhase(taxi.phase) && sample.aimed === taxi.vehicleId
 
   // ★ 乗れる／降りられることを最優先で出す。
   //   ポインタロックの案内を先に置くと、肝心の「いま押せるキー」が隠れる

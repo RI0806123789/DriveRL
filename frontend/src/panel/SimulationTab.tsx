@@ -180,6 +180,17 @@ export function SimulationTab() {
           onCommit={(v) => send({ type: 'set_params', params: { vehicleCount: v } })}
         />
         <Slider
+          label="歩行者"
+          hint="人"
+          value={params.pedestrianCount}
+          min={0}
+          max={config.maxPedestrians ?? 64}
+          step={1}
+          format={(v) => `${v} 人`}
+          onChange={(v) => patchParamsLocal({ pedestrianCount: v })}
+          onCommit={(v) => send({ type: 'set_params', params: { pedestrianCount: v } })}
+        />
+        <Slider
           label="シミュレーション速度"
           value={params.simSpeed}
           min={0.25}

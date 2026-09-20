@@ -63,6 +63,7 @@ def main() -> int:
     parser.add_argument("--batch", type=int, default=DEFAULT_BATCH)
     parser.add_argument("--lr", type=float, default=DEFAULT_LR)
     parser.add_argument("--vehicles", type=int, default=8)
+    parser.add_argument("--pedestrians", type=int, default=16)
     parser.add_argument("--check-steps", type=int, default=1200)
     parser.add_argument("--std", type=float, default=WARMSTART_STD)
     parser.add_argument("--no-backup", action="store_true")
@@ -70,7 +71,9 @@ def main() -> int:
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
-    params = SimParams(vehicle_count=int(args.vehicles))
+    params = SimParams(
+        vehicle_count=int(args.vehicles), pedestrian_count=int(args.pedestrians)
+    )
     index = build_map_index(load_map(get_preset(args.preset)))
     env = SimulationEnv(index, params, seed=0)
     env.reset_all()

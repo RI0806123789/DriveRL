@@ -167,7 +167,11 @@ class SimulationEngine:
     def update_params(self, patch: dict[str, Any]) -> tuple[SimParams, ParamPatchResult]:
         """camelCase の部分更新を検証して適用し、(更新後のパラメータ, 検証結果) を返す。"""
         with self._lock:
-            result = self._params.apply_wire(patch, max_vehicles=config.MAX_VEHICLES)
+            result = self._params.apply_wire(
+                patch,
+                max_vehicles=config.MAX_VEHICLES,
+                max_pedestrians=config.MAX_PEDESTRIANS,
+            )
             snapshot = SimParams(**vars(self._params))
         self._inbox.put(("params", snapshot))
         return snapshot, result
@@ -878,8 +882,11 @@ class SimulationEngine:
         if practical:
             # ETA は毎ステップ引き直し、配信は段階が変わったときと 1Hz（決定 14）
             self._taxi.update(env)
+            # 迎車の引き継ぎは段階を変えずに車両だけ差し替えるので、
+            # 車両番号も配信の契機にする（1Hz を待つと最大 1 秒古い車を追いかける）
             if (
                 self._taxi.status.phase != self._taxi_last_phase
+                or int(self._taxi.status.vehicle_id) != self._taxi_vehicle_id
                 or (now - self._last_metrics_at) >= metrics_interval
             ):
                 self._publish_taxi()
@@ -939,11 +946,13 @@ class SimulationEngine:
             n = len(episodes)
             goal_rate = sum(1 for e in episodes if e.reason == "goal") / n
             collision_rate = sum(1 for e in episodes if e.reason == "collision") / n
+            pedestrian_rate = sum(1 for e in episodes if e.hit_pedestrian) / n
             violations = sum(e.signal_violations for e in episodes) / n
             speeding = sum(e.speed_violations for e in episodes) / n
             lane_deviation = sum(e.lane_deviation for e in episodes) / n
         else:
             mean_reward = mean_length = goal_rate = collision_rate = 0.0
+            pedestrian_rate = 0.0
             violations = speeding = lane_deviation = 0.0
 
         if len(self._step_marks) >= 2:
@@ -965,6 +974,7 @@ class SimulationEngine:
             entropy=float(stats.get("entropy", 0.0)),
             approx_kl=float(stats.get("approx_kl", 0.0)),
             collision_rate=collision_rate,
+            pedestrian_collision_rate=pedestrian_rate,
             goal_rate=goal_rate,
             steps_per_sec=steps_per_sec,
             signal_violations=violations,

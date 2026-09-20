@@ -33,6 +33,8 @@ export interface MetricsSeries {
   goalRate: number[]
   violations: number[]
   laneDeviation: number[]
+  /** 歩行者との衝突（1 エピソードあたりの割合） */
+  pedestrianCollisions: number[]
 }
 
 function emptyMetricsSeries(): MetricsSeries {
@@ -44,6 +46,7 @@ function emptyMetricsSeries(): MetricsSeries {
     goalRate: [],
     violations: [],
     laneDeviation: [],
+    pedestrianCollisions: [],
   }
 }
 
@@ -83,6 +86,7 @@ export interface ErrorEntry {
 
 const DEFAULT_PARAMS: SimParams = {
   vehicleCount: 3,
+  pedestrianCount: 16,
   simSpeed: 1,
   learningRate: 3e-4,
   gamma: 0.99,
@@ -106,8 +110,9 @@ const DEFAULT_PARAMS: SimParams = {
 
 const DEFAULT_CONFIG: SimConfig = {
   maxVehicles: 8,
+  maxPedestrians: 64,
   simHz: 20,
-  obsDim: 57,
+  obsDim: 66,
   actionDim: 2,
 }
 
@@ -176,6 +181,8 @@ export interface SimStore {
   theme: ThemeName
   /** 開発 / 実用。**切り替えるとタブ構成ごと入れ替わる**（決定 9） */
   mode: AppMode
+  /** スマホ画面にタクシーの車載カメラを出しているか（実用モードのみ） */
+  taxiCameraOn: boolean
   tab: PanelTab
   cameraMode: CameraMode
   /** 追従対象のスロット番号 */
@@ -188,6 +195,7 @@ export interface SimStore {
   setPanelOpen(open: boolean): void
   togglePanel(): void
   setMode(mode: AppMode): void
+  setTaxiCameraOn(on: boolean): void
   setTab(tab: PanelTab): void
   setCameraMode(mode: CameraMode): void
   setFollowTarget(id: number): void
@@ -242,6 +250,7 @@ export const useSimStore = create<SimStore>((set, get) => ({
   panelOpen: true,
   theme: INITIAL_THEME,
   mode: 'dev',
+  taxiCameraOn: false,
   tab: 'simulation',
   cameraMode: 'orbit',
   followTarget: 0,
@@ -262,7 +271,9 @@ export const useSimStore = create<SimStore>((set, get) => ({
 
   setPanelOpen: (open) => set({ panelOpen: open }),
   togglePanel: () => set((s) => ({ panelOpen: !s.panelOpen })),
-  setMode: (mode) => set({ mode }),
+  // 開発モードへ戻ったら車載カメラも畳む（見る相手がいなくなる）
+  setMode: (mode) => set(mode === 'dev' ? { mode, taxiCameraOn: false } : { mode }),
+  setTaxiCameraOn: (taxiCameraOn) => set({ taxiCameraOn }),
   setTab: (tab) => set({ tab }),
   setCameraMode: (cameraMode) => set({ cameraMode }),
   setFollowTarget: (followTarget) => set({ followTarget }),
@@ -299,6 +310,7 @@ export const useSimStore = create<SimStore>((set, get) => ({
           status,
           // ★ リロードしてもサーバーのモードへ戻す（配車の途中で開発モードに落とさない）
           mode: status.practicalMode ? 'taxi' : 'dev',
+          taxiCameraOn: false,
           pendingPresetId: null,
         })
         const cfg = init.config ?? DEFAULT_CONFIG
@@ -356,6 +368,7 @@ export const useSimStore = create<SimStore>((set, get) => ({
           series.goalRate.push(msg.goalRate)
           series.violations.push(msg.signalViolations)
           series.laneDeviation.push(msg.laneDeviation)
+          series.pedestrianCollisions.push(msg.pedestrianCollisionRate ?? 0)
           return { metricsRevision: s.metricsRevision + 1, latestMetrics: msg }
         })
         break

@@ -5,6 +5,7 @@ import { useFrame } from '@react-three/fiber'
 import * as THREE from 'three'
 
 import { useSimStore } from '../store/simStore'
+import { isRidingPhase } from '../types/protocol'
 import { usePalette } from './usePalette'
 
 /** 柱の高さ [m]。建物の陰からでも見えるだけの高さを取る。
@@ -56,8 +57,7 @@ export function TaxiMarkers() {
     }
   }, [resources])
 
-  const target =
-    phase === 'riding' || phase === 'arrived' ? dropoff : phase === 'idle' ? null : pickup
+  const target = isRidingPhase(phase) ? dropoff : phase === 'idle' ? null : pickup
 
   useFrame(() => {
     const pillar = pillarRef.current
