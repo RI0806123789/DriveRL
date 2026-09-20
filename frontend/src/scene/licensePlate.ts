@@ -77,6 +77,31 @@ export function plateTextFor(vehicleId: number, presetId: string | null | undefi
   }
 }
 
+/**
+ * プレートに書かれているとおりの 1 行表記（「品川 300 さ ・・・0」）。
+ * **実用モードの画面はこれで車を指す**（開発モードの一覧は番号のまま）。
+ */
+export function plateLabel(vehicleId: number, presetId: string | null | undefined): string {
+  const t = plateTextFor(vehicleId, presetId)
+  return `${t.region} ${t.classNumber} ${t.kana} ${t.serial}`
+}
+
+/**
+ * サーバーが作った文言の「車両 #N」をプレートの表記へ置き換える。
+ *
+ * ★ **番号を文中に持つのはサーバー側**（引き継ぎの文言は「どの車からどの車へ」を
+ * 知っている側でしか作れない）。地名の対応表はここにしか無いので、
+ * 差し替えはクライアントで行う。`docs/protocol.md` 2.10 に書式を書いてある。
+ */
+export function withPlateNames(
+  message: string,
+  presetId: string | null | undefined,
+): string {
+  return message.replace(/車両 #(\d+)/g, (_, digits: string) =>
+    plateLabel(Number(digits), presetId),
+  )
+}
+
 /** アトラス 1 セルの画素数。プレートの縦横比（2:1）に合わせる */
 export const CELL_W = 512
 export const CELL_H = 256

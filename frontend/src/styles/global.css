@@ -2264,6 +2264,15 @@ button.m3-chip:active:not(:disabled) {
   gap: 4px;
 }
 
+/* 車を指すナンバープレート表記。**色は scene/licensePlate.ts をインラインで当てる** */
+.taxi-plate {
+  padding: 1px 7px;
+  border-radius: 3px;
+  border: 1px solid currentColor;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
 .taxi-message {
   font-size: 12px;
   padding: 8px 10px;

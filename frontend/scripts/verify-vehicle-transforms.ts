@@ -25,8 +25,10 @@ import {
   PLATE_W,
   plateRegion,
   plateSerial,
+  plateLabel,
   plateTextFor,
   plateUvRow,
+  withPlateNames,
 } from '../src/scene/licensePlate.ts'
 import {
   BLINK_HZ,
@@ -308,6 +310,31 @@ console.log('='.repeat(70))
   check('段は 0〜count-1 に収まる', rows.every((r) => r >= 0 && r < count))
   check('車両ごとに違う段を使う', new Set(rows).size === count)
   check('車両 #0 はいちばん上の段（v では最後）', rows[0] === count - 1, `row=${rows[0]}`)
+}
+
+{
+  // ★ 実用モードの画面は、サーバーの文言中の「車両 #N」をプレート表記へ差し替える
+  //   （地名の対応表はクライアントにしか無い）。書式は docs/protocol.md 2.10
+  check(
+    'プレートの 1 行表記',
+    plateLabel(0, 'ginza') === '品川 300 さ ・・・0',
+    plateLabel(0, 'ginza'),
+  )
+  const before = '車両 #1 が来られなくなったため、車両 #5 が向かっています'
+  const after = withPlateNames(before, 'kanazawa')
+  check(
+    '文中の「車両 #N」をすべて置き換える',
+    after === '石川 300 さ ・・・1 が来られなくなったため、石川 300 さ ・・・5 が向かっています',
+    after,
+  )
+  check(
+    '該当が無ければそのまま返す',
+    withPlateNames('目的地へ向かっています', 'ginza') === '目的地へ向かっています',
+  )
+  check(
+    'モックの接頭辞が付いていても置き換わる',
+    withPlateNames('（モック）車両 #2 が迎えに向かっています', 'ginza').includes('さ ・・・2'),
+  )
 }
 
 console.log()

@@ -6,6 +6,7 @@ import { send } from '../store/connection'
 import { useSimStore } from '../store/simStore'
 import { isBoardablePhase, isRidingPhase } from '../types/protocol'
 import type { Vec2 } from '../types/protocol'
+import { PLATE_BG, PLATE_INK, plateLabel, withPlateNames } from '../scene/licensePlate'
 import { formatEta } from '../scene/TaxiHud'
 import { TaxiCameraView } from './TaxiCameraView'
 import { TaxiMap } from './TaxiMap'
@@ -28,6 +29,9 @@ export function TaxiScreen() {
   const presets = useSimStore((s) => s.presets)
   const cameraOn = useSimStore((s) => s.taxiCameraOn)
   const setCameraOn = useSimStore((s) => s.setTaxiCameraOn)
+
+  // 車はナンバープレートで指す（実車の配車アプリと同じ）
+  const plate = plateLabel(taxi.vehicleId, status.presetId)
 
   const [clock, setClock] = useState(nowLabel)
   const [picking, setPicking] = useState<PickTarget>(null)
@@ -128,8 +132,12 @@ export function TaxiScreen() {
           <div className="taxi-meta">
             {taxi.phase !== 'idle' && (
               <>
-                <span>
-                  <CarIcon size={12} /> 車両 #{taxi.vehicleId}
+                <span
+                  className="taxi-plate"
+                  style={{ background: PLATE_BG, color: PLATE_INK }}
+                  title="この車のナンバープレート"
+                >
+                  <CarIcon size={12} /> {plate}
                 </span>
                 <span>残り {Math.round(taxi.remainingDistanceM)} m</span>
               </>
@@ -146,7 +154,7 @@ export function TaxiScreen() {
 
           {taxi.message && (
             <div className="taxi-message" key={taxi.message}>
-              {taxi.message}
+              {withPlateNames(taxi.message, status.presetId)}
             </div>
           )}
 
