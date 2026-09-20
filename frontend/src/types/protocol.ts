@@ -240,6 +240,10 @@ export interface VehicleState {
   speedLimit: number
   /** このエピソード中に規制速度を超えた回数（超え始めた瞬間を 1 回と数える） */
   speedViolations: number
+  /** 制動指令が出ているか（ブレーキランプ）。**加速度の実測ではなく指令** */
+  braking?: boolean
+  /** 方向指示器。-1=左 / 0=消灯 / +1=右 */
+  turnSignal?: number
   /** 目的地までの経路。変化があったフレームのみ含まれる。省略時は前回値を保持 */
   route?: Vec2[]
 }
@@ -503,6 +507,14 @@ export function isRidingPhase(phase: TaxiPhase): boolean {
 /** その段階で乗り込めるか（迎車の途中でも乗れる）。 */
 export function isBoardablePhase(phase: TaxiPhase): boolean {
   return phase === 'approaching' || phase === 'waiting'
+}
+
+/**
+ * その段階で利用者を待っているか（ハザードを出す段階）。
+ * **段階から「いま何ができるか」を導くのはこの並びだけ**（`code_review` T-01）。
+ */
+export function isWaitingPhase(phase: TaxiPhase): boolean {
+  return phase === 'waiting' || phase === 'arrived'
 }
 
 /** 2.10 taxi — 実用モードの配車状態（段階が変わったときと 1Hz）。 */

@@ -51,14 +51,24 @@ export function makeWheelGeometry(): THREE.BufferGeometry {
   return g
 }
 
+/** 灯体 1 個。位置は `scene/vehicleLights.ts` の `LIGHT_SLOTS` が決める */
+export function makeLightGeometry(size: readonly [number, number, number]): THREE.BufferGeometry {
+  return new THREE.BoxGeometry(size[0], size[1], size[2])
+}
+
 /** 行列を組み立てるときの作業用オブジェクト。毎フレームの new を避ける */
 export interface TransformScratch {
   node: THREE.Object3D
   wheel: THREE.Object3D
+  light: THREE.Object3D
 }
 
 export function createTransformScratch(): TransformScratch {
-  return { node: new THREE.Object3D(), wheel: new THREE.Object3D() }
+  return {
+    node: new THREE.Object3D(),
+    wheel: new THREE.Object3D(),
+    light: new THREE.Object3D(),
+  }
 }
 
 /** 車両そのものの姿勢（ENU の位置と方位 → three のワールド行列）。 */
@@ -75,6 +85,21 @@ export function composeVehicleMatrix(
   n.scale.setScalar(1)
   n.updateMatrix()
   return out.copy(n.matrix)
+}
+
+/** 灯体 1 個のワールド行列。車体に固定なので回転は持たない。 */
+export function composeLightMatrix(
+  scratch: TransformScratch,
+  base: THREE.Matrix4,
+  position: readonly [number, number, number],
+  out: THREE.Matrix4,
+): THREE.Matrix4 {
+  const l = scratch.light
+  l.position.set(position[0], position[1], position[2])
+  l.rotation.set(0, 0, 0)
+  l.scale.setScalar(1)
+  l.updateMatrix()
+  return out.multiplyMatrices(base, l.matrix)
 }
 
 /** 車輪 1 本のワールド行列。 */

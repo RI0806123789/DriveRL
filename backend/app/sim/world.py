@@ -45,6 +45,18 @@ LANE_RETURN_M = config.LANE_RETURN_M
 #: 誰にも見えていない歩行者を車の近くへ回す間隔 [秒]。毎ステップやる必要はない
 PEDESTRIAN_RECYCLE_SEC = 2.0
 
+#: これより強い制動指令が出ている間はブレーキランプを点ける。
+#: 0 にすると、方策が出す微小な負の値で点きっぱなしになる
+BRAKE_COMMAND_THRESHOLD = -0.05
+
+#: 方向指示器を出し始める距離 [m]（道交法施行令 21 条「30m 手前」）
+TURN_LOOKAHEAD_M = 30.0
+#: 先読み地点の接線を測る幅 [m]。1 点では接線が出ない
+TURN_TANGENT_SPAN_M = 3.0
+#: 出す／消すしきい値 [rad]。ヒステリシスを付けて、緩いカーブで点滅させない
+TURN_ON_RAD = 0.35
+TURN_OFF_RAD = 0.12
+
 FORWARD_NODE_RADIUS_M = 150.0
 FORWARD_NODE_MIN_M = 14.0
 FORWARD_NODE_MAX_ANGLE_RAD = math.radians(60.0)
@@ -136,6 +148,10 @@ class World:
 
         self.collided_flags = np.zeros(n, dtype=bool)
         self.reached_flags = np.zeros(n, dtype=bool)
+
+        self.braking = np.zeros(n, dtype=bool)
+        #: 方向指示器。-1=左 / 0=消灯 / +1=右
+        self.turn_signal = np.zeros(n, dtype=np.int8)
 
         self.stop_arc = np.full(n, np.inf, dtype=np.float64)
 
@@ -934,6 +950,44 @@ class World:
             if self.fleet.active[slot]:
                 self.slots[slot].steps += 1
 
+    def set_braking(self, accel_cmd: np.ndarray) -> None:
+        """制動指令が出ているスロットを記録する（ブレーキランプ）。
+
+        **加速度の実測ではなく指令を見る。** エンジンブレーキや空気抵抗で減速しても
+        実車のブレーキランプは点かない。
+        """
+        cmd = np.asarray(accel_cmd, dtype=np.float32)
+        self.braking = (cmd < np.float32(BRAKE_COMMAND_THRESHOLD)) & self.fleet.active
+
+    def update_turn_signals(self) -> None:
+        """経路の先を見て方向指示器を出す。**`project_all()` の後に呼ぶこと**。
+
+        道交法施行令 21 条にならい、右左折の 30m 手前から出す。**ヒステリシスが要る**
+        （出すしきい値だけだと、緩いカーブを曲がっている間じゅう点いたり消えたりする）。
+        """
+        offsets = np.array(
+            [TURN_LOOKAHEAD_M - TURN_TANGENT_SPAN_M, TURN_LOOKAHEAD_M + TURN_TANGENT_SPAN_M],
+            dtype=np.float32,
+        )
+        pts = self.lookahead_points(offsets)
+        dx = (pts[:, 1, 0] - pts[:, 0, 0]).astype(np.float64)
+        dy = (pts[:, 1, 1] - pts[:, 0, 1]).astype(np.float64)
+        ahead = np.arctan2(dy, dx)
+        here = self.tangent.astype(np.float64)
+        diff = np.arctan2(np.sin(ahead - here), np.cos(ahead - here))
+
+        # 経路の終端では先読み点が重なって方位が出ない。そのときは消灯のまま
+        degenerate = np.hypot(dx, dy) < 1e-3
+        # ENU は反時計回りが正なので、方位が増える側が左折
+        want = np.where(diff > 0.0, np.int8(-1), np.int8(1))
+        magnitude = np.abs(diff)
+
+        signal = self.turn_signal.copy()
+        signal = np.where(magnitude >= TURN_ON_RAD, want, signal)
+        signal = np.where(magnitude < TURN_OFF_RAD, np.int8(0), signal)
+        signal = np.where(degenerate | ~self.fleet.active, np.int8(0), signal)
+        self.turn_signal = signal.astype(np.int8)
+
     def set_event_flags(self, collided: np.ndarray, reached: np.ndarray) -> None:
         """描画用の衝突／到達フラグを設定する（respawn 後も 1 フレームだけ残す）。"""
         self.collided_flags = np.asarray(collided, dtype=bool).copy()
@@ -1036,6 +1090,8 @@ class World:
                         float(posted[slot]) if np.isfinite(posted[slot]) else 0.0
                     ),
                     speed_violations=int(state.speed_violations),
+                    braking=bool(self.braking[slot]),
+                    turn_signal=int(self.turn_signal[slot]),
                     route=route,
                 )
             )

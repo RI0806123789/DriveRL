@@ -1,4 +1,4 @@
-/** 車両の姿勢と部品の取り付け位置を検証する（ブラウザ不要）。 */
+/** 車両の姿勢・部品の取り付け位置・ライトの点灯条件を検証する（ブラウザ不要）。 */
 
 import * as THREE from 'three'
 import {
@@ -13,8 +13,23 @@ import {
   makeBodyGeometry,
   makeCabinGeometry,
   makeNoseGeometry,
+  composeLightMatrix,
   makeWheelGeometry,
 } from '../src/scene/vehicleGeometry.ts'
+import {
+  BLINK_HZ,
+  HEADLIGHT_FOG,
+  HEADLIGHT_RAIN,
+  LIGHTS_PER_VEHICLE,
+  LIGHT_HEAD,
+  LIGHT_SLOTS,
+  LIGHT_TAIL,
+  LIGHT_TURN,
+  blinkOn,
+  headlightsOn,
+  lightIntensity,
+  lightStateFor,
+} from '../src/scene/vehicleLights.ts'
 
 let failures = 0
 
@@ -209,6 +224,110 @@ for (const [name, geom, offset] of cases) {
   const hidden = new THREE.Matrix4().makeScale(0, 0, 0)
   const p = new THREE.Vector3(1, 1, 1).applyMatrix4(hidden)
   check('非表示スロットの行列が 1 点に潰れる', p.lengthSq() === 0)
+}
+
+console.log()
+console.log('='.repeat(70))
+console.log('ライト（前照灯・制動灯・方向指示器）')
+console.log('='.repeat(70))
+
+function state(over: Partial<Parameters<typeof lightStateFor>[0]>) {
+  return lightStateFor({
+    braking: false,
+    turnSignal: 0,
+    hazard: false,
+    headlights: false,
+    blink: true,
+    ...over,
+  })
+}
+
+{
+  const kinds = LIGHT_SLOTS.map((s) => s.kind)
+  check(
+    '前 2 / 後ろ 2 / ウインカー 4 の 8 灯',
+    LIGHTS_PER_VEHICLE === 8 &&
+      kinds.filter((k) => k === LIGHT_HEAD).length === 2 &&
+      kinds.filter((k) => k === LIGHT_TAIL).length === 2 &&
+      kinds.filter((k) => k === LIGHT_TURN).length === 4,
+  )
+  check(
+    '前照灯は車体の前、尾灯は後ろ',
+    LIGHT_SLOTS.filter((s) => s.kind === LIGHT_HEAD).every((s) => s.position[0] > 0) &&
+      LIGHT_SLOTS.filter((s) => s.kind === LIGHT_TAIL).every((s) => s.position[0] < 0),
+  )
+  check(
+    'ウインカーは車体の左右いちばん外側',
+    LIGHT_SLOTS.filter((s) => s.kind === LIGHT_TURN).every(
+      (s) => Math.abs(s.position[2]) > 0.8,
+    ),
+  )
+  check(
+    'side の符号と取り付け位置の左右が一致する（右が +Z）',
+    LIGHT_SLOTS.every((s) => Math.sign(s.position[2]) === s.side),
+  )
+  check('すべての灯体が地面より上', LIGHT_SLOTS.every((s) => s.position[1] > 0))
+}
+
+{
+  // ★ 左のウインカーが右側に出ると、外から見て曲がる向きが逆になる
+  const scratch = createTransformScratch()
+  const base = new THREE.Matrix4()
+  const out = new THREE.Matrix4()
+  // ENU の東（heading 0）を向いた車。three では -Z が北＝進行方向の左
+  composeVehicleMatrix(scratch, 0, 0, 0, base)
+  const left = LIGHT_SLOTS.findIndex((s) => s.kind === LIGHT_TURN && s.side === -1)
+  composeLightMatrix(scratch, base, LIGHT_SLOTS[left].position, out)
+  const p = new THREE.Vector3().setFromMatrixPosition(out)
+  check(
+    '東を向いた車の左ウインカーは北側（three の -Z）に出る',
+    p.z < 0,
+    `z=${p.z.toFixed(2)}`,
+  )
+}
+
+{
+  check('晴れの昼は前照灯を点けない', !headlightsOn(0, 0, false))
+  check('夜は天候によらず点ける', headlightsOn(0, 0, true))
+  check(`小雨（${HEADLIGHT_RAIN} 以上）で点ける`, headlightsOn(0.35, 0, false))
+  check(`霧（${HEADLIGHT_FOG} 以上）で点ける`, headlightsOn(0, 0.75, false))
+  check('ごく弱い雨では点けない', !headlightsOn(0.1, 0, false))
+}
+
+{
+  const brake = state({ braking: true })
+  check('制動灯はブレーキ指令だけで点く（前照灯とは独立）', brake.brake && !brake.head)
+
+  const night = state({ headlights: true })
+  check('前照灯を点けると尾灯も点く', night.head && night.tail && !night.brake)
+
+  const tailIndex = LIGHT_SLOTS.findIndex((s) => s.kind === LIGHT_TAIL)
+  check(
+    '尾灯は制動灯より暗い（ブレーキが見分けられる）',
+    lightIntensity(tailIndex, night) < lightIntensity(tailIndex, state({ braking: true })),
+    `${lightIntensity(tailIndex, night)} < ${lightIntensity(tailIndex, state({ braking: true }))}`,
+  )
+
+  const left = state({ turnSignal: -1 })
+  check('左ウインカーは左だけ点く', left.left && !left.right)
+  const right = state({ turnSignal: 1 })
+  check('右ウインカーは右だけ点く', right.right && !right.left)
+  const off = state({ turnSignal: -1, blink: false })
+  check('点滅の消灯位相では消える', !off.left && !off.right)
+
+  // ★ 乗降を待っている間はハザード。方向指示器より優先する
+  const hazard = state({ hazard: true, turnSignal: 1 })
+  check('ハザードは左右同時に点く（方向指示器より優先）', hazard.left && hazard.right)
+}
+
+{
+  // 保安基準は毎分 60〜120 回（1〜2Hz）
+  check(`点滅は毎分 ${BLINK_HZ * 60} 回で 60〜120 回に収まる`, BLINK_HZ >= 1 && BLINK_HZ <= 2)
+  const period = 1000 / BLINK_HZ
+  check(
+    '点滅のデューティは半分',
+    blinkOn(0) && !blinkOn(period * 0.75) && blinkOn(period),
+  )
 }
 
 console.log()

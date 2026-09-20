@@ -384,6 +384,9 @@ const WALK_OFFSET_M = ROAD_WIDTH / 2 + 1.7
 /** これより遠い歩行者は車の近くへ回す [m]（バックエンドの RECYCLE_FAR_M 相当） */
 const PEDESTRIAN_RECYCLE_M = 220
 
+/** 方向指示器を出し始める距離 [m]（バックエンドの TURN_LOOKAHEAD_M 相当） */
+const TURN_LOOKAHEAD_M = 30
+
 interface MockVehicle {
   id: number
   active: boolean
@@ -415,6 +418,10 @@ interface MockVehicle {
   progress: number
   /** route を送るべきか */
   routeDirty: boolean
+  /** 制動指令が出ているか（ブレーキランプ） */
+  braking: boolean
+  /** 方向指示器。-1=左 / 0=消灯 / +1=右 */
+  turnSignal: number
 }
 
 function clampGrid(v: number): number {
@@ -904,6 +911,8 @@ class MockServer {
       routeTotal: 1,
       progress: 0,
       routeDirty: true,
+      braking: false,
+      turnSignal: 0,
     }
     chooseNext(v, this.rng)
     this.beginRoute(v)
@@ -1048,6 +1057,22 @@ class MockServer {
     }
   }
 
+  /**
+   * 次の交差点で曲がるなら方向指示器を出す。-1=左 / 0=消灯 / +1=右。
+   * **モックの簡易判定**で、格子の目的地が横にずれていれば曲がるものとして扱う。
+   */
+  private turnSignalFor(v: MockVehicle): number {
+    const rest = Math.hypot(nodeX(v.tx) - v.x, nodeY(v.ty) - v.y)
+    if (rest > TURN_LOOKAHEAD_M) return 0
+    const dirX = Math.sign(v.tx - v.gx)
+    const dirY = Math.sign(v.ty - v.gy)
+    const turnY = dirX !== 0 ? Math.sign(v.goalGy - v.ty) : 0
+    const turnX = dirY !== 0 ? Math.sign(v.goalGx - v.tx) : 0
+    // ENU は反時計回りが正なので、外積が正なら左へ曲がる
+    const cross = dirX * turnY - dirY * turnX
+    return cross > 0 ? -1 : cross < 0 ? 1 : 0
+  }
+
   private stepVehicle(v: MockVehicle, dt: number): void {
     if (!v.active) return
 
@@ -1089,6 +1114,10 @@ class MockServer {
         }
       }
     }
+
+    // 実機と同じく「指令が減速側か」で決める（実測の加速度では見ない）
+    v.braking = targetSpeed < v.speed - 0.2
+    v.turnSignal = this.turnSignalFor(v)
 
     v.speed += (targetSpeed - v.speed) * Math.min(1, dt * 1.6)
 
@@ -1229,6 +1258,8 @@ class MockServer {
         laneDepartures: 0,
         speedLimit: v.speedLimit,
         speedViolations: v.speedViolations,
+        braking: v.braking,
+        turnSignal: v.turnSignal,
       }
       if (v.active && v.routeDirty) {
         state.route = buildRoute(v)

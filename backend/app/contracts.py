@@ -445,6 +445,10 @@ class VehicleSnapshot:
     lane_departures: int = 0
     speed_limit: float = 0.0
     speed_violations: int = 0
+    #: 制動指令が出ているか（ブレーキランプ）
+    braking: bool = False
+    #: 方向指示器。-1=左 / 0=消灯 / +1=右
+    turn_signal: int = 0
     route: list[tuple[float, float]] | None = None
 
     def to_wire(self) -> dict[str, Any]:
@@ -464,6 +468,8 @@ class VehicleSnapshot:
             "laneDepartures": self.lane_departures,
             "speedLimit": round(self.speed_limit, 3),
             "speedViolations": self.speed_violations,
+            "braking": self.braking,
+            "turnSignal": int(self.turn_signal),
         }
         if self.route is not None:
             out["route"] = [[round(px, 2), round(py, 2)] for px, py in self.route]

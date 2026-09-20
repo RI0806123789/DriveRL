@@ -31,6 +31,10 @@ export interface VehiclePose {
   /** 目的地 [x, y]（ENU） */
   goalX: number
   goalY: number
+  /** 制動指令が出ているか（ブレーキランプ）。**補間しない** */
+  braking: boolean
+  /** 方向指示器。-1=左 / 0=消灯 / +1=右。**補間しない** */
+  turnSignal: number
   /** この呼び出しで瞬間移動したか（カメラ側で減衰を切るのに使う） */
   teleported: boolean
 }
@@ -69,6 +73,8 @@ export function sampleVehicle(
   out.active = true
   out.collided = cv.collided
   out.reachedGoal = cv.reachedGoal
+  out.braking = cv.braking ?? false
+  out.turnSignal = cv.turnSignal ?? 0
   out.goalX = cv.goal[0]
   out.goalY = cv.goal[1]
   out.teleported = false
@@ -116,6 +122,8 @@ export function createPose(): VehiclePose {
     reachedGoal: false,
     goalX: 0,
     goalY: 0,
+    braking: false,
+    turnSignal: 0,
     teleported: false,
   }
 }

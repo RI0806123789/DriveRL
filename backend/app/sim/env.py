@@ -358,9 +358,11 @@ class SimulationEnv:
             abs(config.MAX_DECEL),
         )
 
+        self.world.set_braking(accel_cmd)
         self.world.fleet.step(accel_cmd, steer_cmd, config.DT, max_speed)
 
         delta = self.world.project_all()
+        self.world.update_turn_signals()
         step_limit = np.float32(max_speed * config.DT * 2.0)
         delta = np.clip(delta, -step_limit, step_limit)
 
