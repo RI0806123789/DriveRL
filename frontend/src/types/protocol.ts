@@ -472,6 +472,16 @@ export interface DetectorMessage {
 /** 実用モードの配車の段階（2.10 taxi）。 */
 export type TaxiPhase = 'idle' | 'approaching' | 'waiting' | 'riding' | 'arrived'
 
+/** その段階で車に乗っているか。**`arrived` も乗ったまま**（降車は alight_taxi で確定する） */
+export function isRidingPhase(phase: TaxiPhase): boolean {
+  return phase === 'riding' || phase === 'arrived'
+}
+
+/** その段階で乗り込めるか（迎車の途中でも乗れる）。 */
+export function isBoardablePhase(phase: TaxiPhase): boolean {
+  return phase === 'approaching' || phase === 'waiting'
+}
+
 /** 2.10 taxi — 実用モードの配車状態（段階が変わったときと 1Hz）。 */
 export interface TaxiMessage {
   type: 'taxi'

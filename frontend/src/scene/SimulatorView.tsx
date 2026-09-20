@@ -16,6 +16,7 @@ import { RoadMarkings } from './RoadMarkings'
 import { RoadNetwork } from './RoadNetwork'
 import { RouteLines } from './RouteLines'
 import { SpeedSigns } from './SpeedSigns'
+import { TaxiCameraFeed } from './TaxiCameraFeed'
 import { TaxiHud } from './TaxiHud'
 import { TaxiMarkers } from './TaxiMarkers'
 import { TrafficSignals } from './TrafficSignals'
@@ -62,6 +63,7 @@ export function SimulatorView() {
   const connection = useSimStore((s) => s.connection)
   const appMode = useSimStore((s) => s.mode)
   const taxiMode = appMode === 'taxi'
+  const taxiCameraOn = useSimStore((s) => s.taxiCameraOn)
 
   const bounds = map?.bounds ?? null
   const extent = shadowExtent(bounds)
@@ -120,6 +122,7 @@ export function SimulatorView() {
 
           {taxiMode && <TaxiMarkers />}
           {taxiMode && <Pedestrian />}
+          {taxiMode && taxiCameraOn && <TaxiCameraFeed />}
 
           <InteractionPlane bounds={bounds} />
           <CameraRig bounds={bounds} />

@@ -4,12 +4,14 @@ import { useEffect, useState } from 'react'
 
 import { send } from '../store/connection'
 import { useSimStore } from '../store/simStore'
+import { isBoardablePhase, isRidingPhase } from '../types/protocol'
 import type { Vec2 } from '../types/protocol'
 import { formatEta } from '../scene/TaxiHud'
+import { TaxiCameraView } from './TaxiCameraView'
 import { TaxiMap } from './TaxiMap'
 import type { PickTarget } from './TaxiMap'
 import { Button } from '../ui/Button'
-import { CarIcon, MapIcon, TargetIcon, WarningIcon } from '../ui/Icons'
+import { CameraIcon, CarIcon, MapIcon, TargetIcon, WarningIcon } from '../ui/Icons'
 
 /** 時計の更新間隔 [ms]。分表示なので 15 秒で足りる */
 const CLOCK_MS = 15000
@@ -24,6 +26,8 @@ export function TaxiScreen() {
   const status = useSimStore((s) => s.status)
   const map = useSimStore((s) => s.map)
   const presets = useSimStore((s) => s.presets)
+  const cameraOn = useSimStore((s) => s.taxiCameraOn)
+  const setCameraOn = useSimStore((s) => s.setTaxiCameraOn)
 
   const [clock, setClock] = useState(nowLabel)
   const [picking, setPicking] = useState<PickTarget>(null)
@@ -37,15 +41,19 @@ export function TaxiScreen() {
 
   // 配車が動き出したら、選びかけの地点は捨てる（サーバーが返す地点が正）
   useEffect(() => {
-    if (taxi.phase === 'idle') return
+    if (taxi.phase === 'idle') {
+      // 映す相手がいなくなるので畳む。アニメーションは閉じる向きで流れる
+      setCameraOn(false)
+      return
+    }
     setPicking(null)
     setDraftPickup(null)
     setDraftDropoff(null)
-  }, [taxi.phase])
+  }, [taxi.phase, setCameraOn])
 
   const areaName = presets.find((p) => p.id === map?.presetId)?.name ?? map?.name ?? '—'
-  const riding = taxi.phase === 'riding' || taxi.phase === 'arrived'
-  const waiting = taxi.phase === 'approaching' || taxi.phase === 'waiting'
+  const riding = isRidingPhase(taxi.phase)
+  const waiting = isBoardablePhase(taxi.phase)
   const ready = draftPickup !== null && draftDropoff !== null
 
   const handlePick = (point: Vec2) => {
@@ -103,7 +111,9 @@ export function TaxiScreen() {
           onPick={handlePick}
           draftPickup={draftPickup}
           draftDropoff={draftDropoff}
-        />
+        >
+          <TaxiCameraView on={cameraOn} vehicleId={taxi.vehicleId} />
+        </TaxiMap>
 
         <div className="taxi-phone-body">
           {/* ★ key は「段階」で切る。ETA を含めると毎秒アニメーションして落ち着かない */}
@@ -187,6 +197,23 @@ export function TaxiScreen() {
               </Button>
             )}
           </div>
+
+          <button
+            type="button"
+            className="taxi-camera-toggle"
+            data-on={cameraOn ? 'true' : 'false'}
+            aria-pressed={cameraOn}
+            disabled={taxi.phase === 'idle'}
+            onClick={() => setCameraOn(!cameraOn)}
+          >
+            <span className="taxi-camera-toggle-icon">
+              <CameraIcon size={15} />
+            </span>
+            <span className="taxi-camera-toggle-text">
+              {cameraOn ? 'カメラを閉じる' : 'カメラ'}
+            </span>
+            <span className="taxi-camera-toggle-dot" data-on={cameraOn ? 'true' : 'false'} />
+          </button>
 
           {riding && (
             <div className="taxi-note">

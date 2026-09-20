@@ -13,6 +13,7 @@ import {
   resetPedestrian,
 } from '../store/pedestrian'
 import { useSimStore } from '../store/simStore'
+import { isBoardablePhase, isRidingPhase } from '../types/protocol'
 import type { Vec2 } from '../types/protocol'
 import { computeAlpha, createPose, sampleVehicle } from './interpolation'
 import {
@@ -167,8 +168,9 @@ export function Pedestrian() {
     const store = useSimStore.getState()
     const taxi = store.taxi
 
-    if (phase === 'riding') {
+    if (isRidingPhase(phase)) {
       pedestrian.riding = true
+      pedestrian.ridingVehicle = taxi.vehicleId
       // 乗車中は既存の運転席カメラをそのまま使う（決定 11）
       store.setFollowTarget(taxi.vehicleId)
       store.setCameraMode('driver')
@@ -177,10 +179,11 @@ export function Pedestrian() {
     store.setCameraMode('orbit')
 
     if (pedestrian.riding) {
-      const v = scratch.blockers.find((b) => b.id === taxi.vehicleId)
+      const slot = pedestrian.ridingVehicle
+      const v = scratch.blockers.find((b) => b.id === slot)
       const seat =
         v ?? {
-          id: taxi.vehicleId,
+          id: slot,
           x: pedestrian.x,
           y: pedestrian.y,
           heading: pedestrian.heading,
@@ -188,6 +191,7 @@ export function Pedestrian() {
       const spot = alightPosition(seat)
       placePedestrian(spot.x, spot.y, seat.heading - Math.PI / 2)
       pedestrian.riding = false
+      pedestrian.ridingVehicle = -1
       return
     }
 
@@ -303,7 +307,7 @@ export function Pedestrian() {
     if (!pedestrian.placed) {
       root.visible = false
       const taxi = useSimStore.getState().taxi
-      if (taxi.phase === 'approaching' || taxi.phase === 'waiting') {
+      if (isBoardablePhase(taxi.phase)) {
         placeAtPickup(taxi, index)
         return
       }
@@ -445,7 +449,7 @@ function handleEnter(): void {
     send({ type: 'alight_taxi' })
     return
   }
-  if (taxi.phase !== 'waiting' && taxi.phase !== 'approaching') return
+  if (!isBoardablePhase(taxi.phase)) return
   if (pedestrian.aimed !== taxi.vehicleId) return
   send({ type: 'board_taxi' })
 }

@@ -878,8 +878,11 @@ class SimulationEngine:
         if practical:
             # ETA は毎ステップ引き直し、配信は段階が変わったときと 1Hz（決定 14）
             self._taxi.update(env)
+            # 迎車の引き継ぎは段階を変えずに車両だけ差し替えるので、
+            # 車両番号も配信の契機にする（1Hz を待つと最大 1 秒古い車を追いかける）
             if (
                 self._taxi.status.phase != self._taxi_last_phase
+                or int(self._taxi.status.vehicle_id) != self._taxi_vehicle_id
                 or (now - self._last_metrics_at) >= metrics_interval
             ):
                 self._publish_taxi()

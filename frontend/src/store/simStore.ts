@@ -176,6 +176,8 @@ export interface SimStore {
   theme: ThemeName
   /** 開発 / 実用。**切り替えるとタブ構成ごと入れ替わる**（決定 9） */
   mode: AppMode
+  /** スマホ画面にタクシーの車載カメラを出しているか（実用モードのみ） */
+  taxiCameraOn: boolean
   tab: PanelTab
   cameraMode: CameraMode
   /** 追従対象のスロット番号 */
@@ -188,6 +190,7 @@ export interface SimStore {
   setPanelOpen(open: boolean): void
   togglePanel(): void
   setMode(mode: AppMode): void
+  setTaxiCameraOn(on: boolean): void
   setTab(tab: PanelTab): void
   setCameraMode(mode: CameraMode): void
   setFollowTarget(id: number): void
@@ -242,6 +245,7 @@ export const useSimStore = create<SimStore>((set, get) => ({
   panelOpen: true,
   theme: INITIAL_THEME,
   mode: 'dev',
+  taxiCameraOn: false,
   tab: 'simulation',
   cameraMode: 'orbit',
   followTarget: 0,
@@ -262,7 +266,9 @@ export const useSimStore = create<SimStore>((set, get) => ({
 
   setPanelOpen: (open) => set({ panelOpen: open }),
   togglePanel: () => set((s) => ({ panelOpen: !s.panelOpen })),
-  setMode: (mode) => set({ mode }),
+  // 開発モードへ戻ったら車載カメラも畳む（見る相手がいなくなる）
+  setMode: (mode) => set(mode === 'dev' ? { mode, taxiCameraOn: false } : { mode }),
+  setTaxiCameraOn: (taxiCameraOn) => set({ taxiCameraOn }),
   setTab: (tab) => set({ tab }),
   setCameraMode: (cameraMode) => set({ cameraMode }),
   setFollowTarget: (followTarget) => set({ followTarget }),
@@ -299,6 +305,7 @@ export const useSimStore = create<SimStore>((set, get) => ({
           status,
           // ★ リロードしてもサーバーのモードへ戻す（配車の途中で開発モードに落とさない）
           mode: status.practicalMode ? 'taxi' : 'dev',
+          taxiCameraOn: false,
           pendingPresetId: null,
         })
         const cfg = init.config ?? DEFAULT_CONFIG

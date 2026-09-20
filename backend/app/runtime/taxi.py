@@ -32,6 +32,14 @@ MIN_TRIP_M = 50.0
 
 ASSIGN_CANDIDATES = 4
 
+#: 迎車を引き継げる回数。これを超えたら打ち切る（事故が続くと延々と粘ってしまう）
+MAX_HANDOVERS = 3
+
+#: 乗車地点へこれだけ近づけない時間が続いたら「来られない」とみなす [秒]
+STALL_TIMEOUT_SEC = 25.0
+#: 近づいたと認める最小の距離 [m]。信号待ちの揺れで進捗と見なさないための幅
+STALL_PROGRESS_M = 1.0
+
 ETA_MIN_SPEED_MPS = 3.5
 ETA_SPEED_SMOOTH = 0.08
 
@@ -42,6 +50,10 @@ class TaxiService:
     def __init__(self) -> None:
         self.status = TaxiStatus()
         self._speed_avg = 0.0
+        self._handovers = 0
+        self._tried: set[int] = set()
+        self._stall_since = -1.0
+        self._stall_best = float("inf")
 
     @property
     def busy(self) -> bool:
@@ -83,6 +95,9 @@ class TaxiService:
         world.set_stop_target(slot, float(world.route_total[slot]))
 
         self._speed_avg = float(world.fleet.speed[slot])
+        self._handovers = 0
+        self._tried = {slot}
+        self._reset_stall()
         self.status = TaxiStatus(
             phase=TAXI_PHASE_APPROACHING,
             vehicle_id=slot,
@@ -151,40 +166,147 @@ class TaxiService:
             env.world.fleet.speed[slot] = np.float32(0.0)
             env.world.fleet.steer[slot] = np.float32(0.0)
         self._release(env)
+        self._handovers = 0
+        self._tried.clear()
+        self._reset_stall()
         self.status = TaxiStatus(
             route_revision=self.status.route_revision + 1, message=reason
         )
 
     def update(self, env: "SimulationEnv") -> None:
-        """毎ステップ呼ぶ。到着判定と ETA の再計算（決定 14）。"""
+        """毎ステップ呼ぶ。到着判定・ETA の再計算・迎車の引き継ぎ（決定 14）。"""
         if not self.busy:
             return
         slot = self.vehicle_id
         world = env.world
         if not (0 <= slot < config.MAX_VEHICLES) or not world.fleet.active[slot]:
-            self.cancel(env, "配車していた車両がいなくなりました")
+            self._failed(env, "配車していた車両がいなくなったため")
             return
         if bool(world.collided_flags[slot]):
-            self.cancel(env, "事故が起きたため配車を打ち切りました", halt=True)
+            self._failed(env, "事故が起きたため", halt=True)
             return
 
         self._refresh_progress(env)
+
+        if self._stalled(env):
+            self._failed(env, "道が塞がっていて近づけないため")
+            return
 
         if self.status.phase == TAXI_PHASE_APPROACHING and self._has_arrived(world, slot):
             self._halt_here(world, slot)
             self.status.phase = TAXI_PHASE_WAITING
             self.status.message = "乗車地点に到着しました。[Enter] で乗車できます"
+            self._reset_stall()
         elif self.status.phase == TAXI_PHASE_RIDING and self._has_arrived(world, slot):
             self._halt_here(world, slot)
             self.status.phase = TAXI_PHASE_ARRIVED
             self.status.message = "目的地に到着しました。[Enter] で降車できます"
 
+    def _failed(self, env: "SimulationEnv", reason: str, *, halt: bool = False) -> None:
+        """迎車に失敗した。**まだ乗せていないなら別の車へ引き継ぐ。**
+
+        乗車後（riding / arrived）は車内に人がいるので引き継げない。従来どおり打ち切る。
+        """
+        pending = self.status.phase in (TAXI_PHASE_APPROACHING, TAXI_PHASE_WAITING)
+        if pending and self._handovers < MAX_HANDOVERS and self._handover(env, halt=halt):
+            return
+        if pending and self._handovers >= MAX_HANDOVERS:
+            self.cancel(env, f"{reason}配車を打ち切りました（車両を変えても届きませんでした）", halt=halt)
+            return
+        if pending:
+            self.cancel(env, f"{reason}配車を打ち切りました（代わりの車両が見つかりませんでした）", halt=halt)
+            return
+        self.cancel(env, f"{reason}配車を打ち切りました", halt=halt)
+
+    def _handover(self, env: "SimulationEnv", *, halt: bool) -> bool:
+        """いまの車を手放し、別の車へ迎車を引き継ぐ。成功したら True。
+
+        ★ **段階は畳まずに `approaching` へ戻す。** 一度でも `idle` を挟むと、
+        フロントは配車が終わったものとして扱う（歩行者を降ろす・画面を初期化する）。
+        乗る側から見れば配車は途切れていないので、車両番号だけ差し替える。
+        """
+        pickup = self.status.pickup
+        if pickup is None:
+            return False
+
+        old = self.vehicle_id
+        world = env.world
+        if halt and 0 <= old < config.MAX_VEHICLES:
+            world.fleet.speed[old] = np.float32(0.0)
+            world.fleet.steer[old] = np.float32(0.0)
+        self._release(env)
+
+        slot, route = self._assign(world, pickup, exclude=self._tried)
+        if slot < 0 or route is None:
+            return False
+
+        env.commandeer_vehicle(slot)
+        if not world.install_route(slot, route, keep_pose=True):
+            env.release_vehicle(slot)
+            return False
+        world.set_stop_target(slot, float(world.route_total[slot]))
+
+        self._handovers += 1
+        self._tried.add(slot)
+        logger.info(
+            "迎車を引き継ぎます（車両 #%d → #%d、%d 回目）", old, slot, self._handovers
+        )
+        self.status.phase = TAXI_PHASE_APPROACHING
+        self.status.vehicle_id = slot
+        self.status.route = [(float(px), float(py)) for px, py in route]
+        self.status.route_revision += 1
+        self.status.message = (
+            f"車両 #{old} が来られなくなったため、車両 #{slot} が向かっています"
+        )
+        self._speed_avg = float(world.fleet.speed[slot])
+        self._reset_stall()
+        self._refresh_progress(env)
+        return True
+
+    def _reset_stall(self) -> None:
+        self._stall_since = -1.0
+        self._stall_best = float("inf")
+
+    def _stalled(self, env: "SimulationEnv") -> bool:
+        """乗車地点へ近づけない時間が続いているか。
+
+        事故（`collided_flags`）は当たった瞬間しか立たないので、**当たらずに
+        詰まって動けない**場合はこちらでしか拾えない。交差点で対向車と睨み合う、
+        塞がれた道の先に乗車地点がある、といった形で実際に起きる。
+        """
+        if self.status.phase != TAXI_PHASE_APPROACHING:
+            return False
+        now = float(env.sim_time)
+        remaining = float(self.status.remaining_distance_m)
+        if remaining < self._stall_best - STALL_PROGRESS_M:
+            self._stall_best = remaining
+            self._stall_since = now
+            return False
+        if self._stall_since < 0.0:
+            self._stall_since = now
+            return False
+        return (now - self._stall_since) >= STALL_TIMEOUT_SEC
+
     def _assign(
-        self, world, pickup: tuple[float, float]
+        self,
+        world,
+        pickup: tuple[float, float],
+        *,
+        exclude: "set[int] | frozenset[int]" = frozenset(),
     ) -> tuple[int, np.ndarray | None]:
-        """乗車地点に最も近く、かつそこへ来られる車両を選ぶ（決定 1）。"""
+        """乗車地点に最も近く、かつそこへ来られる車両を選ぶ（決定 1）。
+
+        ★ **事故った車と、一度あきらめた車は選ばない。** 前者を選ぶと次のステップで
+        また `collided_flags` を見て引き継ぎ、上限を一瞬で使い切る。後者を選ばないのは、
+        **手放した車の事故フラグが `release_vehicle()` の経路差し替えで消える**ため。
+        除外しないと 2 台のあいだを往復する（実測で #1 → #5 → #1 → #5）。
+        """
         fleet = world.fleet
-        idx = np.flatnonzero(fleet.active)
+        usable = fleet.active & ~world.collided_flags
+        for slot in exclude:
+            if 0 <= slot < usable.shape[0]:
+                usable[slot] = False
+        idx = np.flatnonzero(usable)
         if idx.size == 0:
             return -1, None
         dx = fleet.x[idx].astype(np.float64) - pickup[0]

@@ -19,6 +19,8 @@ export interface PedestrianState {
   pitch: number
   /** 乗車中か。true の間はカメラを運転席へ譲る */
   riding: boolean
+  /** 乗っている車両スロット。-1 なら乗っていない（降車位置を出すのに使う） */
+  ridingVehicle: number
   /** ポインタロック中か。false なら視線を動かさない */
   locked: boolean
   input: PedestrianInput
@@ -42,6 +44,7 @@ export const pedestrian: PedestrianState = {
   heading: 0,
   pitch: 0,
   riding: false,
+  ridingVehicle: -1,
   locked: false,
   input: { forward: false, back: false, left: false, right: false },
   aimed: -1,
@@ -77,6 +80,7 @@ export function releasePedestrianKeys(): void {
 export function resetPedestrian(): void {
   releasePedestrianKeys()
   pedestrian.riding = false
+  pedestrian.ridingVehicle = -1
   pedestrian.locked = false
   pedestrian.aimed = -1
   pedestrian.speed = 0

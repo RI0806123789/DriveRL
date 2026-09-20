@@ -1,6 +1,6 @@
 /** スマホ画面の 2D 地図（Canvas）。**3D シーンは使わず自前で描く**（決定 10）。 */
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 
 import { frameBuffer, getLatestVehicle } from '../store/frameBuffer'
 import { pedestrian } from '../store/pedestrian'
@@ -8,6 +8,7 @@ import { useSimStore } from '../store/simStore'
 import { usePalette } from '../scene/usePalette'
 import { vehicleColor } from '../scene/vehicleColors'
 import { TargetIcon } from '../ui/Icons'
+import { isBoardablePhase } from '../types/protocol'
 import type { Vec2 } from '../types/protocol'
 import {
   ZOOM_MIN,
@@ -16,13 +17,17 @@ import {
   clampCenter,
   createProjection,
   drawBuildings,
+  drawCompass,
   drawHeadingMark,
   drawPin,
   drawRoads,
   drawRoute,
   fitView,
-  layerPlacement,
+  layerSizeFor,
+  layerTransform,
   lerpView,
+  normalizeAngle,
+  rotationForHeading,
   toEnu,
   viewsClose,
   zoomAround,
@@ -42,6 +47,14 @@ const DRAG_THRESHOLD_PX = 4
 const LAYER_ZOOM_TOLERANCE = 0.16
 const LAYER_SHIFT_RATIO = 0.22
 
+/** 向きを追う速さ。寄り引き（FOLLOW_RATE）より遅い — 交差点で画面が振られないように */
+const TURN_RATE = 1.6
+
+/** 北から何ラジアン回れば方角の目印を出しきるか */
+const COMPASS_FADE_RAD = 0.18
+const COMPASS_RADIUS = 11
+const COMPASS_MARGIN = 12
+
 export type PickTarget = 'pickup' | 'dropoff' | null
 
 export interface TaxiMapProps {
@@ -50,9 +63,17 @@ export interface TaxiMapProps {
   onPick: (point: Vec2) => void
   draftPickup: Vec2 | null
   draftDropoff: Vec2 | null
+  /** 地図の上へ重ねるもの（車載カメラ）。位置は重ねる側が決める */
+  children?: ReactNode
 }
 
-export function TaxiMap({ picking, onPick, draftPickup, draftDropoff }: TaxiMapProps) {
+export function TaxiMap({
+  picking,
+  onPick,
+  draftPickup,
+  draftDropoff,
+  children,
+}: TaxiMapProps) {
   const map = useSimStore((s) => s.map)
   const phase = useSimStore((s) => s.taxi.phase)
   const palette = usePalette()
@@ -63,7 +84,7 @@ export function TaxiMap({ picking, onPick, draftPickup, draftDropoff }: TaxiMapP
 
   // ★ 見え方は state に置かない。毎フレーム寄せるので、state にすると
   //   60Hz でパネルごと再レンダリングされる（`frameBuffer` と同じ理由）
-  const viewRef = useRef<MapView>({ zoom: ZOOM_MIN, centerX: 0, centerY: 0 })
+  const viewRef = useRef<MapView>({ zoom: ZOOM_MIN, centerX: 0, centerY: 0, rotation: 0 })
   /** 自動で追いかけるのをやめているか（利用者が自分で動かしたあと） */
   const manual = useRef(false)
   const [manualShown, setManualShown] = useState(false)
@@ -82,7 +103,7 @@ export function TaxiMap({ picking, onPick, draftPickup, draftDropoff }: TaxiMapP
   useEffect(() => {
     if (!map) return
     const [cx, cy] = boundsCenter(map.bounds)
-    viewRef.current = { zoom: ZOOM_MIN, centerX: cx, centerY: cy }
+    viewRef.current = { zoom: ZOOM_MIN, centerX: cx, centerY: cy, rotation: 0 }
     setManual(false)
     staticKey.current = ''
     staticAt.current = null
@@ -114,14 +135,20 @@ export function TaxiMap({ picking, onPick, draftPickup, draftDropoff }: TaxiMapP
     [map, size.width, size.height],
   )
 
-  /** 配車の段階に合わせて「収めたいもの」を決める（自動ズームの目標） */
+  /**
+   * 配車の段階に合わせて「収めたいもの」と「向き」を決める（自動ズームの目標）。
+   *
+   * ★ 進行方向へ向けるのは**乗車中（`riding`）だけ**。迎車中は乗る側が街の中で
+   * 自分の居場所を掴めるよう北で固定し、到着（`arrived`）したら北へ戻し始める。
+   */
   const targetView = useCallback((): MapView | null => {
     if (!map) return null
     const taxi = useSimStore.getState().taxi
     const car = taxi.vehicleId >= 0 ? getLatestVehicle(taxi.vehicleId) : null
     const points: Vec2[] = []
+    const rotation = taxi.phase === 'riding' && car ? rotationForHeading(car.heading) : 0
 
-    if (taxi.phase === 'approaching' || taxi.phase === 'waiting') {
+    if (isBoardablePhase(taxi.phase)) {
       if (car) points.push([car.x, car.y])
       if (taxi.pickup) points.push(taxi.pickup)
     } else if (taxi.phase === 'riding') {
@@ -134,14 +161,18 @@ export function TaxiMap({ picking, onPick, draftPickup, draftDropoff }: TaxiMapP
       // 2 点を選び終えたら、その区間が見えるところまで寄せる
       points.push(draftPickup, draftDropoff)
     }
-    return fitView(map.bounds, points, size.width, size.height)
+    return fitView(map.bounds, points, size.width, size.height, rotation)
   }, [map, size.width, size.height, draftPickup, draftDropoff, picking])
 
   /** 道路と建物は動かないので、見え方が大きく変わったときだけ描き直す */
   const ensureStaticLayer = useCallback(
     (p: MapProjection, settled: boolean): HTMLCanvasElement | null => {
       if (!map) return null
-      const key = [map.presetId, p.width, p.height, palette.roadSurface].join('|')
+      // ★ レイヤは**画面の対角を一辺とする正方形**で描く。回した角度に関わらず
+      //   画面を覆えるので、**向きが変わっても引き直さずに貼り替えだけで済む**
+      //   （金沢の 58,120 本を回転のたびに引き直すと 1 フレームを使い切る）。
+      const side = layerSizeFor(p.width, p.height, true)
+      const key = [map.presetId, side, palette.roadSurface, palette.buildingLow].join('|')
       const at = staticAt.current
       const fresh = staticLayer.current !== null && staticKey.current === key && at !== null
 
@@ -150,28 +181,37 @@ export function TaxiMap({ picking, onPick, draftPickup, draftDropoff }: TaxiMapP
         const zoomGap = Math.abs(Math.log(p.scale / at.scale))
         const shift =
           Math.hypot(p.centerX - at.centerX, p.centerY - at.centerY) * p.scale
+        const turn = Math.abs(normalizeAngle(p.rotation - at.rotation))
         stale =
           zoomGap > LAYER_ZOOM_TOLERANCE ||
           shift > p.width * LAYER_SHIFT_RATIO ||
           // 動きが落ち着いたら、ぼけたまま残さずピントを合わせ直す
-          (settled && (zoomGap > 1e-4 || shift > 0.5))
+          (settled && (zoomGap > 1e-4 || shift > 0.5 || turn > 1e-4))
       }
       if (!stale) return staticLayer.current
 
+      // 描くのは画面ではなく正方形の投影。貼るときに layerTransform が向きを合わせる
+      const layerProj: MapProjection = { ...p, width: side, height: side }
       const layer = staticLayer.current ?? document.createElement('canvas')
       staticLayer.current = layer
       const dpr = Math.min(2, window.devicePixelRatio || 1)
-      layer.width = Math.round(p.width * dpr)
-      layer.height = Math.round(p.height * dpr)
+      layer.width = Math.round(side * dpr)
+      layer.height = Math.round(side * dpr)
       const ctx = layer.getContext('2d')
       if (!ctx) return null
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-      ctx.clearRect(0, 0, p.width, p.height)
+      ctx.clearRect(0, 0, side, side)
       const zoom = p.scale / baseScale(map.bounds, p.width, p.height)
-      drawBuildings(ctx, p, map.buildings, palette.buildingLow)
-      drawRoads(ctx, p, map.edges, palette.roadSurface, Math.max(1, 1.2 * Math.sqrt(zoom)))
+      drawBuildings(ctx, layerProj, map.buildings, palette.buildingLow)
+      drawRoads(
+        ctx,
+        layerProj,
+        map.edges,
+        palette.roadSurface,
+        Math.max(1, 1.2 * Math.sqrt(zoom)),
+      )
       staticKey.current = key
-      staticAt.current = { ...p }
+      staticAt.current = layerProj
       return layer
     },
     [map, palette.buildingLow, palette.roadSurface],
@@ -197,10 +237,15 @@ export function TaxiMap({ picking, onPick, draftPickup, draftDropoff }: TaxiMapP
       const layer = ensureStaticLayer(p, settled)
       const at = staticAt.current
       if (layer && at) {
-        // ★ 寄っている途中はレイヤを貼り替えるだけにする。金沢の 58,120 本を
-        //   毎フレーム引き直すと、パネルだけで 1 フレームを使い切る
-        const place = layerPlacement(at, p)
-        ctx.drawImage(layer, place.dx, place.dy, place.dw, place.dh)
+        // ★ 寄っている途中も回っている途中も、レイヤは貼り替えるだけにする。
+        //   金沢の 58,120 本を毎フレーム引き直すと、パネルだけで 1 フレームを使い切る
+        const t = layerTransform(at, p)
+        ctx.save()
+        ctx.translate(t.x, t.y)
+        ctx.rotate(t.angle)
+        ctx.scale(t.scale, t.scale)
+        ctx.drawImage(layer, -at.width / 2, -at.height / 2, at.width, at.height)
+        ctx.restore()
       }
 
       const taxi = useSimStore.getState().taxi
@@ -243,6 +288,18 @@ export function TaxiMap({ picking, onPick, draftPickup, draftDropoff }: TaxiMapP
           palette.marking,
         )
       }
+
+      // 回していない間は出さない（北が上なら目印は要らない）
+      drawCompass(
+        ctx,
+        p,
+        p.width - COMPASS_MARGIN - COMPASS_RADIUS,
+        COMPASS_MARGIN + COMPASS_RADIUS,
+        COMPASS_RADIUS,
+        palette.marking,
+        palette.buildingLow,
+        Math.abs(normalizeAngle(p.rotation)) / COMPASS_FADE_RAD,
+      )
     },
     [projectionFor, ensureStaticLayer, palette, draftPickup, draftDropoff],
   )
@@ -269,6 +326,7 @@ export function TaxiMap({ picking, onPick, draftPickup, draftDropoff }: TaxiMapP
               viewRef.current,
               target,
               1 - Math.exp(-FOLLOW_RATE * dt),
+              1 - Math.exp(-TURN_RATE * dt),
             )
             moving = true
           }
@@ -313,11 +371,15 @@ export function TaxiMap({ picking, onPick, draftPickup, draftDropoff }: TaxiMapP
     start.moved = Math.max(start.moved, Math.hypot(dx, dy))
     if (start.moved <= DRAG_THRESHOLD_PX) return
     setManual(true)
+    // 回していると画面の右は東とは限らない。掴んだ点が指の下から動かないよう戻す
+    const rx = dx / p.scale
+    const ry = -dy / p.scale
     viewRef.current = clampCenter(
       {
         zoom: start.view.zoom,
-        centerX: start.view.centerX - dx / p.scale,
-        centerY: start.view.centerY + dy / p.scale,
+        centerX: start.view.centerX - (rx * p.cos - ry * p.sin),
+        centerY: start.view.centerY - (rx * p.sin + ry * p.cos),
+        rotation: start.view.rotation,
       },
       map.bounds,
     )
@@ -385,6 +447,8 @@ export function TaxiMap({ picking, onPick, draftPickup, draftDropoff }: TaxiMapP
       </button>
 
       {!map && <div className="taxi-map-empty">地図が読み込まれていません</div>}
+
+      {children}
     </div>
   )
 }

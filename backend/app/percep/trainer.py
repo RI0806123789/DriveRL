@@ -134,10 +134,11 @@ def cluster_vehicles(
 
 
 def scatter_obstacles(
-    env: "SimulationEnv", rng: np.random.Generator, *, dense: bool = False
+    env: "SimulationEnv", rng: np.random.Generator, *, focus: DetClass | None = None
 ) -> None:
     """各車両の前方にパイロンを置く。置かないと OBSTACLE の教師が 0 件になる。"""
     env.world.clear_obstacles()
+    dense = focus is DetClass.OBSTACLE
     per_vehicle = 3 if dense else 1
     reach = 16.0 if dense else 28.0
     for raw in np.flatnonzero(env.world.fleet.active):
@@ -234,7 +235,7 @@ def arrange_scene(
         _place_facing(env, rng, *_sign_approaches(env))
     else:
         cluster_vehicles(env, rng, tight=focus is DetClass.VEHICLE)
-    scatter_obstacles(env, rng, dense=focus is DetClass.OBSTACLE)
+    scatter_obstacles(env, rng, focus=focus)
 
 
 def _weighted_choice(
@@ -310,7 +311,8 @@ def collect_dataset(
         """
         return _weighted_choice(rng, classes, class_focus) if class_focus else None
 
-    arrange_scene(env, rng, pick_focus())
+    focus = pick_focus()
+    arrange_scene(env, rng, focus)
 
     started = time.perf_counter()
     step = 0
@@ -350,9 +352,10 @@ def collect_dataset(
         step += 1
         if reset_every > 0 and step % reset_every == 0:
             env.reset_all()
-            arrange_scene(env, rng, pick_focus())
+            focus = pick_focus()
+            arrange_scene(env, rng, focus)
         elif step % SCATTER_EVERY == 0:
-            scatter_obstacles(env, rng)
+            scatter_obstacles(env, rng, focus=focus)
 
         if on_progress is not None and step % 20 == 0:
             on_progress(min(collected, samples), samples, time.perf_counter() - started)
