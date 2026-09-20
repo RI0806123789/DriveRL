@@ -45,7 +45,14 @@ import {
   composePlateMatrix,
   makeWheelGeometry,
 } from '../src/scene/vehicleGeometry.ts'
-import { DRIVER_EYE_HEIGHT, DRIVER_FORWARD, DRIVER_RIGHT } from '../src/scene/cameraMath.ts'
+import {
+  DRIVER_EYE_HEIGHT,
+  DRIVER_FORWARD,
+  DRIVER_FOV_DEG,
+  DRIVER_LOOK_AHEAD,
+  DRIVER_LOOK_DROP,
+  DRIVER_RIGHT,
+} from '../src/scene/cameraMath.ts'
 import {
   DEFAULT_REGION,
   PLATES_PER_VEHICLE,
@@ -723,6 +730,77 @@ console.log('='.repeat(70))
   check('針は根元が原点にある', Math.abs(nb.min.y) < 1e-6, '下端 ' + nb.min.y.toFixed(4) + 'm')
   check('針は文字盤からはみ出さない', nb.max.y <= GAUGE_SLOTS[0].radius + 1e-6)
   needleGeom.dispose()
+}
+
+console.log()
+console.log('='.repeat(70))
+console.log('運転席から室内が見えるか（画角と遮蔽）')
+console.log('='.repeat(70))
+
+{
+  /**
+   * ★ 室内を作り込んでも、**運転席カメラの画角に入らなければ映らない。**
+   * 実際にアクセル・ブレーキが画角の 12 度下に外れていて、内装の隙間を
+   * 塞ぐ方向で直そうとして遠回りした。角度で検査する。
+   */
+  const eyeX = DRIVER_FORWARD
+  const eyeY = DRIVER_EYE_HEIGHT
+  /** 視線の俯角 [度]（下向きが正） */
+  const lookDown = (Math.atan2(DRIVER_LOOK_DROP, DRIVER_LOOK_AHEAD) * 180) / Math.PI
+  /** 画角の下端 [度] */
+  const bottom = lookDown + DRIVER_FOV_DEG / 2
+  const downTo = (x: number, y: number) => (Math.atan2(eyeY - y, x - eyeX) * 180) / Math.PI
+
+  const rimDrop = STEERING_RADIUS * Math.cos(COLUMN_TILT)
+  const rimShift = STEERING_RADIUS * Math.sin(COLUMN_TILT)
+
+  const seen: Array<[string, number, number]> = [
+    ['ハンドルの上端', STEERING_CENTER[0] - rimShift, STEERING_CENTER[1] + rimDrop],
+    ['ハンドルの下端', STEERING_CENTER[0] + rimShift, STEERING_CENTER[1] - rimDrop],
+    ['速度計', GAUGE_SLOTS[0].center[0], GAUGE_SLOTS[0].center[1]],
+    ['回転計', GAUGE_SLOTS[1].center[0], GAUGE_SLOTS[1].center[1]],
+    ['アクセルの支点', PEDAL_SLOTS[0].pivot[0], PEDAL_SLOTS[0].pivot[1]],
+    ['アクセルの踏面', PEDAL_SLOTS[0].pivot[0], PEDAL_SLOTS[0].pivot[1] - 0.22],
+    ['ブレーキの支点', PEDAL_SLOTS[1].pivot[0], PEDAL_SLOTS[1].pivot[1]],
+    ['ブレーキの踏面', PEDAL_SLOTS[1].pivot[0], PEDAL_SLOTS[1].pivot[1] - 0.22],
+  ]
+
+  for (const [name, x, y] of seen) {
+    const d = downTo(x, y)
+    check(
+      name + 'が運転席の画角に入る',
+      d <= bottom,
+      '俯角 ' + d.toFixed(1) + ' 度 / 下端 ' + bottom.toFixed(1) + ' 度',
+    )
+  }
+
+  // ★ メーターはハンドルの「リングの中」から覗く。ハブに重なると隠れる
+  //    （実際にハブとちょうど同じ高さにあって見えなかった）
+  const hubRadius = 0.052
+  for (let k = 0; k < GAUGE_SLOTS.length; k++) {
+    const g = GAUGE_SLOTS[k]
+    // 目からメーターへの視線が、ハンドル面（STEERING_CENTER[0]）を横切る高さ
+    const t = (STEERING_CENTER[0] - eyeX) / (g.center[0] - eyeX)
+    const crossY = eyeY + (g.center[1] - eyeY) * t
+    const offset = Math.abs(crossY - STEERING_CENTER[1])
+    check(
+      'メーター ' + k + ' への視線がハンドルのハブを外れる',
+      offset > hubRadius,
+      'ハンドル中心から ' + offset.toFixed(3) + 'm（ハブ半径 ' + hubRadius + 'm）',
+    )
+    check(
+      'メーター ' + k + ' への視線がリングの内側を通る',
+      offset < STEERING_RADIUS,
+      offset.toFixed(3) + 'm < リム半径 ' + STEERING_RADIUS + 'm',
+    )
+  }
+
+  // 前が見えなくなるほど下を向いていないこと
+  check(
+    '視線より上も同じだけ見える（空が見える）',
+    DRIVER_FOV_DEG / 2 - lookDown > 30,
+    '上端 ' + (DRIVER_FOV_DEG / 2 - lookDown).toFixed(1) + ' 度',
+  )
 }
 
 console.log()

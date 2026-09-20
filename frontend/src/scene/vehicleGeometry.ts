@@ -54,6 +54,8 @@ const FLOOR_Y = 0.34
 const ROOF_Y = VEHICLE_HEIGHT
 /** ベルトライン（窓の下端）[m] */
 const BELT_Y = 0.98
+/** 外板の厚み（片側）[m]。車体を中空にするときの壁の厚さ */
+const BODY_SKIN = 0.06
 
 /** フロントガラスの下端・上端の X。寝かせるほど差が開く */
 const WINDSHIELD_BOTTOM_X = 1.15
@@ -111,13 +113,19 @@ function slab(
  */
 export function makeBodyGeometry(): THREE.BufferGeometry {
   const parts: THREE.BufferGeometry[] = [
-    // 下部（サイドシルとフェンダー）。タイヤハウスぶん左右を絞る
-    box([-HALF_L + 0.1, 0.2, -HALF_W], [HALF_L - 0.1, 0.62, HALF_W]),
-    // ドア〜ベルトラインまでの胴
-    box([-HALF_L + 0.05, 0.62, -HALF_W], [HALF_L - 0.05, BELT_Y, HALF_W]),
-    // バンパー（前後に少し張り出す）
-    box([HALF_L - 0.2, 0.42, -HALF_W + 0.02], [HALF_L, 0.86, HALF_W - 0.02]),
-    box([-HALF_L, 0.42, -HALF_W + 0.02], [-HALF_L + 0.2, 0.86, HALF_W - 0.02]),
+    // ★ 車体は**中空の殻**にすること。中身の詰まった箱で作ると、その上面が
+    //   運転席の目の 0.24m 下に広がり、**室内の下半分を覆って何も見えなくなる**
+    //   （ハンドルの上端しか映らなかった原因がこれ）。外から見た形は変わらない。
+    // 左右の側面（サイドシル〜ベルトライン）
+    ...mirrored(
+      (z) => box([-HALF_L + 0.06, 0.2, z - BODY_SKIN], [HALF_L - 0.06, BELT_Y, z + BODY_SKIN]),
+      HALF_W - BODY_SKIN,
+    ),
+    // 床下（アンダーボディ）
+    box([-HALF_L + 0.1, 0.2, -HALF_W], [HALF_L - 0.1, 0.28, HALF_W]),
+    // 前端・後端（バンパーとその上のパネル）。エンジンルームとトランクの前後を塞ぐ
+    box([HALF_L - 0.2, 0.28, -HALF_W], [HALF_L, BELT_Y, HALF_W]),
+    box([-HALF_L, 0.28, -HALF_W], [-HALF_L + 0.2, BELT_Y, HALF_W]),
     // ボンネット（前下がり）
     slab([WINDSHIELD_BOTTOM_X, BELT_Y], [HALF_L - 0.12, BELT_Y - 0.06], -0.86, 0.86, 0.09),
     // トランクリッド
@@ -246,8 +254,8 @@ export function makeInteriorGeometry(): THREE.BufferGeometry {
       (z) => box([DASH_REAR_X, FLOOR_Y, z - 0.03], [DASH_FRONT_X, 0.7, z + 0.03]),
       0.8,
     ),
-    // メーターフード（運転席の前だけ庇を付ける）
-    box([DASH_REAR_X - 0.06, DASH_TOP_Y - 0.02, DRIVER_SEAT_Z - 0.2], [DASH_REAR_X + 0.16, DASH_TOP_Y + 0.08, DRIVER_SEAT_Z + 0.2]),
+    // ★ メーターの庇（フード）は**置かない**。目からメーターへの視線は
+    //   ダッシュボード上面のすぐ下を通るので、庇を立てるとそれ自体が視線を塞ぐ
     // センターコンソール
     box([-0.35, FLOOR_Y, -0.14], [0.5, 0.62, 0.14]),
     // ★ 車内の側壁（ドア内張り）。**フロアと隙間なく突き合わせること。**
@@ -279,8 +287,8 @@ export const GAUGE_SLOTS: ReadonlyArray<{
   readonly center: readonly [number, number, number]
   readonly radius: number
 }> = [
-  { center: [DASH_REAR_X + 0.04, DASH_TOP_Y - 0.09, DRIVER_SEAT_Z + 0.09], radius: 0.075 },
-  { center: [DASH_REAR_X + 0.04, DASH_TOP_Y - 0.09, DRIVER_SEAT_Z - 0.09], radius: 0.075 },
+  { center: [DASH_REAR_X - 0.01, DASH_TOP_Y - 0.08, DRIVER_SEAT_Z + 0.09], radius: 0.075 },
+  { center: [DASH_REAR_X - 0.01, DASH_TOP_Y - 0.08, DRIVER_SEAT_Z - 0.09], radius: 0.075 },
 ]
 
 /** メーターの文字盤。法線を車両後方（運転者の側）へ向ける */
@@ -301,7 +309,7 @@ export const COLUMN_TILT = 0.42
  */
 export const STEERING_CENTER: readonly [number, number, number] = [
   DASH_REAR_X - 0.06,
-  DASH_TOP_Y - 0.06,
+  DASH_TOP_Y - 0.14,
   DRIVER_SEAT_Z,
 ]
 /** ハンドルの外径 [m]（実車の 370mm 級） */
@@ -322,8 +330,9 @@ export function makeSteeringGeometry(): THREE.BufferGeometry {
   rim.rotateY(Math.PI / 2)
 
   const parts: THREE.BufferGeometry[] = [rim]
-  // スポークは下 1 本・左右 2 本（実車に多い 3 本スポーク）
-  for (const angle of [Math.PI / 2, -Math.PI / 6, (Math.PI * 7) / 6]) {
+  // ★ スポークは**下・左・右の 3 本**にして、上を空けること。
+  //   上に 1 本かかると、リングの中から覗くメーターをちょうど隠す
+  for (const angle of [0, Math.PI / 2, -Math.PI / 2]) {
     const spoke = new THREE.BoxGeometry(0.02, STEERING_RADIUS * 0.82, 0.035)
     spoke.translate(0, -STEERING_RADIUS * 0.41, 0)
     spoke.rotateX(angle)
@@ -360,9 +369,13 @@ export function makePedalGeometry(): THREE.BufferGeometry {
   return g
 }
 
-/** メーターの針。**根元が原点**で、文字盤の面に沿って伸びる */
+/**
+ * メーターの針。**根元が原点**で、文字盤の面に沿って伸びる。
+ * ★ 細くしすぎると、運転席から 0.57m 離れた文字盤の上では見えない
+ * （幅 6mm で試したら、暗い車内でまったく判別できなかった）。
+ */
 export function makeNeedleGeometry(radius: number): THREE.BufferGeometry {
-  const g = new THREE.BoxGeometry(0.006, radius * 0.86, 0.008)
+  const g = new THREE.BoxGeometry(0.012, radius * 0.86, 0.014)
   g.translate(0, (radius * 0.86) / 2, 0)
   return g
 }

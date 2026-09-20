@@ -242,10 +242,11 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
       metalness: 0.0,
       side: THREE.DoubleSide,
     })
-    // 針は暗い車内でも読めるよう自己発光させる（実車の照明の代わり）
+    // 針は暗い車内でも読めるよう自己発光させる（実車の照明の代わり）。
+    // ★ 車内には光源が届かないので、**発光を落とすと夜はまったく見えない**
     const needleMaterial = new THREE.MeshStandardMaterial({
       color: palette.vehicleNeedle,
-      emissive: new THREE.Color(palette.vehicleNeedle).multiplyScalar(0.6),
+      emissive: new THREE.Color(palette.vehicleNeedle),
       roughness: 0.5,
       toneMapped: false,
     })
@@ -376,7 +377,7 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
     resources.trimMaterial.color.set(palette.vehicleTrim)
     resources.gaugeMaterial.color.set(palette.vehicleGauge)
     resources.needleMaterial.color.set(palette.vehicleNeedle)
-    resources.needleMaterial.emissive.set(palette.vehicleNeedle).multiplyScalar(0.6)
+    resources.needleMaterial.emissive.set(palette.vehicleNeedle)
     lastState.current.fill(-1)
   }, [resources, palette])
 

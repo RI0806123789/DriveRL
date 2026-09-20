@@ -10,7 +10,14 @@ import { pedestrian } from '../store/pedestrian'
 import { useSimStore } from '../store/simStore'
 import type { MapBounds } from '../types/protocol'
 import { computeAlpha, createPose, sampleVehicle } from './interpolation'
-import { driverEye, driverLookAt, firstActiveSlot, followEye, followLookAt } from './cameraMath'
+import {
+  DRIVER_FOV_DEG,
+  driverEye,
+  driverLookAt,
+  firstActiveSlot,
+  followEye,
+  followLookAt,
+} from './cameraMath'
 import { eyeLookAt, eyePosition } from './pedestrianGeometry'
 import { setCameraNotice } from './sceneStats'
 
@@ -18,9 +25,8 @@ import { setCameraNotice } from './sceneStats'
 const FOLLOW_LERP = 4.5
 const DRIVER_LERP = 22.0
 
-/** 視野角 [度]。運転席は広めに取ると自然に見える */
+/** 視野角 [度]。運転席は `cameraMath.DRIVER_FOV_DEG` が唯一の出典（検出枠と共有） */
 const FOV_DEFAULT = 50
-const FOV_DRIVER = 68
 /** ニアクリップ [m]。運転席は自車のすぐ前まで見せたいので小さくする */
 const NEAR_DEFAULT = 0.5
 const NEAR_DRIVER = 0.15
@@ -71,7 +77,7 @@ export const CameraRig = memo(function CameraRig({ bounds }: CameraRigProps) {
     const cam = camera as THREE.PerspectiveCamera
     if (!cam.isPerspectiveCamera) return
     const firstPerson = mode === 'driver' || taxiWalk
-    cam.fov = firstPerson ? FOV_DRIVER : FOV_DEFAULT
+    cam.fov = firstPerson ? DRIVER_FOV_DEG : FOV_DEFAULT
     cam.near = firstPerson ? NEAR_DRIVER : NEAR_DEFAULT
     cam.updateProjectionMatrix()
   }, [camera, mode, taxiWalk])

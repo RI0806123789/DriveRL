@@ -14,8 +14,14 @@ export const DRIVER_EYE_HEIGHT = 1.22
 export const DRIVER_LOOK_AHEAD = 30
 export const DRIVER_LOOK_DROP = 1.1
 
-/** 運転席カメラの視野角 [度]。 */
-export const DRIVER_FOV_DEG = 68
+/**
+ * 運転席カメラの**垂直**視野角 [度]。
+ * ★ **ここが唯一の出典。** `CameraRig` のカメラと `detectionProjection` の
+ * 検出枠の両方がこれを読む。片方だけ変えると、認識結果の枠が実物からずれる。
+ * 68 度だとアクセル・ブレーキ（目から俯角 48 度）が画角の下へ外れて映らないので、
+ * 足元まで入る値にしてある（下端は視線の 2.1 度下 + 47.5 度 = 49.6 度）。
+ */
+export const DRIVER_FOV_DEG = 95
 
 export interface Vec3 {
   x: number
