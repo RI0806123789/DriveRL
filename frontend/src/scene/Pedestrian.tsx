@@ -81,8 +81,8 @@ function routeHeadingAtEnd(route: Vec2[] | undefined): number {
 }
 
 /**
- * 乗車地点の歩道へ立たせる。**リロードや再マウントのあとにも呼ぶ**ので、
- * 「配車中なら待っている場所へ戻る」が成り立つ。
+ * 乗車地点の歩道へ立たせる。**まだ街に立っていないときだけ呼ぶこと。**
+ * 乗車地点は利用者の現在地なので、呼んだ瞬間に立たせ直すと自分がワープする。
  */
 function placeAtPickup(taxi: { pickup: Vec2 | null; route?: Vec2[] }, index: BuildingIndex | null): void {
   if (!taxi.pickup) return
@@ -195,7 +195,10 @@ export function Pedestrian() {
       return
     }
 
-    if (phase === 'approaching') placeAtPickup(taxi, index)
+    // ★ 既に立っているなら動かさない。乗車地点は自分の現在地なので、
+    //   ここで立たせ直すと「呼んだ瞬間に自分が飛ぶ」ことになる。
+    //   立たせるのはリロード・再マウントで街から消えているときだけ
+    if (phase === 'approaching' && !pedestrian.placed) placeAtPickup(taxi, index)
 
     // 停まったタクシーの方へ向き直す。**照準に入らないと [Enter] が効かない**ので、
     // 待っている人が自分で振り向く手間を省く
