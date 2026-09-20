@@ -152,6 +152,8 @@ class World:
         self.braking = np.zeros(n, dtype=bool)
         #: 方向指示器。-1=左 / 0=消灯 / +1=右
         self.turn_signal = np.zeros(n, dtype=np.int8)
+        #: 直近の `check_collisions()` で歩行者に当たったスロット
+        self.pedestrian_hits = np.zeros(n, dtype=bool)
 
         self.stop_arc = np.full(n, np.inf, dtype=np.float64)
 
@@ -385,7 +387,8 @@ class World:
         """シミュレーション内時刻を進め、信号の現示と歩行者を更新する。"""
         self.sim_time += float(dt)
         self.signal_phases = self.signals.phases(self.sim_time)
-        self.crowd.step(float(dt))
+        # ★ 現示を作り直した**あと**に渡すこと。1 ステップ古い色で渡らせない
+        self.crowd.step(float(dt), self.signal_phases)
         if self.sim_time - self._recycled_at >= PEDESTRIAN_RECYCLE_SEC:
             self._recycled_at = self.sim_time
             self.crowd.recycle(self._active_vehicle_xy())
@@ -994,9 +997,13 @@ class World:
         self.reached_flags = np.asarray(reached, dtype=bool).copy()
 
     def check_collisions(self) -> np.ndarray:
-        """建物・車両同士・障害物・歩行者の 4 種類をまとめて判定する。shape (N,) bool。"""
+        """建物・車両同士・障害物・歩行者の 4 種類をまとめて判定する。shape (N,) bool。
+
+        歩行者との接触だけは `pedestrian_hits` にも残す（学習タブで分けて出すため）。
+        """
         n = config.MAX_VEHICLES
         hit = np.zeros(n, dtype=bool)
+        self.pedestrian_hits = np.zeros(n, dtype=bool)
         active = self.fleet.active
         idx = np.flatnonzero(active)
         if idx.size == 0:
@@ -1047,7 +1054,7 @@ class World:
             cos_h = np.cos(self.fleet.heading[idx].astype(np.float64))[:, None]
             sin_h = np.sin(self.fleet.heading[idx].astype(np.float64))[:, None]
             radius = np.float64(config.PEDESTRIAN_RADIUS)
-            hit[idx] |= _in_body_ellipse(
+            struck = _in_body_ellipse(
                 people[None, :, 0] - px,
                 people[None, :, 1] - py,
                 cos_h,
@@ -1055,6 +1062,8 @@ class World:
                 np.float64(config.VEHICLE_LENGTH * 0.5) + radius,
                 np.float64(config.VEHICLE_WIDTH * 0.5) + radius,
             ).any(axis=1)
+            self.pedestrian_hits[idx] = struck
+            hit[idx] |= struck
 
         return hit
 

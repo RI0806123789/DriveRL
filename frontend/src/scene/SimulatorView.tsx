@@ -11,6 +11,7 @@ import { InteractionPlane } from './InteractionPlane'
 import { LaneDetectionOverlay } from './LaneDetectionOverlay'
 import { NpcPedestrians } from './NpcPedestrians'
 import { Obstacles } from './Obstacles'
+import { PedestrianSignals } from './PedestrianSignals'
 import { Pedestrian } from './Pedestrian'
 import { Rain } from './Rain'
 import { RoadMarkings } from './RoadMarkings'
@@ -97,6 +98,13 @@ export function SimulatorView() {
           )}
           {map && view.signals && (
             <TrafficSignals
+              signals={map.signals ?? []}
+              nodes={map.nodes}
+              castShadow={view.shadows}
+            />
+          )}
+          {map && view.signals && (
+            <PedestrianSignals
               signals={map.signals ?? []}
               nodes={map.nodes}
               castShadow={view.shadows}

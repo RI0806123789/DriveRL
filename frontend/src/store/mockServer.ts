@@ -833,6 +833,8 @@ class MockServer {
       entropy: Math.max(0.05, 1.35 - 0.85 * p + noise() * 0.03),
       approxKl: Math.max(0.0002, 0.014 * (1 - p * 0.6) + Math.abs(noise()) * 0.002),
       collisionRate: Math.max(0, 0.55 * (1 - p) + noise() * 0.03),
+      // 学習が進むほど歩行者を轢かなくなる。衝突率の一部なので必ずそれ以下にする
+      pedestrianCollisionRate: Math.max(0, 0.18 * (1 - p) + noise() * 0.01),
       goalRate: Math.max(0, Math.min(1, 0.05 + 0.85 * p + noise() * 0.04)),
       stepsPerSec: SIM_HZ * this.params.simSpeed + noise() * 0.4,
       signalViolations: 0,

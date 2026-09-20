@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import math
+from typing import Sequence
 
 import numpy as np
 
 from app import config
 from app.contracts import MapData, MapIndex, PedestrianSnapshot
+from app.sim.signals import RED
 
 __all__ = ["PedestrianCrowd", "SidewalkNetwork", "build_sidewalk_network"]
 
@@ -19,6 +21,9 @@ CROSS_MIN_SEC = 1.2
 
 #: 再配置のときに車両から離す距離 [m]。湧いた瞬間に轢かれるのを避ける
 SPAWN_CLEARANCE_M = 6.0
+
+#: 交差点の信号を「この端のもの」と認める向きのずれ [rad]
+SIGNAL_MATCH_RAD = math.radians(50.0)
 
 #: これより遠い歩行者は誰の視界にも入らないので、車の近くへ回す [m]。
 #: 擬似カメラの far は 120m なので、その倍は見えない
@@ -74,6 +79,38 @@ class SidewalkNetwork:
         self._id_sorted = ids[order]
         self._id_index = order.astype(np.int64)
         self._build_adjacency()
+        self._build_signal_table(data, edges)
+
+    def _build_signal_table(self, data: MapData, edges: list) -> None:
+        """エッジの端ごとに「そこへ入る車両を規制する信号」を引けるようにする。
+
+        ★ 歩行者用の信号は**車両信号の裏返し**として扱う（`docs/protocol.md` 2.3）。
+        エッジを横断する歩行者にとって危ないのはそのエッジを走る車なので、
+        その車が赤で止まっていれば渡ってよい。
+        """
+        self.signal_fwd = np.full(self.count, -1, dtype=np.int32)
+        self.signal_bwd = np.full(self.count, -1, dtype=np.int32)
+        signals = list(getattr(data, "signals", []) or [])
+        if not signals or self.count == 0:
+            return
+
+        by_node: dict[int, list[tuple[int, float]]] = {}
+        for i, sig in enumerate(signals):
+            by_node.setdefault(int(sig.node_id), []).append((i, float(sig.heading)))
+
+        for e in range(self.count):
+            lo = int(self.start[e])
+            hi = lo + int(self.point_count[e])
+            pts = self.points[lo:hi]
+            head_in = math.atan2(pts[-1, 1] - pts[-2, 1], pts[-1, 0] - pts[-2, 0])
+            head_out = math.atan2(pts[0, 1] - pts[1, 1], pts[0, 0] - pts[1, 0])
+            self.signal_fwd[e] = _closest_signal(by_node.get(int(self.node_v[e])), head_in)
+            self.signal_bwd[e] = _closest_signal(by_node.get(int(self.node_u[e])), head_out)
+
+    def signal_at(self, edge: int, forward: bool) -> int:
+        """エッジの端にある車両信号の添字。無ければ -1。"""
+        table = self.signal_fwd if forward else self.signal_bwd
+        return int(table[int(edge)]) if table.size else -1
 
     def index_of(self, edge_id: int) -> int:
         """`MapEdge.id` から歩道網の添字を引く。無ければ -1。"""
@@ -164,6 +201,22 @@ class SidewalkNetwork:
         return int(self.adj_edge[k]), int(self.adj_dir[k])
 
 
+def _closest_signal(
+    candidates: list[tuple[int, float]] | None, heading: float
+) -> int:
+    """進行方向がいちばん近い信号を選ぶ。離れすぎていれば -1。"""
+    if not candidates:
+        return -1
+    best = -1
+    best_gap = SIGNAL_MATCH_RAD
+    for index, sig_heading in candidates:
+        gap = abs(math.atan2(math.sin(sig_heading - heading), math.cos(sig_heading - heading)))
+        if gap < best_gap:
+            best = index
+            best_gap = gap
+    return best
+
+
 def build_sidewalk_network(data: MapData) -> SidewalkNetwork:
     return SidewalkNetwork(data)
 
@@ -191,6 +244,10 @@ class PedestrianCrowd:
         self.cross = np.zeros(n, dtype=np.float64)
         self.crossing = np.zeros(n, dtype=bool)
         self.cross_to = np.ones(n, dtype=np.int8)
+        #: 信号待ち。横断歩道の手前で青（＝車両側が赤）になるのを待っている
+        self.waiting = np.zeros(n, dtype=bool)
+        #: 待っている端がエッジの終点側か（信号を引くのに使う）
+        self.wait_forward = np.zeros(n, dtype=bool)
         self.stride = np.zeros(n, dtype=np.float64)
 
         self.x = np.zeros(n, dtype=np.float64)
@@ -251,19 +308,33 @@ class PedestrianCrowd:
         self.cross_to[slot] = -self.side[slot]
         self.crossing[slot] = False
         self.cross[slot] = 0.0
+        self.waiting[slot] = False
         self.stride[slot] = float(rng.uniform(0.0, 2.0 * math.pi))
         self.speed[slot] = float(
             config.PEDESTRIAN_SPEED
             + rng.uniform(-1.0, 1.0) * config.PEDESTRIAN_SPEED_SPREAD
         )
 
-    def step(self, dt: float) -> None:
-        """全員を dt 秒ぶん進める。"""
+    def may_cross(self, edge: int, forward: bool, phases: Sequence[int]) -> bool:
+        """その端の横断歩道を渡ってよいか。
+
+        ★ 歩行者用の信号は**車両信号の裏返し**。そのエッジを走る車が赤で止まって
+        いれば渡ってよい。信号の無い交差点では従来どおり自由に渡る。
+        """
+        index = self.net.signal_at(int(edge), bool(forward))
+        if index < 0 or index >= len(phases):
+            return True
+        return int(phases[index]) == RED
+
+    def step(self, dt: float, phases: Sequence[int] = ()) -> None:
+        """全員を dt 秒ぶん進める。`phases` は車両信号の現示（`MapData.signals` と同じ並び）。"""
         idx = np.flatnonzero(self.active)
         if idx.size == 0:
             return
 
-        walking = idx[~self.crossing[idx]]
+        self._release_waiting(idx, phases)
+
+        walking = idx[~self.crossing[idx] & ~self.waiting[idx]]
         if walking.size:
             step = self.speed[walking] * dt * self.dir[walking]
             self.arc[walking] += step
@@ -283,10 +354,20 @@ class PedestrianCrowd:
                 self.cross[done] = 0.0
                 self.crossing[done] = False
 
-        self._handle_ends(walking)
+        self._handle_ends(walking, phases)
         self._refresh_pose()
 
-    def _handle_ends(self, slots: np.ndarray) -> None:
+    def _release_waiting(self, idx: np.ndarray, phases: Sequence[int]) -> None:
+        """信号待ちの歩行者を、青になったら渡らせる。"""
+        for raw in idx[self.waiting[idx]]:
+            slot = int(raw)
+            if not self.may_cross(int(self.edge[slot]), bool(self.wait_forward[slot]), phases):
+                continue
+            self.waiting[slot] = False
+            self.crossing[slot] = True
+            self.cross[slot] = 0.0
+
+    def _handle_ends(self, slots: np.ndarray, phases: Sequence[int] = ()) -> None:
         """エッジの端に着いた人を、横断させるか次のエッジへ移す。"""
         if slots.size == 0:
             return
@@ -303,10 +384,16 @@ class PedestrianCrowd:
             if rng.random() < config.PEDESTRIAN_CROSS_PROB:
                 setback = min(config.PEDESTRIAN_CROSS_SETBACK_M, span * 0.5)
                 self.arc[slot] = span - setback if forward else setback
-                self.crossing[slot] = True
                 self.cross[slot] = 0.0
                 self.cross_to[slot] = -self.side[slot]
                 self.dir[slot] = -self.dir[slot]
+                # ★ 渡り**始める**ときだけ信号を見る。渡っている最中に変わっても
+                #   引き返させない（実際の歩行者と同じく渡り切る）
+                if self.may_cross(edge, forward, phases):
+                    self.crossing[slot] = True
+                else:
+                    self.waiting[slot] = True
+                    self.wait_forward[slot] = forward
                 continue
 
             nxt = self.net.neighbours(node, rng)
@@ -344,7 +431,9 @@ class PedestrianCrowd:
         walk_heading = np.arctan2(ty * self.dir[idx], tx * self.dir[idx])
         toward = np.sign(self.cross_to[idx] - self.side[idx])
         cross_heading = np.arctan2(tx * toward, -ty * toward)
-        self.heading[idx] = np.where(self.crossing[idx], cross_heading, walk_heading)
+        # 信号待ちの人も横断方向を向いて待つ（信号を見ている姿勢）
+        facing_across = self.crossing[idx] | self.waiting[idx]
+        self.heading[idx] = np.where(facing_across, cross_heading, walk_heading)
 
     def recycle(self, vehicle_xy: np.ndarray) -> int:
         """どの車からも遠い歩行者を、車の近くの歩道へ回す。回した人数を返す。
@@ -434,6 +523,7 @@ class PedestrianCrowd:
         self.cross_to[slot] = -self.side[slot]
         self.crossing[slot] = False
         self.cross[slot] = 0.0
+        self.waiting[slot] = False
         return True
 
     def snapshot(self) -> list[PedestrianSnapshot]:

@@ -587,6 +587,8 @@ class MetricsSnapshot:
     entropy: float = 0.0
     approx_kl: float = 0.0
     collision_rate: float = 0.0
+    #: そのうち歩行者に当たった割合（`collision_rate` にも含まれる）
+    pedestrian_collision_rate: float = 0.0
     goal_rate: float = 0.0
     steps_per_sec: float = 0.0
     signal_violations: float = 0.0
@@ -606,6 +608,7 @@ class MetricsSnapshot:
             "entropy": round(self.entropy, 4),
             "approxKl": round(self.approx_kl, 5),
             "collisionRate": round(self.collision_rate, 3),
+            "pedestrianCollisionRate": round(self.pedestrian_collision_rate, 3),
             "goalRate": round(self.goal_rate, 3),
             "stepsPerSec": round(self.steps_per_sec, 2),
             "signalViolations": round(self.signal_violations, 3),
@@ -626,6 +629,8 @@ class EpisodeResult:
     speed_violations: int = 0
     lane_deviation: float = 0.0
     lane_departures: int = 0
+    #: 終了の原因が衝突のとき、相手が歩行者だったか
+    hit_pedestrian: bool = False
 
 
 @dataclass

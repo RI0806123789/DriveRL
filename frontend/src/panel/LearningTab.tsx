@@ -105,6 +105,19 @@ export function LearningTab() {
             </ValueFlash>
           </div>
           <div className="m3-stat">
+            <span className="m3-stat-label">うち歩行者</span>
+            <ValueFlash
+              className="m3-stat-value"
+              style={
+                (latest?.pedestrianCollisionRate ?? 0) > 0
+                  ? { color: 'var(--m3-error)' }
+                  : undefined
+              }
+            >
+              {latest ? `${((latest.pedestrianCollisionRate ?? 0) * 100).toFixed(0)}%` : '—'}
+            </ValueFlash>
+          </div>
+          <div className="m3-stat">
             <span className="m3-stat-label">ステップ/秒</span>
             <ValueFlash className="m3-stat-value">{latest?.stepsPerSec.toFixed(1) ?? '—'}</ValueFlash>
           </div>
@@ -134,6 +147,10 @@ export function LearningTab() {
         <div className="m3-note">
           学習初期は衝突や道路外への逸脱が多く、車の動きもぎこちないのが正常です。
           これは学習済みモデルの再生ではなく、いま重みが更新されている最中の挙動です。
+          <br />
+          <strong>衝突率</strong>のうち、相手が歩行者だった割合を「うち歩行者」に出しています。
+          歩行者は信号に従って横断するので、<strong>これが増えているときは車が
+          歩行者用信号の青（＝車両側の赤）を無視して交差点へ入っています</strong>。
           <br />
           <strong>車線逸脱</strong>は走るべき車線の中心からどれだけ横にずれているかの平均です。
           市街地の車線幅はおおむね 3m なので、<strong>1.5m を超えると隣の車線や対向車線に
@@ -177,6 +194,15 @@ export function LearningTab() {
           marks={metricsMarks}
           color="var(--m3-error)"
           format={(v) => v.toFixed(2)}
+          height={48}
+        />
+        <MetricsChart
+          title="歩行者との衝突（1 エピソードあたり）"
+          values={series.pedestrianCollisions}
+          revision={revision}
+          marks={metricsMarks}
+          color="var(--m3-error)"
+          format={(v) => `${(v * 100).toFixed(0)}%`}
           height={48}
         />
         <MetricsChart

@@ -33,6 +33,8 @@ export interface MetricsSeries {
   goalRate: number[]
   violations: number[]
   laneDeviation: number[]
+  /** 歩行者との衝突（1 エピソードあたりの割合） */
+  pedestrianCollisions: number[]
 }
 
 function emptyMetricsSeries(): MetricsSeries {
@@ -44,6 +46,7 @@ function emptyMetricsSeries(): MetricsSeries {
     goalRate: [],
     violations: [],
     laneDeviation: [],
+    pedestrianCollisions: [],
   }
 }
 
@@ -365,6 +368,7 @@ export const useSimStore = create<SimStore>((set, get) => ({
           series.goalRate.push(msg.goalRate)
           series.violations.push(msg.signalViolations)
           series.laneDeviation.push(msg.laneDeviation)
+          series.pedestrianCollisions.push(msg.pedestrianCollisionRate ?? 0)
           return { metricsRevision: s.metricsRevision + 1, latestMetrics: msg }
         })
         break

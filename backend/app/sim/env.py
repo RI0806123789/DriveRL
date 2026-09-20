@@ -367,6 +367,7 @@ class SimulationEnv:
         delta = np.clip(delta, -step_limit, step_limit)
 
         collided = self.world.check_collisions() & active_before
+        hit_pedestrian = self.world.pedestrian_hits & active_before
         lateral_abs = np.abs(self.world.lateral)
         offroad = (lateral_abs >= np.float32(config.OFFROAD_LIMIT)) & active_before
 
@@ -424,6 +425,7 @@ class SimulationEnv:
                         self._episode_lateral[slot]
                         / max(1, int(self.world.slots[slot].steps))
                     ),
+                    hit_pedestrian=bool(hit_pedestrian[slot]),
                 )
             )
             self._reset_slot_stats(slot)

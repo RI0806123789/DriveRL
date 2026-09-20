@@ -946,11 +946,13 @@ class SimulationEngine:
             n = len(episodes)
             goal_rate = sum(1 for e in episodes if e.reason == "goal") / n
             collision_rate = sum(1 for e in episodes if e.reason == "collision") / n
+            pedestrian_rate = sum(1 for e in episodes if e.hit_pedestrian) / n
             violations = sum(e.signal_violations for e in episodes) / n
             speeding = sum(e.speed_violations for e in episodes) / n
             lane_deviation = sum(e.lane_deviation for e in episodes) / n
         else:
             mean_reward = mean_length = goal_rate = collision_rate = 0.0
+            pedestrian_rate = 0.0
             violations = speeding = lane_deviation = 0.0
 
         if len(self._step_marks) >= 2:
@@ -972,6 +974,7 @@ class SimulationEngine:
             entropy=float(stats.get("entropy", 0.0)),
             approx_kl=float(stats.get("approx_kl", 0.0)),
             collision_rate=collision_rate,
+            pedestrian_collision_rate=pedestrian_rate,
             goal_rate=goal_rate,
             steps_per_sec=steps_per_sec,
             signal_violations=violations,

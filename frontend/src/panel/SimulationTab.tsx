@@ -190,11 +190,6 @@ export function SimulationTab() {
           onChange={(v) => patchParamsLocal({ pedestrianCount: v })}
           onCommit={(v) => send({ type: 'set_params', params: { pedestrianCount: v } })}
         />
-        <div className="m3-note">
-          街の歩道を歩き、交差点で車道を横断します。擬似カメラにも映るので、
-          <strong>「モデル作成」で歩行者として認識できるようになります</strong>。
-          当たれば衝突と同じ罰が入ります。
-        </div>
         <Slider
           label="シミュレーション速度"
           value={params.simSpeed}

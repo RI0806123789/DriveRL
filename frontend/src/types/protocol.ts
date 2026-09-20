@@ -347,6 +347,8 @@ export interface MetricsMessage {
   approxKl: number
   /** 直近エピソードのうち衝突終了の割合 */
   collisionRate: number
+  /** そのうち歩行者に当たった割合（`collisionRate` にも含まれる） */
+  pedestrianCollisionRate?: number
   goalRate: number
   stepsPerSec: number
   /** 1 エピソードあたりの信号無視回数 */

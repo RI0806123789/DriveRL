@@ -230,6 +230,12 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
 
 `signals` は信号機が 1 基も無いマップでは省略される。
 
+**歩行者用信号は送らない。** 車両信号 `i` が規制するのは、その停止線の先にある
+横断歩道なので、**歩行者用の現示は `signals[i]` の裏返し**（車両が赤なら歩行者は青、
+青・黄なら歩行者は赤）で導ける。灯器の位置も `map.signals` の座標・向き・道路幅から
+決まるため、地図データにも frame にも項目を足していない。
+クライアントは `scene/pedestrianSignalGeometry.ts` でこれを組み立てる。
+
 **`pedestrians`（NPC 歩行者）**
 
 `pedestrianCount` 人ぶんが毎フレーム入る（0 人なら省略）。`id` は 0 から始まるスロット
@@ -416,6 +422,7 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
   "entropy": 1.13,
   "approxKl": 0.008,
   "collisionRate": 0.21,      // 直近エピソードのうち衝突終了の割合
+  "pedestrianCollisionRate": 0.04,  // そのうち相手が歩行者だった割合（collisionRate に含まれる）
   "goalRate": 0.44,
   "stepsPerSec": 19.8,
   "signalViolations": 0.16,   // 1 エピソードあたりの信号無視回数
