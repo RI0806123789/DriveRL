@@ -1,5 +1,33 @@
 /** カメラ位置の計算（純粋関数）。 */
 
+/**
+ * カメラが目標位置を追う強さ [1/秒]。大きいほど速く追いつく。
+ *
+ * ★ **運転席は 0（＝車体に固定）にすること。** カメラは車内にあるので、
+ * 車体に対して動いてはいけない。遅れて追わせると、定常状態で速度に比例した
+ * ずれ（`driverSeatLag()`）が生まれ、**加減速のたびに車内で前後へ滑る**。
+ * 実際に 22 で追わせていて、13.9m/s では 0.63m ぶん揺れていた
+ * （目からダッシュボードまでが 0.51m しかないので、揺れのほうが大きい）。
+ * 追従カメラ（車外から追いかける）は遅れてよいので、こちらは残す。
+ */
+export const DRIVER_FOLLOW_RATE = 0
+export const FOLLOW_FOLLOW_RATE = 4.5
+
+/** 減衰追従の 1 フレームぶんの係数。`rate` が 0 なら毎フレーム目標へ合わせる。 */
+export function followLerpFactor(rate: number, deltaSec: number): number {
+  if (rate <= 0) return 1
+  return 1 - Math.exp(-rate * Math.max(0, deltaSec))
+}
+
+/**
+ * 追従の遅れで生じる、目標に対する定常的なずれ [m]。
+ * 一定速度で走っているとき、カメラは目標より `speed / rate` だけ後ろに居座る。
+ */
+export function driverSeatLag(rate: number, speedMps: number): number {
+  if (rate <= 0) return 0
+  return speedMps / rate
+}
+
 /** 追従カメラの相対位置（車両座標系: 後方 x、上方 y）[m] */
 export const FOLLOW_BACK = 15
 export const FOLLOW_UP = 7.5

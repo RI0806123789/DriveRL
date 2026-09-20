@@ -11,19 +11,20 @@ import { useSimStore } from '../store/simStore'
 import type { MapBounds } from '../types/protocol'
 import { computeAlpha, createPose, sampleVehicle } from './interpolation'
 import {
+  DRIVER_FOLLOW_RATE,
   DRIVER_FOV_DEG,
+  FOLLOW_FOLLOW_RATE,
   driverEye,
   driverLookAt,
   firstActiveSlot,
   followEye,
+  followLerpFactor,
   followLookAt,
 } from './cameraMath'
 import { eyeLookAt, eyePosition } from './pedestrianGeometry'
 import { setCameraNotice } from './sceneStats'
 
 /** 追従・運転席それぞれの追従の速さ（1 秒あたりの寄り具合） */
-const FOLLOW_LERP = 4.5
-const DRIVER_LERP = 22.0
 
 /** 視野角 [度]。運転席は `cameraMath.DRIVER_FOV_DEG` が唯一の出典（検出枠と共有） */
 const FOV_DEFAULT = 50
@@ -146,8 +147,9 @@ export const CameraRig = memo(function CameraRig({ bounds }: CameraRigProps) {
       currentLook.copy(desiredLook)
       initialised.current = true
     } else {
-      const rate = mode === 'driver' ? DRIVER_LERP : FOLLOW_LERP
-      const t = 1 - Math.exp(-rate * delta)
+      // ★ 運転席は rate 0（車体に固定）。遅れて追わせると加減速で車内が前後に滑る
+      const rate = mode === 'driver' ? DRIVER_FOLLOW_RATE : FOLLOW_FOLLOW_RATE
+      const t = followLerpFactor(rate, delta)
       camera.position.lerp(desiredPos, t)
       currentLook.lerp(desiredLook, t)
     }
