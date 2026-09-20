@@ -29,20 +29,45 @@ import {
   lightStateFor,
 } from './vehicleLights'
 import {
+  GAUGE_SLOTS,
+  PEDAL_SLOTS,
   WHEEL_OFFSETS,
   WHEEL_RADIUS,
+  composeFixedMatrix,
   composeLightMatrix,
+  composeNeedleMatrix,
+  composePedalMatrix,
   composePlateMatrix,
+  composeSteeringMatrix,
   composeVehicleMatrix,
   composeWheelMatrix,
   createTransformScratch,
   makeBodyGeometry,
-  makeCabinGeometry,
+  makeGaugeFaceGeometry,
+  makeGlassGeometry,
+  makeInteriorGeometry,
   makeLightGeometry,
+  makeNeedleGeometry,
   makeNoseGeometry,
+  makePedalGeometry,
   makePlateGeometry,
+  makeSteeringGeometry,
   makeWheelGeometry,
 } from './vehicleGeometry'
+
+/** 1 台あたりのペダル・メーターの数 */
+const PEDALS_PER_VEHICLE = PEDAL_SLOTS.length
+const GAUGES_PER_VEHICLE = GAUGE_SLOTS.length
+
+/**
+ * 擬似的なエンジン回転数 0..1。アイドルから、アクセル開度と速度で上がる。
+ * **実車の回転数を模しているだけで、物理には一切効かない。**
+ */
+function tachoRatio(speed: number, maxSpeed: number, throttle: number): number {
+  const load = Math.max(0, throttle)
+  const cruise = maxSpeed > 0 ? Math.min(1, speed / maxSpeed) : 0
+  return Math.min(1, 0.12 + load * 0.5 + cruise * 0.45)
+}
 
 const ringGeom = new THREE.TorusGeometry(2.9, 0.08, 8, 44)
 ringGeom.rotateX(-Math.PI / 2)
@@ -132,7 +157,12 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
 
   const bodyRef = useRef<THREE.InstancedMesh>(null)
   const noseRef = useRef<THREE.InstancedMesh>(null)
-  const cabinRef = useRef<THREE.InstancedMesh>(null)
+  const glassRef = useRef<THREE.InstancedMesh>(null)
+  const interiorRef = useRef<THREE.InstancedMesh>(null)
+  const steeringRef = useRef<THREE.InstancedMesh>(null)
+  const pedalRef = useRef<THREE.InstancedMesh>(null)
+  const gaugeRef = useRef<THREE.InstancedMesh>(null)
+  const needleRef = useRef<THREE.InstancedMesh>(null)
   const wheelRef = useRef<THREE.InstancedMesh>(null)
   const lightRef = useRef<THREE.InstancedMesh>(null)
   const plateRef = useRef<THREE.InstancedMesh>(null)
@@ -149,7 +179,12 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
   const resources = useMemo(() => {
     const bodyGeometry = makeBodyGeometry()
     const noseGeometry = makeNoseGeometry()
-    const cabinGeometry = makeCabinGeometry()
+    const glassGeometry = makeGlassGeometry()
+    const interiorGeometry = makeInteriorGeometry()
+    const steeringGeometry = makeSteeringGeometry()
+    const pedalGeometry = makePedalGeometry()
+    const gaugeGeometry = makeGaugeFaceGeometry(GAUGE_SLOTS[0].radius)
+    const needleGeometry = makeNeedleGeometry(GAUGE_SLOTS[0].radius)
     const wheelGeometry = makeWheelGeometry()
     const lightGeometry = makeLightGeometry(LIGHT_SIZE)
     const plateGeometry = makePlateGeometry(PLATE_W, PLATE_H)
@@ -178,10 +213,41 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
     })
     attachInstanceEmissive(bodyMaterial)
 
+    // ★ ガラスは**両面**で描く。片面だと運転席から外が見えるかわりに、
+    //   内側から見たとき窓が消えて「屋根が無い車」になる
     const glassMaterial = new THREE.MeshStandardMaterial({
       color: palette.vehicleGlass,
-      roughness: 0.25,
-      metalness: 0.6,
+      roughness: 0.12,
+      metalness: 0.35,
+      transparent: true,
+      opacity: 0.42,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+    })
+    const interiorMaterial = new THREE.MeshStandardMaterial({
+      color: palette.vehicleInterior,
+      roughness: 0.85,
+      metalness: 0.05,
+      side: THREE.DoubleSide,
+    })
+    const trimMaterial = new THREE.MeshStandardMaterial({
+      color: palette.vehicleTrim,
+      roughness: 0.6,
+      metalness: 0.15,
+      side: THREE.DoubleSide,
+    })
+    const gaugeMaterial = new THREE.MeshStandardMaterial({
+      color: palette.vehicleGauge,
+      roughness: 0.4,
+      metalness: 0.0,
+      side: THREE.DoubleSide,
+    })
+    // 針は暗い車内でも読めるよう自己発光させる（実車の照明の代わり）
+    const needleMaterial = new THREE.MeshStandardMaterial({
+      color: palette.vehicleNeedle,
+      emissive: new THREE.Color(palette.vehicleNeedle).multiplyScalar(0.6),
+      roughness: 0.5,
+      toneMapped: false,
     })
     const wheelMaterial = new THREE.MeshStandardMaterial({
       color: palette.vehicleWheel,
@@ -237,7 +303,16 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
     return {
       bodyGeometry,
       noseGeometry,
-      cabinGeometry,
+      glassGeometry,
+      interiorGeometry,
+      steeringGeometry,
+      pedalGeometry,
+      gaugeGeometry,
+      needleGeometry,
+      interiorMaterial,
+      trimMaterial,
+      gaugeMaterial,
+      needleMaterial,
       wheelGeometry,
       lightGeometry,
       plateGeometry,
@@ -291,10 +366,17 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
     }
   }, [resources, count, presetId])
 
+  // ★ 色だけ差し替える。マテリアルを作り直すと `args` が変わり、
+  //   instancedMesh が count=0 に戻って車が消える（code_review S-01）
   useEffect(() => {
     resources.glassMaterial.color.set(palette.vehicleGlass)
     resources.wheelMaterial.color.set(palette.vehicleWheel)
     resources.ringMaterial.color.set(palette.vehicleHighlight)
+    resources.interiorMaterial.color.set(palette.vehicleInterior)
+    resources.trimMaterial.color.set(palette.vehicleTrim)
+    resources.gaugeMaterial.color.set(palette.vehicleGauge)
+    resources.needleMaterial.color.set(palette.vehicleNeedle)
+    resources.needleMaterial.emissive.set(palette.vehicleNeedle).multiplyScalar(0.6)
     lastState.current.fill(-1)
   }, [resources, palette])
 
@@ -303,7 +385,16 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
     return () => {
       r.bodyGeometry.dispose()
       r.noseGeometry.dispose()
-      r.cabinGeometry.dispose()
+      r.glassGeometry.dispose()
+      r.interiorGeometry.dispose()
+      r.steeringGeometry.dispose()
+      r.pedalGeometry.dispose()
+      r.gaugeGeometry.dispose()
+      r.needleGeometry.dispose()
+      r.interiorMaterial.dispose()
+      r.trimMaterial.dispose()
+      r.gaugeMaterial.dispose()
+      r.needleMaterial.dispose()
       r.wheelGeometry.dispose()
       r.lightGeometry.dispose()
       r.plateGeometry.dispose()
@@ -333,18 +424,24 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
   useFrame((_state, delta) => {
     const body = bodyRef.current
     const nose = noseRef.current
-    const cabin = cabinRef.current
+    const glass = glassRef.current
+    const interior = interiorRef.current
+    const steering = steeringRef.current
+    const pedals = pedalRef.current
+    const gauges = gaugeRef.current
+    const needles = needleRef.current
     const wheel = wheelRef.current
     const lights = lightRef.current
     const plates = plateRef.current
-    if (!body || !nose || !cabin || !wheel || !lights || !plates) return
+    if (!body || !nose || !glass || !interior || !wheel || !lights || !plates) return
+    if (!steering || !pedals || !gauges || !needles) return
     if (lastState.current.length !== count) return
 
     const store = useSimStore.getState()
     const paused = store.status.renderPaused
     const alpha = computeAlpha(performance.now(), paused)
     const followTarget = store.followTarget
-    const driverView = store.cameraMode === 'driver'
+    const maxSpeed = Math.max(0.1, store.params.maxSpeed)
 
     const now = performance.now()
     const flash = 0.5 + 0.5 * Math.sin(now * 0.018)
@@ -363,12 +460,22 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
 
     for (let id = 0; id < count; id++) {
       const ok = sampleVehicle(id, alpha, pose)
-      const hiddenAsEgo = driverView && followTarget === id
-      if (!ok || hiddenAsEgo) {
+      // ★ 運転席視点でも自車を消さない。外板は裏面が描かれないので視界を塞がず、
+      //   内装とハンドルだけが見える（消すと運転席に何も無い画になる）
+      if (!ok) {
         body.setMatrixAt(id, scratch.hidden)
         nose.setMatrixAt(id, scratch.hidden)
-        cabin.setMatrixAt(id, scratch.hidden)
+        glass.setMatrixAt(id, scratch.hidden)
+        interior.setMatrixAt(id, scratch.hidden)
+        steering.setMatrixAt(id, scratch.hidden)
         for (let k = 0; k < 4; k++) wheel.setMatrixAt(id * 4 + k, scratch.hidden)
+        for (let k = 0; k < PEDALS_PER_VEHICLE; k++) {
+          pedals.setMatrixAt(id * PEDALS_PER_VEHICLE + k, scratch.hidden)
+        }
+        for (let k = 0; k < GAUGES_PER_VEHICLE; k++) {
+          gauges.setMatrixAt(id * GAUGES_PER_VEHICLE + k, scratch.hidden)
+          needles.setMatrixAt(id * GAUGES_PER_VEHICLE + k, scratch.hidden)
+        }
         for (let k = 0; k < LIGHTS_PER_VEHICLE; k++) {
           lights.setMatrixAt(id * LIGHTS_PER_VEHICLE + k, scratch.hidden)
         }
@@ -384,7 +491,28 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
 
       body.setMatrixAt(id, scratch.base)
       nose.setMatrixAt(id, scratch.base)
-      cabin.setMatrixAt(id, scratch.base)
+      glass.setMatrixAt(id, scratch.base)
+      interior.setMatrixAt(id, scratch.base)
+
+      // 可動部。**サーバーが送ってきた指令（steer / throttle）だけで決める**
+      composeSteeringMatrix(scratch.transform, scratch.base, pose.steer, scratch.out)
+      steering.setMatrixAt(id, scratch.out)
+
+      for (let k = 0; k < PEDALS_PER_VEHICLE; k++) {
+        composePedalMatrix(scratch.transform, scratch.base, k, pose.throttle, scratch.out)
+        pedals.setMatrixAt(id * PEDALS_PER_VEHICLE + k, scratch.out)
+      }
+
+      const ratios = [
+        Math.min(1, pose.speed / maxSpeed),
+        tachoRatio(pose.speed, maxSpeed, pose.throttle),
+      ]
+      for (let k = 0; k < GAUGES_PER_VEHICLE; k++) {
+        composeFixedMatrix(scratch.transform, scratch.base, GAUGE_SLOTS[k].center, scratch.out)
+        gauges.setMatrixAt(id * GAUGES_PER_VEHICLE + k, scratch.out)
+        composeNeedleMatrix(scratch.transform, scratch.base, k, ratios[k], scratch.out)
+        needles.setMatrixAt(id * GAUGES_PER_VEHICLE + k, scratch.out)
+      }
 
       for (let k = 0; k < WHEEL_OFFSETS.length; k++) {
         composeWheelMatrix(
@@ -474,7 +602,12 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
 
     body.instanceMatrix.needsUpdate = true
     nose.instanceMatrix.needsUpdate = true
-    cabin.instanceMatrix.needsUpdate = true
+    glass.instanceMatrix.needsUpdate = true
+    interior.instanceMatrix.needsUpdate = true
+    steering.instanceMatrix.needsUpdate = true
+    pedals.instanceMatrix.needsUpdate = true
+    gauges.instanceMatrix.needsUpdate = true
+    needles.instanceMatrix.needsUpdate = true
     wheel.instanceMatrix.needsUpdate = true
     lights.instanceMatrix.needsUpdate = true
     plates.instanceMatrix.needsUpdate = true
@@ -521,11 +654,43 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
         args={[resources.noseGeometry, resources.bodyMaterial, count]}
         frustumCulled={false}
       />
+      {/* ★ 内装はガラスより先に描く。半透明のガラスは depthWrite を切ってあるので、
+          後から描くと中身が見えなくなる */}
       <instancedMesh
-        key={`cabin-${count}`}
-        ref={cabinRef}
-        args={[resources.cabinGeometry, resources.glassMaterial, count]}
-        castShadow={castShadow}
+        key={`interior-${count}`}
+        ref={interiorRef}
+        args={[resources.interiorGeometry, resources.interiorMaterial, count]}
+        frustumCulled={false}
+      />
+      <instancedMesh
+        key={`steering-${count}`}
+        ref={steeringRef}
+        args={[resources.steeringGeometry, resources.trimMaterial, count]}
+        frustumCulled={false}
+      />
+      <instancedMesh
+        key={`pedal-${count}`}
+        ref={pedalRef}
+        args={[resources.pedalGeometry, resources.trimMaterial, count * PEDALS_PER_VEHICLE]}
+        frustumCulled={false}
+      />
+      <instancedMesh
+        key={`gauge-${count}`}
+        ref={gaugeRef}
+        args={[resources.gaugeGeometry, resources.gaugeMaterial, count * GAUGES_PER_VEHICLE]}
+        frustumCulled={false}
+      />
+      <instancedMesh
+        key={`needle-${count}`}
+        ref={needleRef}
+        args={[resources.needleGeometry, resources.needleMaterial, count * GAUGES_PER_VEHICLE]}
+        frustumCulled={false}
+      />
+      <instancedMesh
+        key={`glass-${count}`}
+        ref={glassRef}
+        args={[resources.glassGeometry, resources.glassMaterial, count]}
+        renderOrder={2}
         frustumCulled={false}
       />
       <instancedMesh

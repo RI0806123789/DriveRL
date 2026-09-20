@@ -4,19 +4,48 @@ import * as THREE from 'three'
 import {
   BODY_OFFSET,
   CABIN_OFFSET,
+  COLUMN_TILT,
+  DASH_REAR_X,
+  DRIVER_SEAT_Z,
+  GAUGE_SLOTS,
+  NEEDLE_START,
+  NEEDLE_SWEEP,
   NOSE_OFFSET,
+  PASSENGER_SEAT_Z,
+  PEDAL_SLOTS,
+  PEDAL_TRAVEL,
+  STEERING_CENTER,
+  STEERING_RADIUS,
+  STEERING_RATIO,
+  VEHICLE_HEIGHT,
+  VEHICLE_LENGTH,
+  VEHICLE_WIDTH,
   WHEEL_OFFSETS,
   WHEEL_RADIUS,
+  composeFixedMatrix,
+  composeNeedleMatrix,
+  composePedalMatrix,
+  composeSteeringMatrix,
   composeVehicleMatrix,
   composeWheelMatrix,
   createTransformScratch,
   makeBodyGeometry,
   makeCabinGeometry,
+  makeGaugeFaceGeometry,
+  makeGlassGeometry,
+  makeInteriorGeometry,
+  makeNeedleGeometry,
   makeNoseGeometry,
+  makePedalGeometry,
+  makeSteeringGeometry,
+  needleAngle,
+  pedalPress,
+  steeringAngle,
   composeLightMatrix,
   composePlateMatrix,
   makeWheelGeometry,
 } from '../src/scene/vehicleGeometry.ts'
+import { DRIVER_EYE_HEIGHT, DRIVER_FORWARD, DRIVER_RIGHT } from '../src/scene/cameraMath.ts'
 import {
   DEFAULT_REGION,
   PLATES_PER_VEHICLE,
@@ -438,6 +467,305 @@ function state(over: Partial<Parameters<typeof lightStateFor>[0]>) {
   check(
     '点滅のデューティは半分',
     blinkOn(0) && !blinkOn(period * 0.75) && blinkOn(period),
+  )
+}
+
+console.log()
+console.log('='.repeat(70))
+console.log('車体の作り込み（外接寸法・窓・内装）')
+console.log('='.repeat(70))
+
+/** ジオメトリの外接箱 */
+function boundsOf(g: THREE.BufferGeometry): THREE.Box3 {
+  g.computeBoundingBox()
+  return g.boundingBox!.clone()
+}
+
+{
+  // ★ ここが一番大事。外接寸法は backend の `config.VEHICLE_*` と揃っていて、
+  //   衝突判定と擬似カメラの検出枠がこれを前提にしている。はみ出すと
+  //   「当たっていないのに当たる」「枠から車がはみ出す」が起きる
+  const limitX = VEHICLE_LENGTH / 2
+  const limitZ = VEHICLE_WIDTH / 2
+  const pieces: Array<[string, THREE.BufferGeometry]> = [
+    ['車体', makeBodyGeometry()],
+    ['ボンネットの飾り', makeNoseGeometry()],
+    ['窓ガラス', makeGlassGeometry()],
+    ['内装', makeInteriorGeometry()],
+  ]
+  for (const [name, g] of pieces) {
+    const b = boundsOf(g)
+    const ok =
+      b.min.x >= -limitX - 1e-6 &&
+      b.max.x <= limitX + 1e-6 &&
+      b.min.y >= -1e-6 &&
+      b.max.y <= VEHICLE_HEIGHT + 1e-6 &&
+      b.min.z >= -limitZ - 1e-6 &&
+      b.max.z <= limitZ + 1e-6
+    check(
+      name + 'が外接寸法 ' + VEHICLE_LENGTH + '×' + VEHICLE_WIDTH + '×' + VEHICLE_HEIGHT + 'm に収まる',
+      ok,
+      'X[' + b.min.x.toFixed(2) + ', ' + b.max.x.toFixed(2) + '] Y[' +
+        b.min.y.toFixed(2) + ', ' + b.max.y.toFixed(2) + '] Z[' +
+        b.min.z.toFixed(2) + ', ' + b.max.z.toFixed(2) + ']',
+    )
+    g.dispose()
+  }
+}
+
+{
+  const body = makeBodyGeometry()
+  const glass = makeGlassGeometry()
+  const bb = boundsOf(body)
+  const gb = boundsOf(glass)
+  check('窓はベルトラインより上にある', gb.min.y > 0.9, '窓の下端 ' + gb.min.y.toFixed(2) + 'm')
+  check(
+    '窓は車体の幅を越えない',
+    gb.max.z <= bb.max.z + 1e-6,
+    '窓 ' + gb.max.z.toFixed(2) + 'm / 車体 ' + bb.max.z.toFixed(2) + 'm',
+  )
+  body.dispose()
+  glass.dispose()
+}
+
+{
+  // 運転席は右（+Z）。`cameraMath` のアイポイントと同じ側でないと、
+  // 運転席視点なのに助手席に座ることになる
+  check(
+    '運転席は右ハンドル側（cameraMath と同じ +Z）',
+    Math.sign(DRIVER_SEAT_Z) === Math.sign(DRIVER_RIGHT) && DRIVER_SEAT_Z > 0,
+    '座席 ' + DRIVER_SEAT_Z.toFixed(2) + ' / カメラ ' + DRIVER_RIGHT.toFixed(2),
+  )
+  check('助手席は反対側にある', Math.sign(PASSENGER_SEAT_Z) === -Math.sign(DRIVER_SEAT_Z))
+  check(
+    'ハンドルは運転席の正面（アイポイントより前）にある',
+    Math.abs(STEERING_CENTER[2] - DRIVER_SEAT_Z) < 1e-6 && STEERING_CENTER[0] > DRIVER_FORWARD,
+    'ハンドル X=' + STEERING_CENTER[0].toFixed(2) + ' / アイポイント X=' + DRIVER_FORWARD.toFixed(2),
+  )
+  check(
+    'アイポイントはハンドルより上（メーターを見下ろせる）',
+    DRIVER_EYE_HEIGHT > STEERING_CENTER[1],
+    '目 ' + DRIVER_EYE_HEIGHT.toFixed(2) + 'm / ハンドル ' + STEERING_CENTER[1].toFixed(2) + 'm',
+  )
+  // ★ ダッシュボードを目へ近づけすぎると、運転席視点の下半分が壁で埋まる。
+  //   最初 0.52m に置いて、目の 0.17m 先が壁になり前が見えなくなった
+  const legroom = DASH_REAR_X - DRIVER_FORWARD
+  check(
+    'アイポイントからダッシュボードまで 0.3m 以上ある',
+    legroom >= 0.3,
+    legroom.toFixed(2) + 'm',
+  )
+}
+
+console.log()
+console.log('='.repeat(70))
+console.log('可動部（ハンドル・ペダル・メーター）')
+console.log('='.repeat(70))
+
+{
+  // 実車のギア比。最大舵角 0.55rad でおよそ 1.5 回転（540 度）になる
+  const full = steeringAngle(0.55)
+  const turns = full / (Math.PI * 2)
+  check(
+    '最大舵角でハンドルが ' + turns.toFixed(2) + ' 回転する',
+    turns > 1.2 && turns < 1.8,
+    ((full * 180) / Math.PI).toFixed(0) + ' 度 / 比 ' + STEERING_RATIO,
+  )
+  check('舵角 0 でハンドルも 0', Math.abs(steeringAngle(0)) < 1e-12)
+  check('左右で符号が反転する', Math.abs(steeringAngle(0.3) + steeringAngle(-0.3)) < 1e-12)
+}
+
+{
+  composeVehicleMatrix(scratch, 0, 0, 0, base)
+  const centre = new THREE.Vector3(STEERING_CENTER[0], STEERING_CENTER[1], STEERING_CENTER[2])
+
+  // ★ 回しても中心が動かないこと。ジオメトリ側を傾けていると回転軸まで傾き、
+  //   「斜めに首を振る」動きになる
+  let worst = 0
+  for (const steer of [-0.5, -0.2, 0, 0.2, 0.5]) {
+    composeSteeringMatrix(scratch, base, steer, out)
+    const pos = new THREE.Vector3().setFromMatrixPosition(out)
+    worst = Math.max(worst, pos.distanceTo(centre))
+  }
+  check('ハンドルは回しても中心が動かない', worst < 1e-9, '最大 ' + worst.toExponential(1) + 'm')
+
+  const top = new THREE.Vector3(0, STEERING_RADIUS, 0)
+  composeSteeringMatrix(scratch, base, 0, out)
+  const neutral = top.clone().applyMatrix4(out)
+  composeSteeringMatrix(scratch, base, 0.1, out)
+  const left = top.clone().applyMatrix4(out)
+  check(
+    '左へ切るとリムの上端が左（-Z）へ回る',
+    left.z < neutral.z - 1e-3,
+    'Z ' + neutral.z.toFixed(3) + ' → ' + left.z.toFixed(3),
+  )
+
+  composeSteeringMatrix(scratch, base, 0, out)
+  const normal = new THREE.Vector3(1, 0, 0).transformDirection(out)
+  const tilt = Math.asin(Math.max(-1, Math.min(1, normal.y)))
+  check(
+    'ハンドル面がコラムの傾き ' + ((COLUMN_TILT * 180) / Math.PI).toFixed(0) + ' 度で寝ている',
+    Math.abs(Math.abs(tilt) - COLUMN_TILT) < 1e-6,
+    ((tilt * 180) / Math.PI).toFixed(1) + ' 度',
+  )
+}
+
+{
+  check(
+    'アクセルは加速指令が正のときだけ踏まれる',
+    pedalPress('throttle', 0.8) === 0.8 && pedalPress('throttle', -0.8) === 0,
+  )
+  check(
+    'ブレーキは負のときだけ踏まれる',
+    pedalPress('brake', -0.8) === 0.8 && pedalPress('brake', 0.8) === 0,
+  )
+  check('踏み込みは 0..1 に収まる', pedalPress('throttle', 3) === 1 && pedalPress('brake', -3) === 1)
+
+  composeVehicleMatrix(scratch, 0, 0, 0, base)
+  const tip = new THREE.Vector3(0, -0.22, 0)
+  for (let k = 0; k < PEDAL_SLOTS.length; k++) {
+    const kind = PEDAL_SLOTS[k].kind
+    const name = kind === 'throttle' ? 'アクセル' : 'ブレーキ'
+    const press = kind === 'throttle' ? 1 : -1
+    composePedalMatrix(scratch, base, k, 0, out)
+    const rest = tip.clone().applyMatrix4(out)
+    composePedalMatrix(scratch, base, k, press, out)
+    const down = tip.clone().applyMatrix4(out)
+    check(
+      name + 'を踏むと踏面が前方（+X）へ回る',
+      down.x > rest.x + 1e-3,
+      'X ' + rest.x.toFixed(3) + ' → ' + down.x.toFixed(3),
+    )
+    const pivot = new THREE.Vector3(
+      PEDAL_SLOTS[k].pivot[0],
+      PEDAL_SLOTS[k].pivot[1],
+      PEDAL_SLOTS[k].pivot[2],
+    )
+    const at = new THREE.Vector3().setFromMatrixPosition(out)
+    check(name + 'の支点は動かない', at.distanceTo(pivot) < 1e-9)
+    check(
+      name + 'は運転席側にある',
+      Math.sign(PEDAL_SLOTS[k].pivot[2]) === Math.sign(DRIVER_SEAT_Z),
+      'Z=' + PEDAL_SLOTS[k].pivot[2].toFixed(2),
+    )
+  }
+  check(
+    '踏み切っても ' + ((PEDAL_TRAVEL * 180) / Math.PI).toFixed(0) + ' 度までしか回らない',
+    PEDAL_TRAVEL > 0.1 && PEDAL_TRAVEL < 0.8,
+  )
+}
+
+{
+  check(
+    '針は 0 で始点、1 で終点を指す',
+    needleAngle(0) === NEEDLE_START &&
+      Math.abs(needleAngle(1) - (NEEDLE_START + NEEDLE_SWEEP)) < 1e-12,
+  )
+  check(
+    '針は範囲の外を指さない',
+    needleAngle(-1) === NEEDLE_START && needleAngle(2) === NEEDLE_START + NEEDLE_SWEEP,
+  )
+  check(
+    '針の振れ角は 1 回転に満たない',
+    NEEDLE_SWEEP > 0 && NEEDLE_SWEEP < Math.PI * 2,
+    ((NEEDLE_SWEEP * 180) / Math.PI).toFixed(0) + ' 度',
+  )
+
+  composeVehicleMatrix(scratch, 0, 0, 0, base)
+  const tipLocal = new THREE.Vector3(0, GAUGE_SLOTS[0].radius * 0.8, 0)
+  composeNeedleMatrix(scratch, base, 0, 0, out)
+  const slow = tipLocal.clone().applyMatrix4(out)
+  composeNeedleMatrix(scratch, base, 0, 1, out)
+  const fast = tipLocal.clone().applyMatrix4(out)
+  check('針は速度で動く', slow.distanceTo(fast) > 0.05, slow.distanceTo(fast).toFixed(3) + 'm')
+
+  for (let k = 0; k < GAUGE_SLOTS.length; k++) {
+    composeFixedMatrix(scratch, base, GAUGE_SLOTS[k].center, out)
+    const face = new THREE.Vector3().setFromMatrixPosition(out)
+    composeNeedleMatrix(scratch, base, k, 0.5, out)
+    const pivot = new THREE.Vector3().setFromMatrixPosition(out)
+    check(
+      'メーター ' + k + ' の針が文字盤の中心にある',
+      face.distanceTo(pivot) < 0.02,
+      face.distanceTo(pivot).toFixed(4) + 'm',
+    )
+  }
+
+  const faceGeom = makeGaugeFaceGeometry(GAUGE_SLOTS[0].radius)
+  const fb = boundsOf(faceGeom)
+  check(
+    '文字盤は薄い板になっている',
+    fb.max.x - fb.min.x < 1e-6,
+    '厚み ' + (fb.max.x - fb.min.x).toExponential(1) + 'm',
+  )
+  faceGeom.dispose()
+}
+
+{
+  const steeringGeom = makeSteeringGeometry()
+  const sb = boundsOf(steeringGeom)
+  const reach = Math.max(Math.abs(sb.min.y), sb.max.y, Math.abs(sb.min.z), sb.max.z)
+  check(
+    'ハンドルは回してもキャビンの中に収まる',
+    STEERING_CENTER[1] + reach < VEHICLE_HEIGHT &&
+      Math.abs(STEERING_CENTER[2]) + reach < VEHICLE_WIDTH / 2,
+    '半径 ' + reach.toFixed(3) + 'm',
+  )
+  steeringGeom.dispose()
+
+  const pedalGeom = makePedalGeometry()
+  const pb = boundsOf(pedalGeom)
+  check('ペダルは支点が原点にある', Math.abs(pb.max.y) < 1e-6, '上端 ' + pb.max.y.toFixed(4) + 'm')
+  pedalGeom.dispose()
+
+  const needleGeom = makeNeedleGeometry(GAUGE_SLOTS[0].radius)
+  const nb = boundsOf(needleGeom)
+  check('針は根元が原点にある', Math.abs(nb.min.y) < 1e-6, '下端 ' + nb.min.y.toFixed(4) + 'm')
+  check('針は文字盤からはみ出さない', nb.max.y <= GAUGE_SLOTS[0].radius + 1e-6)
+  needleGeom.dispose()
+}
+
+console.log()
+console.log('='.repeat(70))
+console.log('描画コスト（台数によらず一定であること）')
+console.log('='.repeat(70))
+
+{
+  /**
+   * 1 台あたりの部品と個数。**instancedMesh の数 = ドローコールの数**なので、
+   * 部品を増やすほどここが伸びる。
+   */
+  const parts: Array<[string, () => THREE.BufferGeometry, number]> = [
+    ['車体', makeBodyGeometry, 1],
+    ['ボンネットの飾り', makeNoseGeometry, 1],
+    ['窓ガラス', makeGlassGeometry, 1],
+    ['内装', makeInteriorGeometry, 1],
+    ['ハンドル', makeSteeringGeometry, 1],
+    ['ペダル', makePedalGeometry, PEDAL_SLOTS.length],
+    ['文字盤', () => makeGaugeFaceGeometry(GAUGE_SLOTS[0].radius), GAUGE_SLOTS.length],
+    ['針', () => makeNeedleGeometry(GAUGE_SLOTS[0].radius), GAUGE_SLOTS.length],
+    ['車輪', makeWheelGeometry, WHEEL_OFFSETS.length],
+  ]
+
+  let tris = 0
+  for (const [, make, n] of parts) {
+    const g = make()
+    const count = g.index ? g.index.count / 3 : g.attributes.position.count / 3
+    tris += count * n
+    g.dispose()
+  }
+
+  // 金沢は建物 35,607 棟・標識 15,719 本がある。車の作り込みがそれに並ぶと
+  // 重いフレームの原因が読めなくなるので、1 台 3,000 三角形を上限にしておく
+  check(
+    '1 台あたりの三角形が 3,000 以下',
+    tris <= 3000,
+    Math.round(tris) + ' 三角形（8 台で ' + Math.round(tris * 8) + '）',
+  )
+  check(
+    '部品ごとの instancedMesh が 15 個以下',
+    parts.length + 2 <= 15,
+    (parts.length + 2) + ' 個（灯体・プレートを含む。台数によらず一定）',
   )
 }
 
