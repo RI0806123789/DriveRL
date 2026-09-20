@@ -1,4 +1,4 @@
-/** 車両の姿勢・部品の取り付け位置・ライトの点灯条件を検証する（ブラウザ不要）。 */
+/** 車両の姿勢・部品の位置・ライト・ナンバープレートを検証する（ブラウザ不要）。 */
 
 import * as THREE from 'three'
 import {
@@ -14,8 +14,20 @@ import {
   makeCabinGeometry,
   makeNoseGeometry,
   composeLightMatrix,
+  composePlateMatrix,
   makeWheelGeometry,
 } from '../src/scene/vehicleGeometry.ts'
+import {
+  DEFAULT_REGION,
+  PLATES_PER_VEHICLE,
+  PLATE_H,
+  PLATE_SLOTS,
+  PLATE_W,
+  plateRegion,
+  plateSerial,
+  plateTextFor,
+  plateUvRow,
+} from '../src/scene/licensePlate.ts'
 import {
   BLINK_HZ,
   HEADLIGHT_FOG,
@@ -224,6 +236,78 @@ for (const [name, geom, offset] of cases) {
   const hidden = new THREE.Matrix4().makeScale(0, 0, 0)
   const p = new THREE.Vector3(1, 1, 1).applyMatrix4(hidden)
   check('非表示スロットの行列が 1 点に潰れる', p.lengthSq() === 0)
+}
+
+console.log()
+console.log('='.repeat(70))
+console.log('ナンバープレート（日本の中型・自家用）')
+console.log('='.repeat(70))
+
+{
+  check('中型プレートの実寸は 330 × 165mm', PLATE_W === 0.33 && PLATE_H === 0.165)
+  check('前後に 1 枚ずつ', PLATES_PER_VEHICLE === 2)
+  check(
+    '前のプレートは車体の前、後ろのプレートは後ろ',
+    PLATE_SLOTS[0].position[0] > 0 && PLATE_SLOTS[1].position[0] < 0,
+  )
+  check(
+    'どちらも車体の中心線上（左右にずれていない）',
+    PLATE_SLOTS.every((p) => p.position[2] === 0),
+  )
+  check(
+    'バンパーの高さに収まる（地面より上・屋根より下）',
+    PLATE_SLOTS.every((p) => p.position[1] > 0.2 && p.position[1] < 1),
+  )
+}
+
+{
+  // ★ 後ろのプレートが前を向いていると、真後ろから見て裏面（無地）しか見えない
+  const scratch = createTransformScratch()
+  const base = new THREE.Matrix4()
+  const out = new THREE.Matrix4()
+  composeVehicleMatrix(scratch, 0, 0, 0, base)
+
+  const normals = PLATE_SLOTS.map((slot) => {
+    composePlateMatrix(scratch, base, slot.position, slot.yaw, out)
+    const n = new THREE.Vector3(1, 0, 0).transformDirection(out)
+    return n
+  })
+  check('前のプレートは車の前方を向く', normals[0].x > 0.99, `x=${normals[0].x.toFixed(2)}`)
+  check('後ろのプレートは真後ろを向く', normals[1].x < -0.99, `x=${normals[1].x.toFixed(2)}`)
+}
+
+{
+  // 一連指定番号は上位を中黒で埋め、4 桁のときだけハイフンを挟む
+  check('1 桁は中黒 3 つで埋める', plateSerial(0) === '・・・0', plateSerial(0))
+  check('車両 #7 は ・・・7', plateSerial(7) === '・・・7', plateSerial(7))
+  check('2 桁', plateSerial(12) === '・・12', plateSerial(12))
+  check('3 桁', plateSerial(123) === '・123', plateSerial(123))
+  check('4 桁だけハイフンが入る', plateSerial(1234) === '12-34', plateSerial(1234))
+  check('どの桁でも 4 文字幅に収まる', [0, 9, 42, 700, 8888].every((n) => plateSerial(n).length <= 5))
+}
+
+{
+  check('銀座は品川ナンバー', plateRegion('ginza') === '品川')
+  check('金沢は石川ナンバー', plateRegion('kanazawa') === '石川')
+  check('未知のプリセットは既定の地名', plateRegion('unknown') === DEFAULT_REGION)
+  check('プリセット未選択でも落ちない', plateRegion(null) === DEFAULT_REGION)
+
+  const text = plateTextFor(3, 'umeda')
+  check(
+    'プレートの文字が 4 つとも揃う',
+    text.region === 'なにわ' && text.classNumber === '300' && text.kana.length === 1 &&
+      text.serial === '・・・3',
+    `${text.region} ${text.classNumber} ${text.kana} ${text.serial}`,
+  )
+}
+
+{
+  // ★ Canvas は上から 0,1,2… と描くが、テクスチャの v は下から数える
+  const count = 8
+  const rows = Array.from({ length: count }, (_, i) => plateUvRow(i, count))
+  check('段は 0〜count-1 に収まる', rows.every((r) => r >= 0 && r < count))
+  check('車両ごとに違う段を使う', new Set(rows).size === count)
+  check('車両 #0 はいちばん上の段（v では最後）', rows[0] === count - 1, `row=${rows[0]}`)
 }
 
 console.log()

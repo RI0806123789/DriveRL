@@ -8,6 +8,14 @@ import { frameBuffer } from '../store/frameBuffer'
 import { useSimStore } from '../store/simStore'
 import { isWaitingPhase } from '../types/protocol'
 import { computeAlpha, createPose, sampleVehicle } from './interpolation'
+import {
+  PLATES_PER_VEHICLE,
+  PLATE_H,
+  PLATE_SLOTS,
+  PLATE_W,
+  plateUvRow,
+} from './licensePlate'
+import { createPlateAtlas } from './licensePlateTexture'
 import { VEHICLE_LIGHT_COLORS, VEHICLE_LIGHT_OFF } from './palette'
 import { usePalette } from './usePalette'
 import { vehicleColor } from './vehicleColors'
@@ -24,6 +32,7 @@ import {
   WHEEL_OFFSETS,
   WHEEL_RADIUS,
   composeLightMatrix,
+  composePlateMatrix,
   composeVehicleMatrix,
   composeWheelMatrix,
   createTransformScratch,
@@ -31,6 +40,7 @@ import {
   makeCabinGeometry,
   makeLightGeometry,
   makeNoseGeometry,
+  makePlateGeometry,
   makeWheelGeometry,
 } from './vehicleGeometry'
 
@@ -76,6 +86,29 @@ function attachInstanceEmissive(material: THREE.MeshStandardMaterial): void {
   material.customProgramCacheKey = () => 'instanceEmissive'
 }
 
+/**
+ * 1 枚のアトラスから「そのインスタンスの段」だけを貼る。
+ * **instancedMesh は 1 つのテクスチャしか持てない**ので、8 台ぶんを縦に並べて UV をずらす。
+ */
+function attachPlateAtlas(material: THREE.MeshStandardMaterial, count: number): void {
+  const rows = Math.max(1, count).toFixed(1)
+  material.onBeforeCompile = (shader) => {
+    shader.vertexShader = shader.vertexShader
+      .replace(
+        '#include <common>',
+        '#include <common>\nattribute float instancePlateRow;',
+      )
+      .replace(
+        '#include <uv_vertex>',
+        `#include <uv_vertex>
+#ifdef USE_MAP
+	vMapUv = vec2( vMapUv.x, ( instancePlateRow + vMapUv.y ) / ${rows} );
+#endif`,
+      )
+  }
+  material.customProgramCacheKey = () => `plateAtlas:${rows}`
+}
+
 export interface VehiclesProps {
   maxVehicles: number
   castShadow: boolean
@@ -83,6 +116,8 @@ export interface VehiclesProps {
 
 export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
   const palette = usePalette()
+  // プレートの地名は走っている街に合わせる（licensePlate.ts の対応表）
+  const presetId = useSimStore((s) => s.status.presetId)
 
   const stateColors = useMemo(
     () => ({
@@ -100,6 +135,7 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
   const cabinRef = useRef<THREE.InstancedMesh>(null)
   const wheelRef = useRef<THREE.InstancedMesh>(null)
   const lightRef = useRef<THREE.InstancedMesh>(null)
+  const plateRef = useRef<THREE.InstancedMesh>(null)
   const ringRef = useRef<THREE.Mesh>(null)
   const pinRef = useRef<THREE.Group>(null)
 
@@ -116,6 +152,12 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
     const cabinGeometry = makeCabinGeometry()
     const wheelGeometry = makeWheelGeometry()
     const lightGeometry = makeLightGeometry(LIGHT_SIZE)
+    const plateGeometry = makePlateGeometry(PLATE_W, PLATE_H)
+    const plateRows = new THREE.InstancedBufferAttribute(
+      new Float32Array(count * PLATES_PER_VEHICLE),
+      1,
+    )
+    plateGeometry.setAttribute('instancePlateRow', plateRows)
 
     const lightCount = count * LIGHTS_PER_VEHICLE
     const lightEmissive = new THREE.InstancedBufferAttribute(
@@ -155,6 +197,14 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
     })
     attachInstanceEmissive(lightMaterial)
 
+    const plateMaterial = new THREE.MeshStandardMaterial({
+      roughness: 0.55,
+      metalness: 0.05,
+      // 夜でも読めるよう、わずかに自己発光させる（反射板の代わり）
+      emissive: new THREE.Color('#2a2a26'),
+    })
+    attachPlateAtlas(plateMaterial, count)
+
     const ringMaterial = new THREE.MeshBasicMaterial({
       color: palette.vehicleHighlight,
       transparent: true,
@@ -190,6 +240,9 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
       cabinGeometry,
       wheelGeometry,
       lightGeometry,
+      plateGeometry,
+      plateRows,
+      plateMaterial,
       bodyEmissive,
       noseEmissive,
       lightEmissive,
@@ -208,6 +261,13 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
   useEffect(() => {
     lastState.current = new Int8Array(count).fill(-1)
     lastLights.current = new Float32Array(count * LIGHTS_PER_VEHICLE).fill(-1)
+    for (let id = 0; id < count; id++) {
+      const row = plateUvRow(id, count)
+      for (let k = 0; k < PLATES_PER_VEHICLE; k++) {
+        resources.plateRows.array[id * PLATES_PER_VEHICLE + k] = row
+      }
+    }
+    resources.plateRows.needsUpdate = true
     const lights = lightRef.current
     if (lights) {
       for (let id = 0; id < count; id++) {
@@ -218,6 +278,18 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
       if (lights.instanceColor) lights.instanceColor.needsUpdate = true
     }
   }, [count, resources])
+
+  // ★ テクスチャは resources とは別に持つ。プリセットだけが変わったときに
+    //   ジオメトリごと作り直すと、instancedMesh が count=0 に戻って車が消える
+  useEffect(() => {
+    const atlas = createPlateAtlas(count, presetId)
+    resources.plateMaterial.map = atlas
+    resources.plateMaterial.needsUpdate = true
+    return () => {
+      resources.plateMaterial.map = null
+      atlas.dispose()
+    }
+  }, [resources, count, presetId])
 
   useEffect(() => {
     resources.glassMaterial.color.set(palette.vehicleGlass)
@@ -234,6 +306,8 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
       r.cabinGeometry.dispose()
       r.wheelGeometry.dispose()
       r.lightGeometry.dispose()
+      r.plateGeometry.dispose()
+      r.plateMaterial.dispose()
       r.bodyMaterial.dispose()
       r.glassMaterial.dispose()
       r.wheelMaterial.dispose()
@@ -262,7 +336,8 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
     const cabin = cabinRef.current
     const wheel = wheelRef.current
     const lights = lightRef.current
-    if (!body || !nose || !cabin || !wheel || !lights) return
+    const plates = plateRef.current
+    if (!body || !nose || !cabin || !wheel || !lights || !plates) return
     if (lastState.current.length !== count) return
 
     const store = useSimStore.getState()
@@ -297,6 +372,9 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
         for (let k = 0; k < LIGHTS_PER_VEHICLE; k++) {
           lights.setMatrixAt(id * LIGHTS_PER_VEHICLE + k, scratch.hidden)
         }
+        for (let k = 0; k < PLATES_PER_VEHICLE; k++) {
+          plates.setMatrixAt(id * PLATES_PER_VEHICLE + k, scratch.hidden)
+        }
         continue
       }
 
@@ -318,6 +396,17 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
           scratch.out,
         )
         wheel.setMatrixAt(id * 4 + k, scratch.out)
+      }
+
+      for (let k = 0; k < PLATES_PER_VEHICLE; k++) {
+        composePlateMatrix(
+          scratch.transform,
+          scratch.base,
+          PLATE_SLOTS[k].position,
+          PLATE_SLOTS[k].yaw,
+          scratch.out,
+        )
+        plates.setMatrixAt(id * PLATES_PER_VEHICLE + k, scratch.out)
       }
 
       const lightState = lightStateFor({
@@ -388,6 +477,7 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
     cabin.instanceMatrix.needsUpdate = true
     wheel.instanceMatrix.needsUpdate = true
     lights.instanceMatrix.needsUpdate = true
+    plates.instanceMatrix.needsUpdate = true
     if (lightDirty) resources.lightEmissive.needsUpdate = true
     if (colorDirty) {
       if (body.instanceColor) body.instanceColor.needsUpdate = true
@@ -450,6 +540,13 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
         key={`light-${count}`}
         ref={lightRef}
         args={[resources.lightGeometry, resources.lightMaterial, count * LIGHTS_PER_VEHICLE]}
+        frustumCulled={false}
+      />
+
+      <instancedMesh
+        key={`plate-${count}`}
+        ref={plateRef}
+        args={[resources.plateGeometry, resources.plateMaterial, count * PLATES_PER_VEHICLE]}
         frustumCulled={false}
       />
 

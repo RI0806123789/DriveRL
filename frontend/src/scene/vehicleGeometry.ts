@@ -51,6 +51,29 @@ export function makeWheelGeometry(): THREE.BufferGeometry {
   return g
 }
 
+/** ナンバープレート 1 枚。法線を +X に向ける（車両ローカルの前方） */
+export function makePlateGeometry(width: number, height: number): THREE.BufferGeometry {
+  const g = new THREE.PlaneGeometry(width, height)
+  g.rotateY(Math.PI / 2)
+  return g
+}
+
+/** プレート 1 枚のワールド行列。前は前方、後ろは真後ろを向く。 */
+export function composePlateMatrix(
+  scratch: TransformScratch,
+  base: THREE.Matrix4,
+  position: readonly [number, number, number],
+  yaw: number,
+  out: THREE.Matrix4,
+): THREE.Matrix4 {
+  const l = scratch.light
+  l.position.set(position[0], position[1], position[2])
+  l.rotation.set(0, yaw, 0)
+  l.scale.setScalar(1)
+  l.updateMatrix()
+  return out.multiplyMatrices(base, l.matrix)
+}
+
 /** 灯体 1 個。位置は `scene/vehicleLights.ts` の `LIGHT_SLOTS` が決める */
 export function makeLightGeometry(size: readonly [number, number, number]): THREE.BufferGeometry {
   return new THREE.BoxGeometry(size[0], size[1], size[2])
