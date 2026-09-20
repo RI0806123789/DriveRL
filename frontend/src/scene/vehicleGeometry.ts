@@ -27,7 +27,7 @@ export const WHEEL_RADIUS = 0.34
  * ★ `Z` が 0 でなくなったら、左右非対称な部品が混ざった合図
  * （`mirrored()` に片側へ寄った形を渡すと起きる）。
  */
-export const BODY_OFFSET: readonly [number, number, number] = [0, 0.825, 0]
+export const BODY_OFFSET: readonly [number, number, number] = [0, 0.815, 0]
 /** ボンネット先端の飾りの中心 */
 export const NOSE_OFFSET: readonly [number, number, number] = [1.94, 0.975, 0]
 /** キャビン（グラスハウス）の中心 */
@@ -56,6 +56,15 @@ const ROOF_Y = VEHICLE_HEIGHT
 const BELT_Y = 0.98
 /** 外板の厚み（片側）[m]。車体を中空にするときの壁の厚さ */
 const BODY_SKIN = 0.06
+
+/**
+ * 部品どうしを重ねるときの食い込み量 [m]。
+ * ★ **面をぴったり合わせないこと。** 同じ深度に 2 つの面が来ると、どちらが手前か
+ * 決まらず**フレームごとに色が入れ替わって点滅する**（Z ファイティング）。
+ * 内装と外板、ダッシュボードとバルクヘッドなど、隣り合う部品はこの量だけ
+ * 食い込ませて、境目の面が重ならないようにする。
+ */
+const OVERLAP = 0.04
 
 /** フロントガラスの下端・上端の X。寝かせるほど差が開く */
 const WINDSHIELD_BOTTOM_X = 1.15
@@ -121,11 +130,12 @@ export function makeBodyGeometry(): THREE.BufferGeometry {
       (z) => box([-HALF_L + 0.06, 0.2, z - BODY_SKIN], [HALF_L - 0.06, BELT_Y, z + BODY_SKIN]),
       HALF_W - BODY_SKIN,
     ),
-    // 床下（アンダーボディ）
-    box([-HALF_L + 0.1, 0.2, -HALF_W], [HALF_L - 0.1, 0.28, HALF_W]),
-    // 前端・後端（バンパーとその上のパネル）。エンジンルームとトランクの前後を塞ぐ
-    box([HALF_L - 0.2, 0.28, -HALF_W], [HALF_L, BELT_Y, HALF_W]),
-    box([-HALF_L, 0.28, -HALF_W], [-HALF_L + 0.2, BELT_Y, HALF_W]),
+    // 床下（アンダーボディ）。内装のフロアへ食い込ませ、面を合わせない
+    box([-HALF_L + 0.1, 0.18, -HALF_W + 0.02], [HALF_L - 0.1, 0.33, HALF_W - 0.02]),
+    // 前端・後端（バンパーとその上のパネル）。エンジンルームとトランクの前後を塞ぐ。
+    // 上下端は内装の側壁（0.26〜0.96）とずらしてある
+    box([HALF_L - 0.24, 0.24, -HALF_W + 0.02], [HALF_L, BELT_Y - 0.04, HALF_W - 0.02]),
+    box([-HALF_L, 0.24, -HALF_W + 0.02], [-HALF_L + 0.24, BELT_Y - 0.04, HALF_W - 0.02]),
     // ボンネット（前下がり）
     slab([WINDSHIELD_BOTTOM_X, BELT_Y], [HALF_L - 0.12, BELT_Y - 0.06], -0.86, 0.86, 0.09),
     // トランクリッド
@@ -233,8 +243,8 @@ const FRONT_SEAT_X = 0.25
  */
 export function makeInteriorGeometry(): THREE.BufferGeometry {
   const seat = (z: number, at: number): THREE.BufferGeometry[] => [
-    // 座面
-    box([at - 0.28, FLOOR_Y + 0.04, z - 0.24], [at + 0.28, FLOOR_Y + 0.16, z + 0.24]),
+    // 座面（フロアへ食い込ませる。浮かせると面が一致して点滅する）
+    box([at - 0.28, FLOOR_Y - 0.02, z - 0.24], [at + 0.28, FLOOR_Y + 0.16, z + 0.24]),
     // 背もたれ（わずかに後ろへ倒す）
     slab([at - 0.3, FLOOR_Y + 0.1], [at - 0.42, 1.06], z - 0.24, z + 0.24, 0.14),
     // ヘッドレスト
@@ -242,39 +252,42 @@ export function makeInteriorGeometry(): THREE.BufferGeometry {
   ]
 
   const parts: THREE.BufferGeometry[] = [
-    // フロア。側壁と同じ Z まで伸ばして突き合わせる
-    box([-1.76, FLOOR_Y - 0.04, -0.82], [DASH_FRONT_X + 0.06, FLOOR_Y, 0.82]),
+    // ★ ここから下は**どの 2 つも面が一致しないように**置いてある。
+    //   合わせると境目が点滅する（Z ファイティング）。隣り合うものは OVERLAP ぶん
+    //   食い込ませ、内部に隠れた面が深度を奪い合わないようにする。
+    // フロア。側壁と後ろの壁へ食い込ませる。
+    // ★ Z を外板の内面（0.78）に合わせないこと
+    box([-1.74, FLOOR_Y - 0.04, -0.79], [DASH_FRONT_X + 0.02, FLOOR_Y, 0.79]),
     // ダッシュボード
-    box([DASH_REAR_X, 0.7, -0.82], [DASH_FRONT_X, DASH_TOP_Y, 0.82]),
+    box([DASH_REAR_X, 0.7, -0.74], [DASH_FRONT_X, DASH_TOP_Y, 0.74]),
     // ★ 前方の隔壁（バルクヘッド）。**これが無いと運転席から背景が透ける。**
-    //   外板は裏面が描かれないので、車内は内装だけで閉じておく必要がある
-    box([DASH_FRONT_X, FLOOR_Y, -0.82], [DASH_FRONT_X + 0.06, DASH_TOP_Y, 0.82]),
-    // 足元の側壁（ペダルの左右）。ここも抜けると床の脇から外が見える
-    ...mirrored(
-      (z) => box([DASH_REAR_X, FLOOR_Y, z - 0.03], [DASH_FRONT_X, 0.7, z + 0.03]),
-      0.8,
-    ),
+    //   外板は裏面が描かれないので、車内は内装だけで閉じておく必要がある。
+    //   ダッシュボードの中で終わらせて、上面と前面を一致させない
+    box([DASH_FRONT_X - OVERLAP, FLOOR_Y - 0.08, -0.74], [DASH_FRONT_X + 0.06, DASH_TOP_Y - 0.05, 0.74]),
     // ★ メーターの庇（フード）は**置かない**。目からメーターへの視線は
     //   ダッシュボード上面のすぐ下を通るので、庇を立てるとそれ自体が視線を塞ぐ
-    // センターコンソール
-    box([-0.35, FLOOR_Y, -0.14], [0.5, 0.62, 0.14]),
-    // ★ 車内の側壁（ドア内張り）。**フロアと隙間なく突き合わせること。**
-    //   外板は裏面が描かれないので、1cm でも空くとそこから背景が透ける
-    //   （実際に運転席の左下が空へ抜けていた）
+    // センターコンソール（フロアへ食い込ませる）
+    box([-0.35, FLOOR_Y - 0.02, -0.14], [0.5, 0.62, 0.14]),
+    // ★ 車内の側壁（ドア内張り）。**外板の内側へ食い込ませること。**
+    //   外板と同じ Z に面を置くと、ドア一面が点滅する（実際にそうなった）
     ...mirrored(
-      (z) => box([-1.72, FLOOR_Y - 0.04, z - 0.04], [DASH_FRONT_X + 0.06, BELT_Y, z + 0.04]),
-      0.82,
+      (z) =>
+        box(
+          [-1.74, FLOOR_Y - 0.08, z - 0.038],
+          [DASH_FRONT_X + 0.02, BELT_Y - 0.02, z + 0.038],
+        ),
+      HALF_W - BODY_SKIN - OVERLAP + 0.005,
     ),
-    // 後ろの壁（トランクとの隔壁）
-    box([-1.76, FLOOR_Y - 0.04, -0.82], [-1.7, BELT_Y, 0.82]),
+    // 後ろの壁（トランクとの隔壁）。側壁の中で終わらせる
+    box([-1.78, FLOOR_Y - 0.06, -0.74], [-1.7, BELT_Y - 0.06, 0.74]),
     // 前席（アイポイントに合わせて前へ出す）
     ...seat(DRIVER_SEAT_Z, FRONT_SEAT_X),
     ...seat(PASSENGER_SEAT_Z, FRONT_SEAT_X),
     // 後席（ベンチ）
-    box([-1.24, FLOOR_Y + 0.04, -0.72], [-0.7, FLOOR_Y + 0.18, 0.72]),
-    slab([-1.2, FLOOR_Y + 0.12], [-1.34, 1.08], -0.72, 0.72, 0.16),
-    // リアパーセルシェルフ
-    box([-1.7, BELT_Y - 0.06, -0.78], [-1.3, BELT_Y, 0.78]),
+    box([-1.24, FLOOR_Y - 0.02, -0.7], [-0.7, FLOOR_Y + 0.18, 0.7]),
+    slab([-1.2, FLOOR_Y + 0.12], [-1.34, 1.08], -0.7, 0.7, 0.16),
+    // リアパーセルシェルフ。側壁の上面（BELT_Y）と高さを合わせない
+    box([-1.68, BELT_Y - 0.08, -0.74], [-1.3, BELT_Y - 0.03, 0.74]),
   ]
   const merged = mergeGeometries(parts, false)
   for (const p of parts) p.dispose()
@@ -600,7 +613,9 @@ export function composeNeedleMatrix(
 ): THREE.Matrix4 {
   const spec = GAUGE_SLOTS[index]
   const n = scratch.part
-  n.position.set(spec.center[0] + 0.006, spec.center[1], spec.center[2])
+  // ★ 針は文字盤の**手前**（目に近い側 = X が小さいほう）へ置くこと。
+  //   奥へ置くと文字盤に隠れる（+0.006 にしていて見えにくかった）
+  n.position.set(spec.center[0] - 0.008, spec.center[1], spec.center[2])
   n.rotation.set(needleAngle(ratio), 0, 0)
   n.scale.setScalar(1)
   n.updateMatrix()

@@ -805,6 +805,67 @@ console.log('='.repeat(70))
 
 console.log()
 console.log('='.repeat(70))
+console.log('面の重なり（Z ファイティングの種）')
+console.log('='.repeat(70))
+
+{
+  /**
+   * ★ 別々のメッシュの面が**同じ深度**に来ると、どちらが手前か決まらず
+   * フレームごとに色が入れ替わって点滅する。実際に内装のドアと車体の外板、
+   * バルクヘッドとダッシュボードで起きた。
+   *
+   * ここでは「軸に平行な平面」を数え、車体・内装・ガラスのあいだで
+   * **同じ座標に面が来ていないか**を見る。左右対称で同じ値が出るのは正常なので、
+   * 比べるのは**別のメッシュどうし**だけ。
+   */
+  const EPS = 1e-4
+
+  /** 軸ごとに、頂点が乗っている平面の座標を集める */
+  function planesOf(g: THREE.BufferGeometry): [Set<number>, Set<number>, Set<number>] {
+    const pos = g.attributes.position
+    const out: [Set<number>, Set<number>, Set<number>] = [new Set(), new Set(), new Set()]
+    for (let i = 0; i < pos.count; i++) {
+      out[0].add(Math.round(pos.getX(i) / EPS) * EPS)
+      out[1].add(Math.round(pos.getY(i) / EPS) * EPS)
+      out[2].add(Math.round(pos.getZ(i) / EPS) * EPS)
+    }
+    return out
+  }
+
+  const body = makeBodyGeometry()
+  const interior = makeInteriorGeometry()
+  const glass = makeGlassGeometry()
+
+  // ★ 窓ガラスは `transparent` + `depthWrite: false` で描くので**深度を書かない**。
+  //   面が重なってもファイティングは起きないため、比べるのは不透明どうしだけ。
+  const pairs: Array<[string, THREE.BufferGeometry, THREE.BufferGeometry]> = [
+    ['車体と内装', body, interior],
+  ]
+  const axis = ['X', 'Y', 'Z']
+
+  for (const [name, a, b] of pairs) {
+    const pa = planesOf(a)
+    const pb = planesOf(b)
+    const shared: string[] = []
+    for (let k = 0; k < 3; k++) {
+      for (const v of pa[k]) {
+        if (pb[k].has(v)) shared.push(axis[k] + '=' + v.toFixed(3))
+      }
+    }
+    check(
+      name + 'が同じ平面を共有しない',
+      shared.length === 0,
+      shared.length === 0 ? '' : '共有 ' + shared.length + ' 面: ' + shared.slice(0, 6).join(' / '),
+    )
+  }
+
+  body.dispose()
+  interior.dispose()
+  glass.dispose()
+}
+
+console.log()
+console.log('='.repeat(70))
 console.log('描画コスト（台数によらず一定であること）')
 console.log('='.repeat(70))
 
