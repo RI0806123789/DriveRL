@@ -1145,13 +1145,14 @@ cd frontend; npm run verify:signals     # 灯器の向き・灯火の並び・�
 cd frontend; npm run verify:speedsigns  # 標識の向き・取り付け高さ
 cd frontend; npm run verify:camera      # 運転席視点と進路矢印
 cd frontend; npm run verify:colors      # 車両 64 色の見分けやすさ
-cd frontend; npm run verify:vehicles    # 車両の行列と、ライトの位置・点灯条件
+cd frontend; npm run verify:vehicles    # 車両の行列・内装・メーター・ライト・面の重なり
 cd frontend; npm run verify:sun         # 日の出・日の入り
 cd frontend; npm run verify:detections  # 認識結果オーバーレイの座標変換
 cd frontend; npm run verify:markings    # 道路標示（破線の割り付け）
 cd frontend; npm run verify:weather     # 天候（フォグの距離・明るさ・雨粒）
 cd frontend; npm run verify:pedestrian  # 徒歩キャラと NPC 歩行者（寸法・姿勢・当たり判定・補間）
 cd frontend; npm run verify:taximap     # スマホ画面の 2D 地図の座標変換
+cd frontend; npm run verify:nav         # カーナビの描き直しにかかる時間（金沢の規模で）
 ```
 
 `npm run verify` は Node で直接実行する検証スクリプトです。3D の向きは**間違っていても

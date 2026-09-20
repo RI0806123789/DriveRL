@@ -387,6 +387,36 @@ export function makeTurnIndicatorGeometry(size: number): THREE.BufferGeometry {
   return g
 }
 
+/**
+ * カーナビの画面（インパネ中央）。**運転席から見てハンドルのリムの外**に来る位置。
+ * 中央（Z=0）なので運転席（Z=+0.36）からは右寄りに見える。
+ */
+export const NAV_SCREEN = {
+  center: [DASH_REAR_X - 0.01, 0.86, 0] as readonly [number, number, number],
+  width: 0.19,
+  height: 0.12,
+} as const
+
+/**
+ * ナビが見せる範囲の幅 [m]。**停車で寄り、速度が上がるほど引く。**
+ * 速い車ほど先を見せたいので、実車のナビと同じ振る舞いにしてある。
+ */
+export const NAV_SPAN_MIN_M = 80
+export const NAV_SPAN_MAX_M = 320
+
+/** 速度 [m/s] から、ナビが見せる範囲の幅 [m] を出す。 */
+export function navSpanFor(speedMps: number, maxSpeedMps: number): number {
+  const t = maxSpeedMps > 0 ? Math.min(1, Math.max(0, speedMps / maxSpeedMps)) : 0
+  return NAV_SPAN_MIN_M + (NAV_SPAN_MAX_M - NAV_SPAN_MIN_M) * t
+}
+
+/** ナビの画面。法線を運転者の側（-X）へ向ける */
+export function makeNavScreenGeometry(width: number, height: number): THREE.BufferGeometry {
+  const g = new THREE.PlaneGeometry(width, height)
+  g.rotateY(-Math.PI / 2)
+  return g
+}
+
 /** ステアリングコラムの傾き [rad]（前下がり）。ハンドル面はこれに垂直 */
 export const COLUMN_TILT = 0.42
 /**

@@ -32,7 +32,7 @@ npm run typecheck       # tsc --noEmit
 npm run build           # typecheck + vite build
 npm run verify          # 幾何検証をまとめて実行（ブラウザ不要。本数の出典は package.json）
 npm run verify:signals  # 1 本だけ（他: speedsigns / camera / colors / vehicles / sun /
-                        #             detections / markings / weather / pedestrian / taximap）
+                        #             detections / markings / weather / pedestrian / taximap / nav）
 npm run icons           # PWA アイコンを再生成（public/icon-*.png。手で描かない）
 npm run dev             # Vite だけ立てる。?mock=1 でバックエンド無しでも動く（後述）
 
@@ -636,6 +636,27 @@ EV なので**回転計は持たず**、速度計とパワーメーターの 2 �
 - 画角も同じファイルの `DRIVER_FOV_DEG` が唯一の出典です。**`CameraRig` に
   べた書きしないこと** — `detectionProjection` の検出枠も同じ値を読むので、
   片方だけ変えると認識結果の枠が実物からずれます
+
+### カーナビ（`scene/NavScreen.tsx`）
+
+インパネ中央の画面に、走っている街の地図・経路・自車を描きます。描画は
+`panel/taxiMapMath.ts`（スマホ画面の地図と同じ純粋関数）を使い回しています。
+
+- ★ **見ている 1 台にだけ出すこと。** 車両は `instancedMesh` で、**1 つのテクスチャ
+  しか持てません**（ナンバープレートがアトラスなのと同じ制約）。中身が車ごとに違う
+  ナビはアトラスで賄えないので、追従対象の 1 台に単体メッシュを貼ります。
+- ★ **縮尺は速度で決める**（`navSpanFor`）。停車で 80m 四方、最高速で 320m 四方。
+  速いほど先が見えるという実車のナビと同じ振る舞いです。**寄り引きは 1〜2 秒かけて
+  追う**こと（加減速のたびに縮尺が跳ねると読めません）。
+- **向きは進行方向が上**（`rotationForHeading`）。`TaxiMap` と同じく、**向きは寄り引きより
+  遅く追わせます**（交差点で画面が振られて酔うため）。
+- **12fps で描き直す**（`TaxiCameraFeed` と同じ理由）。実測（金沢の規模＝道路 58,120 本・
+  建物 35,607 棟）で **1 回 3.4ms**、12fps なら 1 秒の 4% です。
+  `npm run verify:nav` が 60fps の 1 フレーム（16.7ms）を超えないことを検査します。
+- **見え方（`MapView`）を `useState` に置かないこと**（`TaxiMap` と同じ）。毎フレーム
+  目標へ寄せるので、state にすると 60Hz でツリーが再レンダリングされます。
+- 解像度は 256×160。**上げるとそのまま負荷になります**（描き直しのたびに道路と建物を
+  なぞるため）。
 
 ### 車両のライト（`scene/vehicleLights.ts`）
 

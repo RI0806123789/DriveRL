@@ -63,7 +63,7 @@ export interface ScenePalette {
   readonly vehicleInterior: string
   /** ハンドル・ペダルなど、手足が触れる黒い部品 */
   readonly vehicleTrim: string
-  /** メーターの文字盤 */
+  /** 車載の画面（カーナビ）の地色。メーターの文字盤はテクスチャに焼いてある */
   readonly vehicleGauge: string
   /** メーターの針。**昼夜で変えない**（発光しているため） */
   readonly vehicleNeedle: string

@@ -12,6 +12,7 @@ import { LaneDetectionOverlay } from './LaneDetectionOverlay'
 import { NpcPedestrians } from './NpcPedestrians'
 import { Obstacles } from './Obstacles'
 import { PedestrianSignals } from './PedestrianSignals'
+import { NavScreen } from './NavScreen'
 import { Pedestrian } from './Pedestrian'
 import { Rain } from './Rain'
 import { RoadMarkings } from './RoadMarkings'
@@ -126,6 +127,9 @@ export function SimulatorView() {
           />
           <LaneDetectionOverlay />
           <Vehicles maxVehicles={maxVehicles} castShadow={view.shadows} />
+          {/* ★ カーナビは**見ている 1 台にだけ**出す（車ごとに中身が違うので
+              instancedMesh の 1 枚テクスチャでは賄えない） */}
+          <NavScreen />
           <Obstacles castShadow={view.shadows} />
           <NpcPedestrians castShadow={view.shadows} />
           <Rain />

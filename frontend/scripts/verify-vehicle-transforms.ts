@@ -8,6 +8,9 @@ import {
   DASH_REAR_X,
   GAUGE_KINDS,
   GAUGE_SPEED_MAX_KMH,
+  NAV_SCREEN,
+  NAV_SPAN_MAX_M,
+  NAV_SPAN_MIN_M,
   TURN_INDICATOR_SIZE,
   TURN_INDICATOR_SLOTS,
   DRIVER_SEAT_Z,
@@ -42,8 +45,10 @@ import {
   makeNeedleGeometry,
   makeNoseGeometry,
   makePedalGeometry,
+  makeNavScreenGeometry,
   makeSteeringGeometry,
   makeTurnIndicatorGeometry,
+  navSpanFor,
   needleAngle,
   pedalPress,
   powerRatio,
@@ -90,6 +95,9 @@ import {
 } from '../src/scene/vehicleLights.ts'
 
 let failures = 0
+
+/** ダッシュボード上面の高さ [m]（vehicleGeometry の DASH_TOP_Y と同じ値） */
+const DASH_TOP_Y_FOR_CHECK = 1.02
 
 function check(label: string, ok: boolean, detail = ''): void {
   console.log(`  [${ok ? 'OK  ' : 'NG  '}] ${label}${detail ? ` — ${detail}` : ''}`)
@@ -1006,6 +1014,90 @@ console.log('='.repeat(70))
     '矢印が板（厚みを持たない）',
     Math.abs(b.max.x - b.min.x) < 1e-9,
     '厚み ' + (b.max.x - b.min.x).toExponential(1) + 'm',
+  )
+  geom.dispose()
+}
+
+console.log()
+console.log('='.repeat(70))
+console.log('カーナビ（インパネ中央）')
+console.log('='.repeat(70))
+
+{
+  const eyeX = DRIVER_FORWARD
+  const eyeY = DRIVER_EYE_HEIGHT
+  const eyeZ = DRIVER_SEAT_Z
+  const c = NAV_SCREEN.center
+
+  check('画面は車体の中央（インパネ中央部）にある', Math.abs(c[2]) < 1e-9, 'Z=' + c[2].toFixed(2))
+  check(
+    '画面はメーターより下にある',
+    c[1] < GAUGE_SLOTS[0].center[1],
+    'ナビ ' + c[1].toFixed(2) + 'm / メーター ' + GAUGE_SLOTS[0].center[1].toFixed(2) + 'm',
+  )
+
+  // 運転席の画角に入るか（垂直だけ見る。横は画面のほうが広い）
+  const down = (Math.atan2(eyeY - c[1], c[0] - eyeX) * 180) / Math.PI
+  const lookDown = (Math.atan2(DRIVER_LOOK_DROP, DRIVER_LOOK_AHEAD) * 180) / Math.PI
+  check(
+    'ナビが運転席の画角に入る',
+    down <= lookDown + DRIVER_FOV_DEG / 2,
+    '俯角 ' + down.toFixed(1) + ' 度 / 下端 ' + (lookDown + DRIVER_FOV_DEG / 2).toFixed(1) + ' 度',
+  )
+
+  // ★ ハンドルのリムに隠れないこと（中央にあるので、リムの外を通るはず）
+  const t = (STEERING_CENTER[0] - eyeX) / (c[0] - eyeX)
+  const crossY = eyeY + (c[1] - eyeY) * t
+  const crossZ = eyeZ + (c[2] - eyeZ) * t
+  const d = Math.hypot(crossY - STEERING_CENTER[1], crossZ - STEERING_CENTER[2])
+  check(
+    'ナビへの視線がハンドルのリムの外を通る',
+    d > STEERING_RADIUS,
+    'ハンドル中心から ' + d.toFixed(3) + 'm（リム半径 ' + STEERING_RADIUS + 'm）',
+  )
+
+  // 画面がダッシュボードに収まること
+  check(
+    'ナビの画面がダッシュボードの高さに収まる',
+    c[1] - NAV_SCREEN.height / 2 > 0.7 && c[1] + NAV_SCREEN.height / 2 < DASH_TOP_Y_FOR_CHECK,
+    'Y ' + (c[1] - NAV_SCREEN.height / 2).toFixed(2) + '〜' + (c[1] + NAV_SCREEN.height / 2).toFixed(2),
+  )
+
+  // 縮尺。**停車で寄り、速度が上がるほど引く**
+  const maxSpeed = 13.9
+  check('停車でいちばん寄る', navSpanFor(0, maxSpeed) === NAV_SPAN_MIN_M, navSpanFor(0, maxSpeed) + 'm')
+  check(
+    '最高速でいちばん引く',
+    navSpanFor(maxSpeed, maxSpeed) === NAV_SPAN_MAX_M,
+    navSpanFor(maxSpeed, maxSpeed) + 'm',
+  )
+  check(
+    '速度が上がるほど広く見える',
+    navSpanFor(3, maxSpeed) < navSpanFor(8, maxSpeed) && navSpanFor(8, maxSpeed) < navSpanFor(13, maxSpeed),
+    [3, 8, 13].map((v) => navSpanFor(v, maxSpeed).toFixed(0) + 'm').join(' → '),
+  )
+  check(
+    '最高速を超えても引きすぎない',
+    navSpanFor(100, maxSpeed) === NAV_SPAN_MAX_M,
+  )
+  check(
+    '引く幅が寄る幅より広い（実車のナビと同じ向き）',
+    NAV_SPAN_MAX_M > NAV_SPAN_MIN_M,
+    NAV_SPAN_MIN_M + 'm 〜 ' + NAV_SPAN_MAX_M + 'm',
+  )
+
+  const geom = makeNavScreenGeometry(NAV_SCREEN.width, NAV_SCREEN.height)
+  geom.computeBoundingBox()
+  const b = geom.boundingBox!
+  check(
+    'ナビの画面が板（厚みを持たない）',
+    Math.abs(b.max.x - b.min.x) < 1e-6,
+    '厚み ' + (b.max.x - b.min.x).toExponential(1) + 'm',
+  )
+  check(
+    'ナビの画面が横長',
+    b.max.z - b.min.z > b.max.y - b.min.y,
+    (b.max.z - b.min.z).toFixed(2) + 'm x ' + (b.max.y - b.min.y).toFixed(2) + 'm',
   )
   geom.dispose()
 }

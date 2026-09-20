@@ -20,7 +20,8 @@
     "verify:weather": "node scripts/verify-weather.ts",
     "verify:pedestrian": "node scripts/verify-pedestrian.ts",
     "verify:taximap": "node scripts/verify-taxi-map.ts",
-    "verify": "npm run verify:signals && npm run verify:speedsigns && npm run verify:camera && npm run verify:colors && npm run verify:vehicles && npm run verify:sun && npm run verify:detections && npm run verify:markings && npm run verify:weather && npm run verify:pedestrian && npm run verify:taximap"
+    "verify:nav": "node scripts/verify-nav-cost.ts",
+    "verify": "npm run verify:signals && npm run verify:speedsigns && npm run verify:camera && npm run verify:colors && npm run verify:vehicles && npm run verify:sun && npm run verify:detections && npm run verify:markings && npm run verify:weather && npm run verify:pedestrian && npm run verify:taximap && npm run verify:nav"
   },
   "dependencies": {
     "@react-three/drei": "^10.7.8",
