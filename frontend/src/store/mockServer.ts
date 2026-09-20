@@ -76,6 +76,13 @@ const BRAKE_ACCEL = 4.8
 /** 前走車との車間 [m]。車長 4.4m + 余裕 */
 const CAR_GAP_M = 6.0
 
+/** 徒歩キャラの手前で空ける距離 [m]・見る範囲 [m]・車体中心からの横幅 [m]（env.py と同じ値） */
+const PLAYER_MARGIN_M = 4.5
+const PLAYER_RANGE_M = 30.0
+const PLAYER_HALF_WIDTH_M = 2.0
+/** 位置が届かなくなってから街から消すまで [ms]（engine.PLAYER_POSE_TTL_SEC と同じ） */
+const PLAYER_POSE_TTL_MS = 1000
+
 const MOCK_PRESETS: MapPreset[] = [
   {
     id: 'ginza',
@@ -619,6 +626,9 @@ class MockServer {
   /** 実用モードの配車。**擬似的な再現で、経路はグリッドに沿った折れ線** */
   private taxi: TaxiMessage = { ...MOCK_IDLE_TAXI }
   private taxiSentAt = 0
+  /** 徒歩キャラ。届かなくなったら消す（実機の TTL と同じ） */
+  private player: Vec2 | null = null
+  private playerAt = 0
 
   constructor(emit: (json: string) => void) {
     this.emit = emit
@@ -1117,6 +1127,12 @@ class MockServer {
       }
     }
 
+    const playerGap = this.playerGap(v)
+    if (playerGap < Infinity) {
+      const room = Math.max(0, playerGap - PLAYER_MARGIN_M)
+      targetSpeed = Math.min(targetSpeed, Math.sqrt(2 * BRAKE_ACCEL * room))
+    }
+
     // 実機と同じく「指令が減速側か」で決める（実測の加速度では見ない）
     v.braking = targetSpeed < v.speed - 0.2
     v.turnSignal = this.turnSignalFor(v)
@@ -1169,6 +1185,21 @@ class MockServer {
     v.x = ax + (bx - ax) * v.t
     v.y = ay + (by - ay) * v.t
     v.reachedGoal = false
+  }
+
+  /** 前方の進路上にいる徒歩キャラまでの距離 [m]。いなければ Infinity。 */
+  private playerGap(v: MockVehicle): number {
+    const at = this.player
+    if (!at) return Infinity
+    const cos = Math.cos(v.heading)
+    const sin = Math.sin(v.heading)
+    const dx = at[0] - v.x
+    const dy = at[1] - v.y
+    const lon = dx * cos + dy * sin
+    const lat = -dx * sin + dy * cos
+    if (lon <= 0 || lon > PLAYER_RANGE_M) return Infinity
+    if (Math.abs(lat) > PLAYER_HALF_WIDTH_M) return Infinity
+    return lon
   }
 
   /** 同じ区間を走る前走車に追突しないよう、後続の位置を後ろへ詰める。 */
@@ -1234,6 +1265,12 @@ class MockServer {
     this.tick += 1
     this.simTime += dt
     this.progress = Math.min(1, this.progress + dt * 0.004)
+
+    // 届かなくなった徒歩キャラは街から消す（見えない人の前で止まり続ける）
+    if (this.player && Date.now() - this.playerAt >= PLAYER_POSE_TTL_MS) {
+      this.player = null
+      this.playerAt = 0
+    }
 
     for (const v of this.vehicles) this.stepVehicle(v, dt)
     for (const p of this.pedestrians) this.stepPedestrian(p, dt)
@@ -1712,6 +1749,14 @@ class MockServer {
             ? '（モック）緊急停止しました。自動運転を終了します'
             : '（モック）配車を取り消しました',
         )
+        break
+      }
+
+      case 'player_pose': {
+        // 乗車中は車内にいるので歩行者として扱わない（実機と同じ）
+        const onboard = this.taxi.phase === 'riding' || this.taxi.phase === 'arrived'
+        this.player = msg.at && !onboard ? [msg.at[0], msg.at[1]] : null
+        this.playerAt = this.player ? Date.now() : 0
         break
       }
 

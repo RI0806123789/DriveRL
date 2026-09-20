@@ -201,6 +201,8 @@ class SimulationEnv:
     def _pedestrian_gap(self, slot: int) -> float:
         """前方の進路上にいる歩行者までの距離 [m]。いなければ inf。
 
+        NPC 群衆と**実用モードの徒歩キャラ**の両方を見る（`world.pedestrian_xy`）。
+
         ★ **経路追従の車にだけ掛けること**（`_lead_gap` と同じ理由）。学習中の車に
         掛けると「歩行者を轢かない世界」になり、PPO から見た環境が変わってしまう。
         PPO 側は観測（歩行者の欄と走行可能領域）から自分で止まれるようになる。
@@ -224,6 +226,14 @@ class SimulationEnv:
         if not ahead.any():
             return float("inf")
         return float(lon[ahead].min())
+
+    def set_player_pose(self, at: tuple[float, float] | None) -> None:
+        """実用モードの徒歩キャラの位置を反映する（None で消す）。
+
+        歩行者として扱うだけで、専用の停止ロジックは持たない。`world.pedestrian_xy`
+        へ混ざるので、車間・擬似カメラ・正解ラベル・観測・衝突判定がそのまま効く。
+        """
+        self.world.set_player(at)
 
     def commandeer_vehicle(self, slot: int) -> None:
         """実用モードの配車へ 1 台を徴用する。走行中のエピソードはここで打ち切る（決定 2）。"""
