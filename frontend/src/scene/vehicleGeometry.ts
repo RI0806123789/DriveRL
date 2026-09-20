@@ -295,19 +295,95 @@ export function makeInteriorGeometry(): THREE.BufferGeometry {
   return merged
 }
 
-/** メーターの文字盤 2 枚（速度計・回転計）。針と同じ面に置く */
+/**
+ * メーターの種類。**並びは文字盤アトラスの段と同じ**（`gaugeTexture.ts`）。
+ * EV なので回転計は持たず、出力と回生を 1 本の針で示すパワーメーターにする。
+ */
+export const GAUGE_KINDS = ['speed', 'power'] as const
+export type GaugeKind = (typeof GAUGE_KINDS)[number]
+
+/** 速度計の目盛りの上限 [km/h]。`maxSpeed` の設定上限（40 m/s = 144 km/h）を覆う */
+export const GAUGE_SPEED_MAX_KMH = 160
+
+/** メーターの文字盤。針と同じ面に置く */
 export const GAUGE_SLOTS: ReadonlyArray<{
   readonly center: readonly [number, number, number]
   readonly radius: number
+  readonly kind: GaugeKind
 }> = [
-  { center: [DASH_REAR_X - 0.01, DASH_TOP_Y - 0.08, DRIVER_SEAT_Z + 0.09], radius: 0.075 },
-  { center: [DASH_REAR_X - 0.01, DASH_TOP_Y - 0.08, DRIVER_SEAT_Z - 0.09], radius: 0.075 },
+  {
+    center: [DASH_REAR_X - 0.01, DASH_TOP_Y - 0.08, DRIVER_SEAT_Z + 0.09],
+    radius: 0.075,
+    kind: 'speed',
+  },
+  {
+    center: [DASH_REAR_X - 0.01, DASH_TOP_Y - 0.08, DRIVER_SEAT_Z - 0.09],
+    radius: 0.075,
+    kind: 'power',
+  },
 ]
 
-/** メーターの文字盤。法線を車両後方（運転者の側）へ向ける */
+/** 速度 [m/s] を速度計の割合 0..1 へ。**目盛りは固定なので `maxSpeed` に依らない** */
+export function speedRatio(speedMps: number): number {
+  return Math.max(0, Math.min(1, (speedMps * 3.6) / GAUGE_SPEED_MAX_KMH))
+}
+
+/**
+ * 加速指令 -1..1 をパワーメーターの割合 0..1 へ。**0.5 が中央（出力も回生もゼロ）**。
+ * 負が回生（CHARGE）、正が出力（POWER）で、`frame.vehicles[].throttle` をそのまま使う。
+ */
+export function powerRatio(throttle: number): number {
+  return Math.max(0, Math.min(1, (throttle + 1) / 2))
+}
+
+/**
+ * メーターの文字盤。法線を車両後方（運転者の側）へ向ける。
+ * ★ **`rotateY` の前に UV を決めておくこと。** 回してから貼ると、文字盤の
+ * 上下左右が入れ替わって目盛りと針がずれる。
+ */
 export function makeGaugeFaceGeometry(radius: number): THREE.BufferGeometry {
-  const g = new THREE.CircleGeometry(radius, 24)
+  const g = new THREE.CircleGeometry(radius, 48)
   g.rotateY(-Math.PI / 2)
+  return g
+}
+
+/**
+ * ウインカーのインジケーター。**2 つのメーターの間の上部**に、左右へ開いて並べる。
+ * `side` は `frame.vehicles[].turnSignal` の符号に対応する（-1 が左）。
+ * ★ **文字盤の円と重ならない高さに置くこと。** メーターは半径 75mm で上端が
+ * ダッシュボード上面のすぐ下まで来るので、間の上部は隙間が狭い。
+ * ここはハンドルのリングの内側だが、**スポークを下・左・右にしてあるので上は空いている**。
+ */
+export const TURN_INDICATOR_SLOTS: ReadonlyArray<{
+  readonly center: readonly [number, number, number]
+  readonly side: -1 | 1
+}> = [
+  { center: [DASH_REAR_X - 0.01, DASH_TOP_Y - 0.02, DRIVER_SEAT_Z + 0.028], side: -1 },
+  { center: [DASH_REAR_X - 0.01, DASH_TOP_Y - 0.02, DRIVER_SEAT_Z - 0.028], side: 1 },
+]
+
+/** インジケーターの大きさ [m]（三角形の高さ） */
+export const TURN_INDICATOR_SIZE = 0.017
+
+/**
+ * ウインカーの矢印 1 個。平面 X=0 の上に、**+Z（運転者から見て左）を指す**三角形を作る。
+ * 右側は行列側で X 軸まわりに反転させる。
+ */
+export function makeTurnIndicatorGeometry(size: number): THREE.BufferGeometry {
+  const g = new THREE.BufferGeometry()
+  g.setAttribute(
+    'position',
+    new THREE.BufferAttribute(
+      new Float32Array([
+        0, 0, size,
+        0, size * 0.62, -size * 0.45,
+        0, -size * 0.62, -size * 0.45,
+      ]),
+      3,
+    ),
+  )
+  g.setIndex([0, 2, 1])
+  g.computeVertexNormals()
   return g
 }
 
@@ -384,18 +460,24 @@ export function makePedalGeometry(): THREE.BufferGeometry {
 
 /**
  * メーターの針。**根元が原点**で、文字盤の面に沿って伸びる。
- * ★ 細くしすぎると、運転席から 0.57m 離れた文字盤の上では見えない
- * （幅 6mm で試したら、暗い車内でまったく判別できなかった）。
+ * 文字盤に目盛りを焼く前は、幅 6mm だと暗い車内で判別できず 12mm まで太らせていた。
+ * 目盛り入りの明るい文字盤になってコントラストが付いたので、実車に近い 1.7mm まで
+ * 細くしてある。**これ以上細くすると、0.57m 先では 1 画素を割って消える。**
  */
 export function makeNeedleGeometry(radius: number): THREE.BufferGeometry {
-  const g = new THREE.BoxGeometry(0.012, radius * 0.86, 0.014)
+  const g = new THREE.BoxGeometry(0.0017, radius * 0.86, 0.0023)
   g.translate(0, (radius * 0.86) / 2, 0)
   return g
 }
 
-/** 針が振れる範囲 [rad]。実車の文字盤と同じく、左下から右下へ回る */
-export const NEEDLE_START = -2.2
-export const NEEDLE_SWEEP = 4.4
+/**
+ * 針が振れる範囲 [rad]。**運転者から見て左下から右下へ（時計回りに）**回る。
+ * ★ 針は車両ローカルの X 軸まわりに回り、運転者から見ると +Z が**左**になるので、
+ * 時計回りにするには開始を正・振れ幅を負にする（符号を逆にすると反時計回りになり、
+ * 速度が上がるほど針が左へ動く）。
+ */
+export const NEEDLE_START = 2.2
+export const NEEDLE_SWEEP = -4.4
 
 /** タイヤの幅 [m]。リムとスポークはこの中へ収める */
 const WHEEL_WIDTH = 0.24
@@ -546,6 +628,23 @@ export function composeFixedMatrix(
   p.scale.setScalar(1)
   p.updateMatrix()
   return out.multiplyMatrices(base, p.matrix)
+}
+
+/** ウインカーの矢印 1 個のワールド行列。右側は左右を反転させる。 */
+export function composeTurnIndicatorMatrix(
+  scratch: TransformScratch,
+  base: THREE.Matrix4,
+  index: number,
+  out: THREE.Matrix4,
+): THREE.Matrix4 {
+  const spec = TURN_INDICATOR_SLOTS[index]
+  const n = scratch.part
+  n.position.set(spec.center[0], spec.center[1], spec.center[2])
+  // X 軸まわりに 180 度回すと、法線を保ったまま指す向きだけが裏返る
+  n.rotation.set(spec.side > 0 ? Math.PI : 0, 0, 0)
+  n.scale.setScalar(1)
+  n.updateMatrix()
+  return out.multiplyMatrices(base, n.matrix)
 }
 
 /** 舵角 [rad] に対するハンドルの回転角 [rad]。左へ切ると反時計回りに回る。 */

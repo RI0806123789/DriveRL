@@ -67,6 +67,8 @@ export interface ScenePalette {
   readonly vehicleGauge: string
   /** メーターの針。**昼夜で変えない**（発光しているため） */
   readonly vehicleNeedle: string
+  /** メーター脇のウインカー表示。**昼夜で変えない**（実車と同じ緑） */
+  readonly vehicleIndicator: string
   /** 衝突中に寄せる色 */
   readonly vehicleCollided: string
   /** 目的地に着いたときに寄せる色 */
@@ -128,6 +130,7 @@ export const DARK_SCENE: ScenePalette = {
   vehicleTrim: '#141619',
   vehicleGauge: '#0c0e11',
   vehicleNeedle: '#ff4a3d',
+  vehicleIndicator: '#4ade80',
   vehicleCollided: '#ff5a4d',
   vehicleReached: '#3ad2a0',
   vehicleHighlight: '#7adcc8',
@@ -183,6 +186,7 @@ export const LIGHT_SCENE: ScenePalette = {
   vehicleTrim: '#26282c',
   vehicleGauge: '#15181d',
   vehicleNeedle: '#ff4a3d',
+  vehicleIndicator: '#4ade80',
   vehicleCollided: '#d43526',
   vehicleReached: '#0f9a6d',
   vehicleHighlight: '#0b8f79',

@@ -29,8 +29,11 @@ import {
   lightStateFor,
 } from './vehicleLights'
 import {
+  GAUGE_KINDS,
   GAUGE_SLOTS,
   PEDAL_SLOTS,
+  TURN_INDICATOR_SIZE,
+  TURN_INDICATOR_SLOTS,
   WHEEL_OFFSETS,
   WHEEL_RADIUS,
   composeFixedMatrix,
@@ -39,6 +42,7 @@ import {
   composePedalMatrix,
   composePlateMatrix,
   composeSteeringMatrix,
+  composeTurnIndicatorMatrix,
   composeVehicleMatrix,
   composeWheelMatrix,
   createTransformScratch,
@@ -52,21 +56,24 @@ import {
   makePedalGeometry,
   makePlateGeometry,
   makeSteeringGeometry,
+  makeTurnIndicatorGeometry,
   makeWheelGeometry,
+  powerRatio,
+  speedRatio,
 } from './vehicleGeometry'
+import { createGaugeAtlas } from './gaugeTexture'
 
 /** 1 台あたりのペダル・メーターの数 */
 const PEDALS_PER_VEHICLE = PEDAL_SLOTS.length
 const GAUGES_PER_VEHICLE = GAUGE_SLOTS.length
+const INDICATORS_PER_VEHICLE = TURN_INDICATOR_SLOTS.length
 
 /**
- * 擬似的なエンジン回転数 0..1。アイドルから、アクセル開度と速度で上がる。
- * **実車の回転数を模しているだけで、物理には一切効かない。**
+ * メーターの針が指す割合 0..1。
+ * **EV なので回転計は持たない**（速度計とパワーメーターの 2 つ）。
  */
-function tachoRatio(speed: number, maxSpeed: number, throttle: number): number {
-  const load = Math.max(0, throttle)
-  const cruise = maxSpeed > 0 ? Math.min(1, speed / maxSpeed) : 0
-  return Math.min(1, 0.12 + load * 0.5 + cruise * 0.45)
+function gaugeRatio(kind: (typeof GAUGE_KINDS)[number], speed: number, throttle: number): number {
+  return kind === 'speed' ? speedRatio(speed) : powerRatio(throttle)
 }
 
 const ringGeom = new THREE.TorusGeometry(2.9, 0.08, 8, 44)
@@ -134,6 +141,29 @@ function attachPlateAtlas(material: THREE.MeshStandardMaterial, count: number): 
   material.customProgramCacheKey = () => `plateAtlas:${rows}`
 }
 
+/**
+ * 文字盤のアトラスから「その段」だけを貼る。プレートと同じ仕掛けだが、
+ * 段は**車両ではなくメーターの種類**で決まる（全車で共通）。
+ */
+function attachGaugeAtlas(material: THREE.MeshStandardMaterial, rows: number): void {
+  const total = Math.max(1, rows).toFixed(1)
+  material.onBeforeCompile = (shader) => {
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', '#include <common>\nattribute float instanceGaugeRow;')
+      .replace(
+        '#include <uv_vertex>',
+        `#include <uv_vertex>
+#ifdef USE_MAP
+\tvMapUv = vec2( vMapUv.x, ( instanceGaugeRow + vMapUv.y ) / ${total} );
+#endif
+#ifdef USE_EMISSIVEMAP
+	vEmissiveMapUv = vec2( vEmissiveMapUv.x, ( instanceGaugeRow + vEmissiveMapUv.y ) / ${total} );
+#endif`,
+      )
+  }
+  material.customProgramCacheKey = () => `gaugeAtlas:${total}`
+}
+
 export interface VehiclesProps {
   maxVehicles: number
   castShadow: boolean
@@ -163,6 +193,7 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
   const pedalRef = useRef<THREE.InstancedMesh>(null)
   const gaugeRef = useRef<THREE.InstancedMesh>(null)
   const needleRef = useRef<THREE.InstancedMesh>(null)
+  const indicatorRef = useRef<THREE.InstancedMesh>(null)
   const wheelRef = useRef<THREE.InstancedMesh>(null)
   const lightRef = useRef<THREE.InstancedMesh>(null)
   const plateRef = useRef<THREE.InstancedMesh>(null)
@@ -175,6 +206,8 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
   const lastState = useRef<Int8Array>(new Int8Array(0))
   /** 直前に書いたライトの明るさ。1.5Hz の点滅で毎フレーム送らないため */
   const lastLights = useRef<Float32Array>(new Float32Array(0))
+  /** 直前に書いたウインカー表示の明るさ。灯火と同じ理由で差分だけ送る */
+  const lastIndicators = useRef<Float32Array>(new Float32Array(0))
 
   const resources = useMemo(() => {
     const bodyGeometry = makeBodyGeometry()
@@ -184,7 +217,18 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
     const steeringGeometry = makeSteeringGeometry()
     const pedalGeometry = makePedalGeometry()
     const gaugeGeometry = makeGaugeFaceGeometry(GAUGE_SLOTS[0].radius)
+    const gaugeRows = new THREE.InstancedBufferAttribute(
+      new Float32Array(count * GAUGES_PER_VEHICLE),
+      1,
+    )
+    gaugeGeometry.setAttribute('instanceGaugeRow', gaugeRows)
     const needleGeometry = makeNeedleGeometry(GAUGE_SLOTS[0].radius)
+    const indicatorGeometry = makeTurnIndicatorGeometry(TURN_INDICATOR_SIZE)
+    const indicatorEmissive = new THREE.InstancedBufferAttribute(
+      new Float32Array(count * INDICATORS_PER_VEHICLE * 3),
+      3,
+    )
+    indicatorGeometry.setAttribute('instanceEmissive', indicatorEmissive)
     const wheelGeometry = makeWheelGeometry()
     const lightGeometry = makeLightGeometry(LIGHT_SIZE)
     const plateGeometry = makePlateGeometry(PLATE_W, PLATE_H)
@@ -236,12 +280,35 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
       metalness: 0.15,
       side: THREE.DoubleSide,
     })
+    // 文字盤は目盛りをテクスチャで焼いてある。色を掛けると目盛りが沈むので白のまま
     const gaugeMaterial = new THREE.MeshStandardMaterial({
-      color: palette.vehicleGauge,
+      color: '#ffffff',
       roughness: 0.4,
       metalness: 0.0,
       side: THREE.DoubleSide,
+      // ★ 発光は **emissiveMap**（同じテクスチャ）に従わせること。`emissive` だけを
+      //   与えると文字盤が一様に光って白く飛び、目盛りも数字も見えなくなる
+      emissive: new THREE.Color('#ffffff'),
+      emissiveIntensity: 0.9,
+      toneMapped: false,
     })
+    attachGaugeAtlas(gaugeMaterial, GAUGE_KINDS.length)
+    // ウインカー表示。消灯時は沈んだ緑、点灯時は `instanceEmissive` で光らせる
+    // （車外の灯火と**同じ仕掛け**にして、明るさの出どころを 1 つにする）
+    // ★ 消灯時は**色を沈ませる**こと（車外の灯体と同じ作り）。明るい緑のまま置くと、
+    //   点いていないのに点いて見えて、左右どちらを出しているのか分からなくなる
+    const indicatorMaterial = new THREE.MeshStandardMaterial({
+      color: new THREE.Color(VEHICLE_LIGHT_OFF).lerp(
+        new THREE.Color(palette.vehicleIndicator),
+        0.3,
+      ),
+      roughness: 0.5,
+      metalness: 0.0,
+      side: THREE.DoubleSide,
+      toneMapped: false,
+    })
+    attachInstanceEmissive(indicatorMaterial)
+
     // 針は暗い車内でも読めるよう自己発光させる（実車の照明の代わり）。
     // ★ 車内には光源が届かないので、**発光を落とすと夜はまったく見えない**
     const needleMaterial = new THREE.MeshStandardMaterial({
@@ -309,7 +376,11 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
       steeringGeometry,
       pedalGeometry,
       gaugeGeometry,
+      gaugeRows,
       needleGeometry,
+      indicatorGeometry,
+      indicatorEmissive,
+      indicatorMaterial,
       interiorMaterial,
       trimMaterial,
       gaugeMaterial,
@@ -337,6 +408,7 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
   useEffect(() => {
     lastState.current = new Int8Array(count).fill(-1)
     lastLights.current = new Float32Array(count * LIGHTS_PER_VEHICLE).fill(-1)
+    lastIndicators.current = new Float32Array(count * INDICATORS_PER_VEHICLE).fill(-1)
     for (let id = 0; id < count; id++) {
       const row = plateUvRow(id, count)
       for (let k = 0; k < PLATES_PER_VEHICLE; k++) {
@@ -344,6 +416,14 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
       }
     }
     resources.plateRows.needsUpdate = true
+    // 文字盤の段はメーターの種類で決まる（車両によらない）
+    for (let id = 0; id < count; id++) {
+      for (let k = 0; k < GAUGES_PER_VEHICLE; k++) {
+        const kind = GAUGE_SLOTS[k].kind
+        resources.gaugeRows.array[id * GAUGES_PER_VEHICLE + k] = GAUGE_KINDS.indexOf(kind)
+      }
+    }
+    resources.gaugeRows.needsUpdate = true
     const lights = lightRef.current
     if (lights) {
       for (let id = 0; id < count; id++) {
@@ -357,6 +437,19 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
 
   // ★ テクスチャは resources とは別に持つ。プリセットだけが変わったときに
     //   ジオメトリごと作り直すと、instancedMesh が count=0 に戻って車が消える
+  // ★ 文字盤は走る街に依らないので、`resources` の寿命に合わせて 1 度だけ作る
+  useEffect(() => {
+    const atlas = createGaugeAtlas()
+    resources.gaugeMaterial.map = atlas
+    resources.gaugeMaterial.emissiveMap = atlas
+    resources.gaugeMaterial.needsUpdate = true
+    return () => {
+      resources.gaugeMaterial.map = null
+      resources.gaugeMaterial.emissiveMap = null
+      atlas.dispose()
+    }
+  }, [resources])
+
   useEffect(() => {
     const atlas = createPlateAtlas(count, presetId)
     resources.plateMaterial.map = atlas
@@ -375,9 +468,11 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
     resources.ringMaterial.color.set(palette.vehicleHighlight)
     resources.interiorMaterial.color.set(palette.vehicleInterior)
     resources.trimMaterial.color.set(palette.vehicleTrim)
-    resources.gaugeMaterial.color.set(palette.vehicleGauge)
     resources.needleMaterial.color.set(palette.vehicleNeedle)
     resources.needleMaterial.emissive.set(palette.vehicleNeedle)
+    resources.indicatorMaterial.color
+      .set(VEHICLE_LIGHT_OFF)
+      .lerp(new THREE.Color(palette.vehicleIndicator), 0.3)
     lastState.current.fill(-1)
   }, [resources, palette])
 
@@ -392,6 +487,8 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
       r.pedalGeometry.dispose()
       r.gaugeGeometry.dispose()
       r.needleGeometry.dispose()
+      r.indicatorGeometry.dispose()
+      r.indicatorMaterial.dispose()
       r.interiorMaterial.dispose()
       r.trimMaterial.dispose()
       r.gaugeMaterial.dispose()
@@ -431,11 +528,12 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
     const pedals = pedalRef.current
     const gauges = gaugeRef.current
     const needles = needleRef.current
+    const indicators = indicatorRef.current
     const wheel = wheelRef.current
     const lights = lightRef.current
     const plates = plateRef.current
     if (!body || !nose || !glass || !interior || !wheel || !lights || !plates) return
-    if (!steering || !pedals || !gauges || !needles) return
+    if (!steering || !pedals || !gauges || !needles || !indicators) return
     if (lastState.current.length !== count) return
 
     const store = useSimStore.getState()
@@ -454,6 +552,7 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
     const hazardId = isWaitingPhase(taxi.phase) ? taxi.vehicleId : -1
     let colorDirty = false
     let lightDirty = false
+    let indicatorDirty = false
     let highlightX = 0
     let highlightY = 0
     let hasHighlight = false
@@ -476,6 +575,9 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
         for (let k = 0; k < GAUGES_PER_VEHICLE; k++) {
           gauges.setMatrixAt(id * GAUGES_PER_VEHICLE + k, scratch.hidden)
           needles.setMatrixAt(id * GAUGES_PER_VEHICLE + k, scratch.hidden)
+        }
+        for (let k = 0; k < INDICATORS_PER_VEHICLE; k++) {
+          indicators.setMatrixAt(id * INDICATORS_PER_VEHICLE + k, scratch.hidden)
         }
         for (let k = 0; k < LIGHTS_PER_VEHICLE; k++) {
           lights.setMatrixAt(id * LIGHTS_PER_VEHICLE + k, scratch.hidden)
@@ -504,14 +606,11 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
         pedals.setMatrixAt(id * PEDALS_PER_VEHICLE + k, scratch.out)
       }
 
-      const ratios = [
-        Math.min(1, pose.speed / maxSpeed),
-        tachoRatio(pose.speed, maxSpeed, pose.throttle),
-      ]
       for (let k = 0; k < GAUGES_PER_VEHICLE; k++) {
         composeFixedMatrix(scratch.transform, scratch.base, GAUGE_SLOTS[k].center, scratch.out)
         gauges.setMatrixAt(id * GAUGES_PER_VEHICLE + k, scratch.out)
-        composeNeedleMatrix(scratch.transform, scratch.base, k, ratios[k], scratch.out)
+        const ratio = gaugeRatio(GAUGE_SLOTS[k].kind, pose.speed, pose.throttle)
+        composeNeedleMatrix(scratch.transform, scratch.base, k, ratio, scratch.out)
         needles.setMatrixAt(id * GAUGES_PER_VEHICLE + k, scratch.out)
       }
 
@@ -536,6 +635,11 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
           scratch.out,
         )
         plates.setMatrixAt(id * PLATES_PER_VEHICLE + k, scratch.out)
+      }
+
+      for (let k = 0; k < INDICATORS_PER_VEHICLE; k++) {
+        composeTurnIndicatorMatrix(scratch.transform, scratch.base, k, scratch.out)
+        indicators.setMatrixAt(id * INDICATORS_PER_VEHICLE + k, scratch.out)
       }
 
       const lightState = lightStateFor({
@@ -564,6 +668,22 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
         resources.lightEmissive.array[e] = scratch.light.r
         resources.lightEmissive.array[e + 1] = scratch.light.g
         resources.lightEmissive.array[e + 2] = scratch.light.b
+      }
+
+      // ★ 車外の方向指示器と**同じ `lightState`** から明るさを決める。
+      //   別に計算すると、メーターだけ点いている（消えている）食い違いが起きる
+      for (let k = 0; k < INDICATORS_PER_VEHICLE; k++) {
+        const index = id * INDICATORS_PER_VEHICLE + k
+        const on = TURN_INDICATOR_SLOTS[k].side < 0 ? lightState.left : lightState.right
+        const level = on ? 1 : 0
+        if (lastIndicators.current[index] === level) continue
+        lastIndicators.current[index] = level
+        indicatorDirty = true
+        scratch.light.set(palette.vehicleIndicator).multiplyScalar(level * 1.6)
+        const e = index * 3
+        resources.indicatorEmissive.array[e] = scratch.light.r
+        resources.indicatorEmissive.array[e + 1] = scratch.light.g
+        resources.indicatorEmissive.array[e + 2] = scratch.light.b
       }
 
       const state = pose.collided ? STATE_COLLIDED : pose.reachedGoal ? STATE_GOAL : STATE_NORMAL
@@ -609,6 +729,8 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
     pedals.instanceMatrix.needsUpdate = true
     gauges.instanceMatrix.needsUpdate = true
     needles.instanceMatrix.needsUpdate = true
+    indicators.instanceMatrix.needsUpdate = true
+    if (indicatorDirty) resources.indicatorEmissive.needsUpdate = true
     wheel.instanceMatrix.needsUpdate = true
     lights.instanceMatrix.needsUpdate = true
     plates.instanceMatrix.needsUpdate = true
@@ -685,6 +807,16 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
         key={`needle-${count}`}
         ref={needleRef}
         args={[resources.needleGeometry, resources.needleMaterial, count * GAUGES_PER_VEHICLE]}
+        frustumCulled={false}
+      />
+      <instancedMesh
+        key={`indicator-${count}`}
+        ref={indicatorRef}
+        args={[
+          resources.indicatorGeometry,
+          resources.indicatorMaterial,
+          count * INDICATORS_PER_VEHICLE,
+        ]}
         frustumCulled={false}
       />
       <instancedMesh

@@ -6,6 +6,10 @@ import {
   CABIN_OFFSET,
   COLUMN_TILT,
   DASH_REAR_X,
+  GAUGE_KINDS,
+  GAUGE_SPEED_MAX_KMH,
+  TURN_INDICATOR_SIZE,
+  TURN_INDICATOR_SLOTS,
   DRIVER_SEAT_Z,
   GAUGE_SLOTS,
   NEEDLE_START,
@@ -26,6 +30,7 @@ import {
   composeNeedleMatrix,
   composePedalMatrix,
   composeSteeringMatrix,
+  composeTurnIndicatorMatrix,
   composeVehicleMatrix,
   composeWheelMatrix,
   createTransformScratch,
@@ -38,8 +43,11 @@ import {
   makeNoseGeometry,
   makePedalGeometry,
   makeSteeringGeometry,
+  makeTurnIndicatorGeometry,
   needleAngle,
   pedalPress,
+  powerRatio,
+  speedRatio,
   steeringAngle,
   composeLightMatrix,
   composePlateMatrix,
@@ -674,8 +682,15 @@ console.log('='.repeat(70))
   )
   check(
     '針の振れ角は 1 回転に満たない',
-    NEEDLE_SWEEP > 0 && NEEDLE_SWEEP < Math.PI * 2,
-    ((NEEDLE_SWEEP * 180) / Math.PI).toFixed(0) + ' 度',
+    Math.abs(NEEDLE_SWEEP) > 0 && Math.abs(NEEDLE_SWEEP) < Math.PI * 2,
+    Math.abs((NEEDLE_SWEEP * 180) / Math.PI).toFixed(0) + ' 度',
+  )
+  // ★ 運転者から見て時計回りに振れること。針は車両ローカルの X 軸まわりに回り、
+  //   運転者からは +Z が左に見えるので、**開始が正・振れ幅が負**でないと逆回りになる
+  check(
+    '速度が上がると針が時計回り（運転者から見て右）へ回る',
+    NEEDLE_START > 0 && NEEDLE_SWEEP < 0,
+    '開始 ' + NEEDLE_START.toFixed(2) + ' / 振れ ' + NEEDLE_SWEEP.toFixed(2),
   )
 
   composeVehicleMatrix(scratch, 0, 0, 0, base)
@@ -801,6 +816,198 @@ console.log('='.repeat(70))
     DRIVER_FOV_DEG / 2 - lookDown > 30,
     '上端 ' + (DRIVER_FOV_DEG / 2 - lookDown).toFixed(1) + ' 度',
   )
+}
+
+console.log()
+console.log('='.repeat(70))
+console.log('メーター（速度計とパワーメーター）')
+console.log('='.repeat(70))
+
+{
+  // EV なので回転計は持たない
+  check(
+    'メーターは速度計とパワーメーターの 2 つ',
+    GAUGE_KINDS.length === 2 && GAUGE_KINDS[0] === 'speed' && GAUGE_KINDS[1] === 'power',
+    GAUGE_KINDS.join(' / '),
+  )
+  check(
+    '文字盤の並びが GAUGE_SLOTS と一致する',
+    GAUGE_SLOTS.every((g, i) => g.kind === GAUGE_KINDS[i]),
+  )
+
+  // 速度計。目盛りは固定なので、設定できる最高速度（40 m/s = 144 km/h）を覆うこと
+  check(
+    '速度計の目盛りが maxSpeed の上限（144 km/h）を覆う',
+    GAUGE_SPEED_MAX_KMH >= 144,
+    '0〜' + GAUGE_SPEED_MAX_KMH + ' km/h',
+  )
+  check('停車で針が 0 を指す', speedRatio(0) === 0)
+  // 目盛りは固定なので、既定の最高速度でどれだけ振れるかは選んだ上限で決まる。
+  // 読み取れる範囲（目盛りの 1/4 以上）に入っていること
+  check(
+    '既定の最高速度（13.9 m/s ≒ 50 km/h）で針が読める範囲まで振れる',
+    speedRatio(13.9) >= 0.25,
+    (speedRatio(13.9) * 100).toFixed(1) + '%（上限 ' + GAUGE_SPEED_MAX_KMH + ' km/h）',
+  )
+  check('目盛りを超えても振り切れない', speedRatio(100) === 1)
+  check(
+    '速度が上がるほど針が進む',
+    speedRatio(5) < speedRatio(10) && speedRatio(10) < speedRatio(20),
+  )
+
+  // パワーメーター。中央が 0 で、回生（負）と出力（正）に振れる
+  check(
+    'アクセルもブレーキも踏んでいないとき、針が中央を指す',
+    Math.abs(powerRatio(0) - 0.5) < 1e-12,
+    powerRatio(0).toFixed(3),
+  )
+  check('目いっぱいの出力で右いっぱい', powerRatio(1) === 1)
+  check('目いっぱいの回生で左いっぱい', powerRatio(-1) === 0)
+  check(
+    '出力と回生が中央に対して対称',
+    Math.abs(powerRatio(0.4) - 0.5 - (0.5 - powerRatio(-0.4))) < 1e-12,
+  )
+  check('範囲の外へは振れない', powerRatio(3) === 1 && powerRatio(-3) === 0)
+
+  // 針の角度。中央（0.5）が真上を向くこと
+  check(
+    'パワーメーターの中央が真上を向く',
+    Math.abs(needleAngle(powerRatio(0))) < 1e-12,
+    (needleAngle(powerRatio(0)) * 180 / Math.PI).toFixed(1) + ' 度',
+  )
+  // 出力側（正）は時計回り = 角度が負の側
+  check(
+    '出力側で針が右（時計回り）へ振れる',
+    needleAngle(powerRatio(0.5)) < 0,
+    (needleAngle(powerRatio(0.5)) * 180 / Math.PI).toFixed(1) + ' 度',
+  )
+  check(
+    '回生側で針が左へ振れる',
+    needleAngle(powerRatio(-0.5)) > 0,
+    (needleAngle(powerRatio(-0.5)) * 180 / Math.PI).toFixed(1) + ' 度',
+  )
+}
+
+console.log()
+console.log('='.repeat(70))
+console.log('メーターのウインカー表示')
+console.log('='.repeat(70))
+
+{
+  check('左右 2 つある', TURN_INDICATOR_SLOTS.length === 2)
+  check(
+    '左が -1・右が +1（frame の turnSignal と同じ符号）',
+    TURN_INDICATOR_SLOTS[0].side === -1 && TURN_INDICATOR_SLOTS[1].side === 1,
+  )
+  // 運転者から見て +Z が左。左の矢印は +Z 側に置く
+  check(
+    '左の表示が運転席から見て左（+Z）にある',
+    TURN_INDICATOR_SLOTS[0].center[2] > TURN_INDICATOR_SLOTS[1].center[2],
+    TURN_INDICATOR_SLOTS[0].center[2].toFixed(2) + ' / ' + TURN_INDICATOR_SLOTS[1].center[2].toFixed(2),
+  )
+  check(
+    '左右がメーターの中心に対して対称',
+    Math.abs(
+      TURN_INDICATOR_SLOTS[0].center[2] +
+        TURN_INDICATOR_SLOTS[1].center[2] -
+        2 * DRIVER_SEAT_Z,
+    ) < 1e-9,
+  )
+
+  // 2 つのメーターの「間」に収まっていること
+  const gapMin = Math.min(GAUGE_SLOTS[0].center[2], GAUGE_SLOTS[1].center[2])
+  const gapMax = Math.max(GAUGE_SLOTS[0].center[2], GAUGE_SLOTS[1].center[2])
+  for (let k = 0; k < TURN_INDICATOR_SLOTS.length; k++) {
+    const z = TURN_INDICATOR_SLOTS[k].center[2]
+    check(
+      'ウインカー表示 ' + k + ' が 2 つのメーターの間にある',
+      z > gapMin && z < gapMax,
+      'Z=' + z.toFixed(3) + '（メーター ' + gapMin.toFixed(2) + '〜' + gapMax.toFixed(2) + '）',
+    )
+  }
+
+  // ★ メーターの円と重ならないこと（間は狭いので、上へ逃がしてある）
+  for (let k = 0; k < TURN_INDICATOR_SLOTS.length; k++) {
+    const c = TURN_INDICATOR_SLOTS[k].center
+    let worst = Infinity
+    for (const g of GAUGE_SLOTS) {
+      worst = Math.min(worst, Math.hypot(c[1] - g.center[1], c[2] - g.center[2]) - g.radius)
+    }
+    check(
+      'ウインカー表示 ' + k + ' が文字盤の円と重ならない',
+      worst > 0,
+      '余白 ' + (worst * 1000).toFixed(0) + 'mm',
+    )
+  }
+
+  // ★ ハンドルのリングの内側から覗く位置なので、**ハブとスポークを外すこと**。
+  //   スポークは下・左・右の 3 本なので、視線がハンドル中心より「上」を通れば当たらない
+  const eyeX = DRIVER_FORWARD
+  const eyeY = DRIVER_EYE_HEIGHT
+  const eyeZ = DRIVER_SEAT_Z
+  const hubRadius = 0.052
+  for (let k = 0; k < TURN_INDICATOR_SLOTS.length; k++) {
+    const c = TURN_INDICATOR_SLOTS[k].center
+    const t = (STEERING_CENTER[0] - eyeX) / (c[0] - eyeX)
+    const crossY = eyeY + (c[1] - eyeY) * t
+    const crossZ = eyeZ + (c[2] - eyeZ) * t
+    const d = Math.hypot(crossY - STEERING_CENTER[1], crossZ - STEERING_CENTER[2])
+    check(
+      'ウインカー表示 ' + k + ' への視線がハンドルのハブを外れる',
+      d > hubRadius,
+      'ハンドル中心から ' + d.toFixed(3) + 'm（ハブ半径 ' + hubRadius + 'm）',
+    )
+    check(
+      'ウインカー表示 ' + k + ' への視線がリングの内側を通る',
+      d < STEERING_RADIUS,
+      d.toFixed(3) + 'm < リム半径 ' + STEERING_RADIUS + 'm',
+    )
+    check(
+      'ウインカー表示 ' + k + ' への視線がスポークの無い上側を通る',
+      crossY > STEERING_CENTER[1],
+      '高さ ' + crossY.toFixed(3) + 'm（ハンドル中心 ' + STEERING_CENTER[1].toFixed(3) + 'm）',
+    )
+  }
+
+  // 矢印の向き。左は +Z、右は -Z を指す
+  composeVehicleMatrix(scratch, 0, 0, 0, base)
+  const tip = new THREE.Vector3(0, 0, TURN_INDICATOR_SIZE)
+  for (let k = 0; k < TURN_INDICATOR_SLOTS.length; k++) {
+    composeTurnIndicatorMatrix(scratch, base, k, out)
+    const at = tip.clone().applyMatrix4(out)
+    const centre = new THREE.Vector3(
+      TURN_INDICATOR_SLOTS[k].center[0],
+      TURN_INDICATOR_SLOTS[k].center[1],
+      TURN_INDICATOR_SLOTS[k].center[2],
+    )
+    const points = at.z - centre.z
+    const wantLeft = TURN_INDICATOR_SLOTS[k].side < 0
+    check(
+      (wantLeft ? '左' : '右') + 'の矢印が' + (wantLeft ? '左（+Z）' : '右（-Z）') + 'を指す',
+      wantLeft ? points > 0 : points < 0,
+      points.toFixed(4),
+    )
+  }
+
+  // ★ 点灯は車外の方向指示器と同じ `lightStateFor` から取ること
+  const left = lightStateFor({ braking: false, turnSignal: -1, hazard: false, headlights: false, blink: true })
+  check('左を出すと左だけ点く', left.left && !left.right)
+  const right = lightStateFor({ braking: false, turnSignal: 1, hazard: false, headlights: false, blink: true })
+  check('右を出すと右だけ点く', right.right && !right.left)
+  const off = lightStateFor({ braking: false, turnSignal: -1, hazard: false, headlights: false, blink: false })
+  check('点滅の消えている位相では消灯する', !off.left && !off.right)
+  const hazard = lightStateFor({ braking: false, turnSignal: 0, hazard: true, headlights: false, blink: true })
+  check('ハザードで左右とも点く', hazard.left && hazard.right)
+
+  const geom = makeTurnIndicatorGeometry(TURN_INDICATOR_SIZE)
+  geom.computeBoundingBox()
+  const b = geom.boundingBox!
+  check(
+    '矢印が板（厚みを持たない）',
+    Math.abs(b.max.x - b.min.x) < 1e-9,
+    '厚み ' + (b.max.x - b.min.x).toExponential(1) + 'm',
+  )
+  geom.dispose()
 }
 
 console.log()
