@@ -167,7 +167,11 @@ class SimulationEngine:
     def update_params(self, patch: dict[str, Any]) -> tuple[SimParams, ParamPatchResult]:
         """camelCase の部分更新を検証して適用し、(更新後のパラメータ, 検証結果) を返す。"""
         with self._lock:
-            result = self._params.apply_wire(patch, max_vehicles=config.MAX_VEHICLES)
+            result = self._params.apply_wire(
+                patch,
+                max_vehicles=config.MAX_VEHICLES,
+                max_pedestrians=config.MAX_PEDESTRIANS,
+            )
             snapshot = SimParams(**vars(self._params))
         self._inbox.put(("params", snapshot))
         return snapshot, result

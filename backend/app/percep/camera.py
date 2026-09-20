@@ -12,6 +12,9 @@ from app.contracts import MapIndex
 from app.percep.geometry import project_components
 from app.percep.types import (
     DEFAULT_CAMERA,
+    PEDESTRIAN_HALF_WIDTH,
+    PEDESTRIAN_HEAD_RADIUS,
+    PEDESTRIAN_HEAD_Z,
     SIGN_BOARD_Z,
     SIGN_RADIUS,
     SIGNAL_BEYOND_MARGIN,
@@ -48,6 +51,8 @@ LBL_SIGN_RIM = 13
 LBL_SIGN_FACE = 14
 LBL_SIGN_DIGIT = 15
 LBL_POLE = 16
+LBL_PEDESTRIAN = 17
+LBL_PEDESTRIAN_HEAD = 18
 
 LABELS = {
     "ground": LBL_GROUND,
@@ -67,6 +72,8 @@ LABELS = {
     "sign_face": LBL_SIGN_FACE,
     "sign_digit": LBL_SIGN_DIGIT,
     "pole": LBL_POLE,
+    "pedestrian": LBL_PEDESTRIAN,
+    "pedestrian_head": LBL_PEDESTRIAN_HEAD,
 }
 
 PALETTE = np.array(
@@ -88,6 +95,8 @@ PALETTE = np.array(
         (243, 243, 239),
         (18, 18, 18),
         (150, 150, 152),
+        (58, 104, 176),
+        (216, 176, 140),
     ],
     dtype=np.uint8,
 )
@@ -538,6 +547,7 @@ class PseudoCamera:
         for part in (
             self._collect_vehicles(world, slots, eye_x, eye_y, cos_h, sin_h),
             self._collect_obstacles(world, eye_x, eye_y, cos_h, sin_h),
+            self._collect_pedestrians(world, eye_x, eye_y, cos_h, sin_h),
             self._collect_signals(world, eye_x, eye_y, cos_h, sin_h, heading),
             self._collect_signs(eye_x, eye_y, cos_h, sin_h, heading),
         ):
@@ -803,6 +813,74 @@ class PseudoCamera:
             np.full(cam.size, LBL_OBSTACLE, dtype=np.uint8),
             zc[visible].astype(np.float32),
             np.zeros(cam.size, dtype=np.int16),
+        )
+
+    def _collect_pedestrians(
+        self,
+        world: "World",
+        eye_x: np.ndarray,
+        eye_y: np.ndarray,
+        cos_h: np.ndarray,
+        sin_h: np.ndarray,
+    ):
+        """歩行者を「胴の矩形 + 頭の楕円」で描く。"""
+        xy = world.pedestrian_xy
+        k = int(xy.shape[0])
+        if k == 0:
+            return None
+        n = eye_x.size
+
+        px = np.broadcast_to(xy[None, :, 0], (n, k))
+        py = np.broadcast_to(xy[None, :, 1], (n, k))
+        eye_col_x = eye_x[:, None]
+        eye_col_y = eye_y[:, None]
+        cos_col = cos_h[:, None]
+        sin_col = sin_h[:, None]
+
+        _u, v_foot, zc = self._project(
+            px, py, np.zeros_like(px), eye_col_x, eye_col_y, cos_col, sin_col
+        )
+        u_head, v_head, _z = self._project(
+            px,
+            py,
+            np.full_like(px, PEDESTRIAN_HEAD_Z),
+            eye_col_x,
+            eye_col_y,
+            cos_col,
+            sin_col,
+        )
+        visible = (zc > self._near) & (zc < self._far)
+        if not visible.any():
+            return None
+
+        safe = np.maximum(zc, 1e-3)
+        half_w = (self._focal * PEDESTRIAN_HALF_WIDTH / safe).astype(np.float32)
+        head_r = (self._focal * PEDESTRIAN_HEAD_RADIUS / safe).astype(np.float32)
+
+        cam = np.broadcast_to(np.arange(n, dtype=np.int32)[:, None], visible.shape)[visible]
+        u_v = u_head[visible].astype(np.float32)
+        top = (v_head + head_r)[visible].astype(np.float32)
+        foot = v_foot[visible].astype(np.float32)
+        body_cy = (top + foot) * 0.5
+        body_hh = (foot - top) * 0.5
+        depth = zc[visible].astype(np.float32)
+        m = cam.size
+
+        return (
+            np.concatenate([cam, cam]),
+            np.concatenate([u_v, u_v]),
+            np.concatenate([body_cy, v_head[visible].astype(np.float32)]),
+            np.concatenate([half_w[visible], head_r[visible]]),
+            np.concatenate([body_hh, head_r[visible]]),
+            np.concatenate([np.zeros(m, dtype=bool), np.ones(m, dtype=bool)]),
+            np.concatenate(
+                [
+                    np.full(m, LBL_PEDESTRIAN, dtype=np.uint8),
+                    np.full(m, LBL_PEDESTRIAN_HEAD, dtype=np.uint8),
+                ]
+            ),
+            np.concatenate([depth, depth]),
+            np.concatenate([np.zeros(m, dtype=np.int16), np.ones(m, dtype=np.int16)]),
         )
 
     def _pairs(self, grid: _NeighborIndex, eye_x: np.ndarray, eye_y: np.ndarray):

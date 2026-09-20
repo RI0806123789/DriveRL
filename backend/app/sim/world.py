@@ -11,6 +11,7 @@ import numpy as np
 
 from app import config
 from app.contracts import FrameSnapshot, MapIndex, ObstacleSnapshot, VehicleSnapshot
+from app.sim.pedestrians import PedestrianCrowd
 from app.sim.signals import (
     RED,
     YELLOW,
@@ -40,6 +41,9 @@ SIGNAL_LOOKAHEAD_COUNT = 3
 
 LANE_DEPARTURE_M = config.LANE_DEPARTURE_M
 LANE_RETURN_M = config.LANE_RETURN_M
+
+#: 誰にも見えていない歩行者を車の近くへ回す間隔 [秒]。毎ステップやる必要はない
+PEDESTRIAN_RECYCLE_SEC = 2.0
 
 FORWARD_NODE_RADIUS_M = 150.0
 FORWARD_NODE_MIN_M = 14.0
@@ -108,10 +112,12 @@ class World:
         self.map_index = map_index
         self.rng = rng
         self.fleet = VehicleFleet(config.MAX_VEHICLES)
+        self.crowd = PedestrianCrowd(map_index, rng)
         self.obstacles: list[ObstacleState] = []
         self.slots: list[SlotState] = [SlotState() for _ in range(config.MAX_VEHICLES)]
 
         self._next_obstacle_id = 0
+        self._recycled_at = 0.0
         self._signals_on_route_failed = False
         self._speed_limits_on_route_failed = False
         n = config.MAX_VEHICLES
@@ -360,9 +366,35 @@ class World:
         return self._with_endpoints(self._trim_tail(route, dst_snap), src_snap, dst_snap)
 
     def advance_time(self, dt: float) -> None:
-        """シミュレーション内時刻を進め、信号の現示を更新する。"""
+        """シミュレーション内時刻を進め、信号の現示と歩行者を更新する。"""
         self.sim_time += float(dt)
         self.signal_phases = self.signals.phases(self.sim_time)
+        self.crowd.step(float(dt))
+        if self.sim_time - self._recycled_at >= PEDESTRIAN_RECYCLE_SEC:
+            self._recycled_at = self.sim_time
+            self.crowd.recycle(self._active_vehicle_xy())
+
+    def set_pedestrian_count(self, count: int) -> None:
+        """街を歩く NPC 歩行者の人数を変える。"""
+        self.crowd.set_count(int(count), self._active_vehicle_xy())
+
+    def relocate_pedestrians(self) -> None:
+        """歩行者を街中へ置き直す（エピソードのリセット・教師データの散らし直し）。"""
+        self.crowd.relocate(self._active_vehicle_xy())
+
+    def _active_vehicle_xy(self) -> np.ndarray:
+        """走っている車両の座標 (K, 2)。歩行者を湧かせる場所を避けるのに使う。"""
+        idx = np.flatnonzero(self.fleet.active)
+        if idx.size == 0:
+            return np.zeros((0, 2), dtype=np.float64)
+        return np.column_stack(
+            (self.fleet.x[idx].astype(np.float64), self.fleet.y[idx].astype(np.float64))
+        )
+
+    @property
+    def pedestrian_xy(self) -> np.ndarray:
+        """いる歩行者の座標 (K, 2) float64。擬似カメラ・正解ラベル・衝突判定が使う。"""
+        return self.crowd.positions
 
     def next_signal(self, slot: int) -> tuple[float, int]:
         """そのスロットの前方にある直近の信号を (停止線までの距離 [m], 灯色) で返す。"""
@@ -908,7 +940,7 @@ class World:
         self.reached_flags = np.asarray(reached, dtype=bool).copy()
 
     def check_collisions(self) -> np.ndarray:
-        """建物・車両同士・障害物の 3 種類をまとめて判定する。shape (N,) bool。"""
+        """建物・車両同士・障害物・歩行者の 4 種類をまとめて判定する。shape (N,) bool。"""
         n = config.MAX_VEHICLES
         hit = np.zeros(n, dtype=bool)
         active = self.fleet.active
@@ -948,6 +980,22 @@ class World:
             hit[idx] |= _in_body_ellipse(
                 self._obstacle_xy[None, :, 0] - px,
                 self._obstacle_xy[None, :, 1] - py,
+                cos_h,
+                sin_h,
+                np.float64(config.VEHICLE_LENGTH * 0.5) + radius,
+                np.float64(config.VEHICLE_WIDTH * 0.5) + radius,
+            ).any(axis=1)
+
+        people = self.pedestrian_xy
+        if people.shape[0] > 0:
+            px = self.fleet.x[idx].astype(np.float64)[:, None]
+            py = self.fleet.y[idx].astype(np.float64)[:, None]
+            cos_h = np.cos(self.fleet.heading[idx].astype(np.float64))[:, None]
+            sin_h = np.sin(self.fleet.heading[idx].astype(np.float64))[:, None]
+            radius = np.float64(config.PEDESTRIAN_RADIUS)
+            hit[idx] |= _in_body_ellipse(
+                people[None, :, 0] - px,
+                people[None, :, 1] - py,
                 cos_h,
                 sin_h,
                 np.float64(config.VEHICLE_LENGTH * 0.5) + radius,
@@ -999,4 +1047,5 @@ class World:
             sim_time=float(sim_time),
             vehicles=vehicles,
             obstacles=obstacles,
+            pedestrians=self.crowd.snapshot(),
         )

@@ -9,6 +9,7 @@ import { DetectionOverlay } from './DetectionOverlay'
 import { Ground } from './Ground'
 import { InteractionPlane } from './InteractionPlane'
 import { LaneDetectionOverlay } from './LaneDetectionOverlay'
+import { NpcPedestrians } from './NpcPedestrians'
 import { Obstacles } from './Obstacles'
 import { Pedestrian } from './Pedestrian'
 import { Rain } from './Rain'
@@ -118,6 +119,7 @@ export function SimulatorView() {
           <LaneDetectionOverlay />
           <Vehicles maxVehicles={maxVehicles} castShadow={view.shadows} />
           <Obstacles castShadow={view.shadows} />
+          <NpcPedestrians castShadow={view.shadows} />
           <Rain />
 
           {taxiMode && <TaxiMarkers />}

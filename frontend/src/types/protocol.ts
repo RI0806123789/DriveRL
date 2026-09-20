@@ -1,7 +1,7 @@
-/** docs/protocol.md v1 の TypeScript 表現。 */
+/** docs/protocol.md v2 の TypeScript 表現。 */
 
 /** プロトコルバージョン。init.protocolVersion がこれと違えば警告する */
-export const PROTOCOL_VERSION = 1
+export const PROTOCOL_VERSION = 2
 
 /** ENU 平面上の座標 [x（東）, y（北）]（メートル） */
 export type Vec2 = [number, number]
@@ -20,6 +20,8 @@ export interface MapPreset {
 export interface SimConfig {
   /** 事前確保するエージェントスロット数（擬似固定エージェント数方式） */
   maxVehicles: number
+  /** 街を歩く NPC 歩行者の上限 */
+  maxPedestrians?: number
   /** 物理・学習ステップの周波数 [Hz] */
   simHz: number
   obsDim: number
@@ -30,6 +32,8 @@ export interface SimConfig {
 export interface SimParams {
   /** アクティブにする車両数 (1..maxVehicles) */
   vehicleCount: number
+  /** 街を歩く NPC 歩行者の数 (0..maxPedestrians) */
+  pedestrianCount: number
   /** 実時間に対する倍率 (0.25..4.0) */
   simSpeed: number
   learningRate: number
@@ -247,12 +251,29 @@ export interface ObstacleState {
   radius: number
 }
 
+/** 街を歩く NPC 歩行者 1 人（protocol.md 2.3）。 */
+export interface NpcPedestrianState {
+  /** スロット番号。消えるまで変わらない */
+  id: number
+  /** ENU x [m] */
+  x: number
+  /** ENU y [m] */
+  y: number
+  /** 体の向き [rad] */
+  heading: number
+  /** 手足の振りの位相 [rad]。**描画のためだけに送られる** */
+  stride: number
+  /** 車道を横断中か */
+  crossing: boolean
+}
+
 /** 画像認識の検出クラス。**バックエンドの `percep.DetClass` と同じ並び**。 */
 export const DET_TRAFFIC_LIGHT = 0
 export const DET_SPEED_SIGN = 1
 export const DET_VEHICLE = 2
 export const DET_OBSTACLE = 3
 export const DET_LANE = 4
+export const DET_PEDESTRIAN = 5
 
 /** 擬似カメラ画像から認識器が見つけた物体 1 個（protocol.md 2.3）。 */
 export interface Detection {
@@ -284,6 +305,8 @@ export interface FrameMessage {
   /** 常に全スロット分（maxVehicles 個） */
   vehicles: VehicleState[]
   obstacles: ObstacleState[]
+  /** 街を歩く NPC 歩行者。0 人のときは省略される。 */
+  pedestrians?: NpcPedestrianState[]
   /** 信号の現示。map.signals と同じ並びで 0=青 / 1=黄 / 2=赤。 */
   signals?: number[]
   /** 車両ごとの認識結果。**キーはスロット番号の文字列**（JSON のキーは文字列のため）。 */

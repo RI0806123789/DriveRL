@@ -15,6 +15,7 @@ import type {
   MapSign,
   MapSignal,
   MetricsMessage,
+  NpcPedestrianState,
   ObstacleState,
   ServerMessage,
   SimConfig,
@@ -28,6 +29,7 @@ import type {
 } from '../types/protocol'
 import {
   DET_LANE,
+  DET_PEDESTRIAN,
   DET_TRAFFIC_LIGHT,
   PROTOCOL_VERSION,
   SIGNAL_GREEN,
@@ -103,8 +105,9 @@ const MOCK_PRESETS: MapPreset[] = [
 
 const MOCK_CONFIG: SimConfig = {
   maxVehicles: 8,
+  maxPedestrians: 64,
   simHz: SIM_HZ,
-  obsDim: 57,
+  obsDim: 66,
   actionDim: 2,
 }
 
@@ -119,6 +122,7 @@ const MOCK_WEATHER_PRESETS: WeatherPreset[] = [
 
 const DEFAULT_PARAMS: SimParams = {
   vehicleCount: 4,
+  pedestrianCount: 16,
   simSpeed: 1,
   learningRate: 3e-4,
   gamma: 0.99,
@@ -355,6 +359,31 @@ function buildMockSpeedSigns(nodes: MapNode[], edges: MapEdge[]): MapSign[] {
   return signs
 }
 
+/** モックの歩行者。格子の道に沿って歩き、交差点でたまに車道を横断する */
+interface MockPedestrian {
+  id: number
+  gx: number
+  gy: number
+  /** 次に向かうノード */
+  tx: number
+  ty: number
+  /** 区間の進み具合 0.0〜1.0 */
+  t: number
+  /** 歩道の左右。+1 が進行方向の左 */
+  side: number
+  /** 横断の進み具合 0.0〜1.0。0 なら歩道 */
+  cross: number
+  crossing: boolean
+  stride: number
+  speed: number
+}
+
+/** 歩道が車道中心から離れている距離 [m]（バックエンドの PEDESTRIAN_SIDEWALK_MARGIN 相当） */
+const WALK_OFFSET_M = ROAD_WIDTH / 2 + 1.7
+
+/** これより遠い歩行者は車の近くへ回す [m]（バックエンドの RECYCLE_FAR_M 相当） */
+const PEDESTRIAN_RECYCLE_M = 220
+
 interface MockVehicle {
   id: number
   active: boolean
@@ -566,6 +595,7 @@ class MockServer {
   /** 「どの区間に入るか」→ その入口に立つ標識の規制速度 [m/s] */
   private signLimits = new Map<string, number>()
   private obstacles: ObstacleState[] = []
+  private pedestrians: MockPedestrian[] = []
   private obstacleSeq = 1
   private tick = 0
   private simTime = 0
@@ -589,6 +619,7 @@ class MockServer {
       this.vehicles.push(this.makeVehicle(i))
     }
     this.applyVehicleCount(this.params.vehicleCount)
+    this.applyPedestrianCount(this.params.pedestrianCount)
 
     setTimeout(() => {
       this.sendInit()
@@ -888,6 +919,123 @@ class MockServer {
     v.overspeeding = false
   }
 
+  private makePedestrian(id: number): MockPedestrian {
+    const gx = Math.floor(this.rng() * GRID_N)
+    const gy = Math.floor(this.rng() * GRID_N)
+    const along = this.rng() < 0.5
+    return {
+      id,
+      gx,
+      gy,
+      tx: along ? Math.min(GRID_N - 1, gx + 1) : gx,
+      ty: along ? gy : Math.min(GRID_N - 1, gy + 1),
+      t: this.rng(),
+      side: this.rng() < 0.5 ? 1 : -1,
+      cross: 0,
+      crossing: false,
+      stride: this.rng() * Math.PI * 2,
+      speed: 1.1 + this.rng() * 0.5,
+    }
+  }
+
+  private applyPedestrianCount(n: number): void {
+    const want = Math.max(0, Math.min(MOCK_CONFIG.maxPedestrians ?? 64, Math.round(n)))
+    while (this.pedestrians.length < want) {
+      this.pedestrians.push(this.makePedestrian(this.pedestrians.length))
+    }
+    if (this.pedestrians.length > want) this.pedestrians.length = want
+  }
+
+  private stepPedestrian(p: MockPedestrian, dt: number): void {
+    const ax = nodeX(p.gx)
+    const ay = nodeY(p.gy)
+    const bx = nodeX(p.tx)
+    const by = nodeY(p.ty)
+    const length = Math.max(1e-3, Math.hypot(bx - ax, by - ay))
+    p.stride += p.speed * dt * 2
+
+    if (p.crossing) {
+      p.cross += (p.speed / (WALK_OFFSET_M * 2)) * dt
+      if (p.cross >= 1) {
+        p.cross = 0
+        p.crossing = false
+        p.side = -p.side
+      }
+      return
+    }
+
+    p.t += (p.speed * dt) / length
+    if (p.t < 1) return
+
+    p.t = 0
+    p.gx = p.tx
+    p.gy = p.ty
+    if (this.rng() < 0.3) {
+      p.crossing = true
+      p.cross = 0
+    }
+    // 次の区間を選ぶ（格子なので上下左右のいずれか）
+    const options: Array<[number, number]> = []
+    if (p.gx > 0) options.push([p.gx - 1, p.gy])
+    if (p.gx < GRID_N - 1) options.push([p.gx + 1, p.gy])
+    if (p.gy > 0) options.push([p.gx, p.gy - 1])
+    if (p.gy < GRID_N - 1) options.push([p.gx, p.gy + 1])
+    const [nx, ny] = options[Math.floor(this.rng() * options.length)]
+    p.tx = nx
+    p.ty = ny
+  }
+
+  /**
+   * どの車からも遠い歩行者を車の近くへ回す（実サーバーの `PedestrianCrowd.recycle`）。
+   * これが無いと、格子全体に散った人がいつまでも画に入らない。
+   */
+  private recyclePedestrians(): void {
+    const cars = this.vehicles.filter((v) => v.active)
+    if (!cars.length) return
+    for (const p of this.pedestrians) {
+      const at = this.pedestrianAt(p)
+      let nearest = Infinity
+      for (const v of cars) nearest = Math.min(nearest, Math.hypot(v.x - at.x, v.y - at.y))
+      if (nearest <= PEDESTRIAN_RECYCLE_M) continue
+      const v = cars[Math.floor(this.rng() * cars.length)]
+      p.gx = Math.max(0, Math.min(GRID_N - 1, Math.round((v.x + GRID_HALF) / GRID_SPACING)))
+      p.gy = Math.max(0, Math.min(GRID_N - 1, Math.round((v.y + GRID_HALF) / GRID_SPACING)))
+      p.tx = Math.max(0, Math.min(GRID_N - 1, p.gx + (this.rng() < 0.5 ? 1 : -1)))
+      p.ty = p.gy
+      if (p.tx === p.gx) {
+        p.tx = p.gx
+        p.ty = Math.max(0, Math.min(GRID_N - 1, p.gy + 1))
+      }
+      p.t = this.rng()
+      p.crossing = false
+      p.cross = 0
+    }
+  }
+
+  private pedestrianAt(p: MockPedestrian): NpcPedestrianState {
+    const ax = nodeX(p.gx)
+    const ay = nodeY(p.gy)
+    const bx = nodeX(p.tx)
+    const by = nodeY(p.ty)
+    const length = Math.max(1e-3, Math.hypot(bx - ax, by - ay))
+    const dx = (bx - ax) / length
+    const dy = (by - ay) / length
+    const side = p.crossing ? p.side * (1 - 2 * p.cross) : p.side
+    const offset = side * WALK_OFFSET_M
+    return {
+      id: p.id,
+      x: ax + dx * (p.t * length) - dy * offset,
+      y: ay + dy * (p.t * length) + dx * offset,
+      heading: p.crossing ? Math.atan2(dx * -p.side, dy * p.side) : Math.atan2(dy, dx),
+      stride: p.stride % (Math.PI * 2),
+      crossing: p.crossing,
+    }
+  }
+
+  private pedestrianStates(): NpcPedestrianState[] {
+    return this.pedestrians.map((p) => this.pedestrianAt(p))
+  }
+
   private applyVehicleCount(n: number): void {
     for (const v of this.vehicles) {
       const shouldBeActive = v.id < n
@@ -1057,6 +1205,8 @@ class MockServer {
     this.progress = Math.min(1, this.progress + dt * 0.004)
 
     for (const v of this.vehicles) this.stepVehicle(v, dt)
+    for (const p of this.pedestrians) this.stepPedestrian(p, dt)
+    if (this.tick % Math.round(SIM_HZ * 2) === 0) this.recyclePedestrians()
     this.detectCollisions()
     this.stepTaxi()
 
@@ -1094,6 +1244,7 @@ class MockServer {
       vehicles,
       obstacles: this.obstacles,
     }
+    if (this.pedestrians.length) frame.pedestrians = this.pedestrianStates()
     if (this.map?.signals?.length) frame.signals = this.computePhases()
     frame.weather = this.currentWeather()
     const detections = this.buildDetections()
@@ -1196,7 +1347,23 @@ class MockServer {
         phase: phases ? phases[v.id % phases.length] : SIGNAL_GREEN,
         distance: 30,
       }
-      out[String(v.id)] = [lane, light]
+      const dets: Detection[] = [lane, light]
+      // 近くを歩いている人がいれば、擬似的な検出枠を 1 つ出す
+      const near = this.pedestrians.find(
+        (p) => {
+          const state = this.pedestrianAt(p)
+          return Math.hypot(state.x - v.x, state.y - v.y) < 24
+        },
+      )
+      if (near) {
+        dets.push({
+          cls: DET_PEDESTRIAN,
+          box: [0.56, 0.42, 0.65, 0.72],
+          conf: 0.72,
+          distance: 18,
+        })
+      }
+      out[String(v.id)] = dets
     }
     return Object.keys(out).length ? out : null
   }
@@ -1266,7 +1433,15 @@ class MockServer {
           -1000,
           Math.min(0, this.params.rewardOverspeed),
         )
+        this.params.pedestrianCount = Math.max(
+          0,
+          Math.min(
+            MOCK_CONFIG.maxPedestrians ?? 64,
+            Math.round(this.params.pedestrianCount),
+          ),
+        )
         this.applyVehicleCount(this.params.vehicleCount)
+        this.applyPedestrianCount(this.params.pedestrianCount)
         this.sendParams()
         break
       }

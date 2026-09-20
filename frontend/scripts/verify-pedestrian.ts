@@ -1,4 +1,4 @@
-/** 徒歩キャラクターの寸法・姿勢・当たり判定を検証する（ブラウザ不要）。 */
+/** 徒歩キャラクターと NPC 歩行者の寸法・姿勢・当たり判定を検証する（ブラウザ不要）。 */
 
 import * as THREE from 'three'
 import {
@@ -18,8 +18,15 @@ import {
   makeHipGeometry,
   makeLegGeometry,
   makeTorsoGeometry,
+  npcHueOffset,
   swingFor,
 } from '../src/scene/pedestrianGeometry.ts'
+import {
+  TELEPORT_DISTANCE_M,
+  createPedestrianPose,
+  samplePedestrian,
+} from '../src/scene/interpolationMath.ts'
+import type { NpcPedestrianState } from '../src/types/protocol.ts'
 import {
   AIM_DISTANCE_M,
   PEDESTRIAN_RADIUS,
@@ -266,6 +273,77 @@ check('2 棟目も引ける', isInsideBuilding(index, -30, -12) && !isInsideBuil
     `(${spot.x.toFixed(2)}, ${spot.y.toFixed(2)})`,
   )
   check('降車位置は車体と重ならない', !touchesVehicle(car, spot.x, spot.y))
+}
+
+console.log()
+console.log('='.repeat(70))
+console.log('NPC 歩行者（frame.pedestrians の補間と色の散らし）')
+console.log('='.repeat(70))
+
+function npc(over: Partial<NpcPedestrianState>): NpcPedestrianState {
+  return { id: 0, x: 0, y: 0, heading: 0, stride: 0, crossing: false, ...over }
+}
+
+{
+  const pose = createPedestrianPose()
+  samplePedestrian(npc({ x: 10, y: 4 }), npc({ x: 0, y: 0 }), 0.25, pose)
+  check(
+    '2 フレームの間を補間する',
+    Math.abs(pose.x - 2.5) < 1e-9 && Math.abs(pose.y - 1) < 1e-9,
+    `(${pose.x.toFixed(2)}, ${pose.y.toFixed(2)})`,
+  )
+
+  // ★ 見えない場所の歩行者は車の近くへ回される（protocol.md 2.3）。
+  //   跳んだ先まで線を引くと、街を横切る人が見える
+  const jump = TELEPORT_DISTANCE_M + 5
+  samplePedestrian(npc({ x: jump }), npc({ x: 0 }), 0.5, pose)
+  check(
+    `${TELEPORT_DISTANCE_M}m を超えて跳んだら補間しない`,
+    Math.abs(pose.x - jump) < 1e-9,
+    `x=${pose.x.toFixed(2)}`,
+  )
+
+  samplePedestrian(
+    npc({ heading: (Math.PI * 179) / 180 * -1 }),
+    npc({ heading: (Math.PI * 179) / 180 }),
+    0.5,
+    pose,
+  )
+  check(
+    '向きは近いほうへ回す（179° → -179° は 2° だけ動く）',
+    Math.abs(Math.abs(pose.heading) - Math.PI) < 0.02,
+    `${((pose.heading * 180) / Math.PI).toFixed(1)}°`,
+  )
+
+  // 位相は 2π で折り返すので、角度と同じ扱いにしないと手足が逆回りする
+  samplePedestrian(npc({ stride: 0.1 }), npc({ stride: Math.PI * 2 - 0.1 }), 0.5, pose)
+  check(
+    '歩行位相も近いほうへ回す（2π の折り返しで手足が逆回りしない）',
+    Math.abs(Math.atan2(Math.sin(pose.stride), Math.cos(pose.stride))) < 0.02,
+    `${pose.stride.toFixed(3)} rad`,
+  )
+
+  samplePedestrian(npc({ x: 3, crossing: true }), undefined, 1, pose)
+  check('前フレームが無ければそのまま置く', pose.x === 3 && pose.crossing)
+}
+
+{
+  const hues = Array.from({ length: 64 }, (_, i) => npcHueOffset(i))
+  check(
+    '服の色は 0.0〜1.0 に収まる',
+    hues.every((h) => h >= 0 && h < 1),
+  )
+  let closest = 1
+  for (let i = 1; i < hues.length; i++) {
+    closest = Math.min(closest, Math.abs(hues[i] - hues[i - 1]))
+  }
+  check(
+    '隣り合うスロット番号で色が似ない',
+    closest > 0.3,
+    `隣どうしの最小差 ${closest.toFixed(3)}`,
+  )
+  const buckets = new Set(hues.map((h) => Math.floor(h * 8)))
+  check('64 人ぶんが色相全体へ散る', buckets.size === 8, `${buckets.size} / 8 区画`)
 }
 
 console.log()

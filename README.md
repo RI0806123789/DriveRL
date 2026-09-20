@@ -28,7 +28,7 @@ DriveRL/
 │   ├── run.py                      起動（--dev で Vite も子プロセスとして面倒を見る）
 │   ├── train_detector.py           画像認識器の学習 CLI（中身は app/percep/trainer.py）
 │   ├── app/
-│   │   ├── config.py               定数（観測 57 次元の内訳・車両諸元・PPO 設定）
+│   │   ├── config.py               定数（観測 66 次元の内訳・車両諸元・PPO 設定）
 │   │   ├── contracts.py            パッケージ間の共有型。ここが内部の契約
 │   │   ├── main.py                 FastAPI + WebSocket。重い処理は書かない
 │   │   ├── map/
@@ -41,13 +41,14 @@ DriveRL/
 │   │   │   ├── vehicle.py          キネマティック自転車モデル
 │   │   │   ├── world.py            車両・障害物・衝突判定・信号無視／速度超過の判定
 │   │   │   ├── signals.py          信号の現示サイクル
-│   │   │   └── env.py              MARL 環境（観測・報酬・終了条件）
+│   │   │   ├── env.py              MARL 環境（観測・報酬・終了条件）
+│   │   │   └── pedestrians.py      街を歩く NPC 歩行者（歩道を歩き、交差点で横断）
 │   │   ├── percep/                 ★ 画像認識。観測はここが作る
 │   │   │   ├── camera.py           擬似カメラ（運転席視点を 192x144 に描く）
 │   │   │   ├── detector.py         CNN 認識器（Keras 3 / torch バックエンド）
 │   │   │   ├── trainer.py          認識器の学習本体。**CLI と画面が共有する唯一の実装**
 │   │   │   ├── groundtruth.py      真値から作る「理想の検出結果」（教師データ兼フォールバック）
-│   │   │   ├── encoder.py          検出結果 -> 観測ベクトル（57 次元）
+│   │   │   ├── encoder.py          検出結果 -> 観測ベクトル（66 次元）
 │   │   │   └── types.py            検出結果の型。**学習と可視化の契約**
 │   │   ├── rl/
 │   │   │   ├── policy.py           共有 Actor-Critic
@@ -475,7 +476,7 @@ cd frontend; npm run dev                          # 2 つ目
 
 | 経路 | 内容 |
 |---|---|
-| **カメラ認識（CNN）** | 信号機（灯色）・最高速度標識（規制速度）・車線・前方車両・障害物・走行可能領域 |
+| **カメラ認識（CNN）** | 信号機（灯色）・最高速度標識（規制速度）・車線・前方車両・障害物・**歩行者**・走行可能領域 |
 | **車載センサー / ナビ** | 自車の速度と舵角（速度計・舵角センサー）、目的地の相対位置と経路案内（GPS・地図）|
 
 目的地までカメラに探させることはできません（**見えないものは検出できない**ので、
@@ -484,6 +485,26 @@ cd frontend; npm run dev                          # 2 つ目
 **認識を誤ってもシミュレーターは誤りません。** 赤信号を見落として進めば、判定は
 真値で行われるので信号無視として記録され、罰が入ります。「認識できなかったから
 見逃してもらえる」ということはありません。
+
+### 街を歩く歩行者（NPC）
+
+「シミュレーション」タブの**「歩行者」スライダー（0〜64 人）**で、街に人を出せます。
+歩行者は道路に沿った歩道（車道の端から 1.7m）を歩き、**交差点で車道を横断します**。
+
+- 擬似カメラにも映り、正解ラベルも付くので、「モデル作成」タブで学習すると
+  **「歩行者」として枠が出るようになります**（検出クラスは 6 種類になりました）
+- PPO の観測にも**歩行者の欄（前後・左右・信頼度 × 3 人）**が入り、走行可能領域も
+  歩行者で狭まります。**観測は 57 次元から 66 次元に増えたので、
+  それ以前に学習した重みは読み込めません**（`warmstart_policy.py` で立て直せます）
+- 車が当たれば建物・車両と同じ**衝突**として扱われ、`rewardCollision` の罰が入って
+  エピソードが終わります
+- 実用モード（自動運転タクシー）では、**前方の歩行者の 4.5m 手前で止まります**
+  （前走車との車間と同じ式。実測で 4.75m 手前に停止）。
+  学習中の車には掛けないので、PPO から見た環境は変わりません
+
+★ **どの車からも 220m 以上離れた歩行者は、見えないところで車の近くへ回されます。**
+これが無いと広いマップでは 1 人も画に写りません（金沢は 12.3km 四方なので、
+64 人を一様に撒くと 0.42 人/km² にしかならず、実測で真値 0 件でした）。
 
 ### 天候（雨と霧）
 
@@ -688,6 +709,10 @@ cd "C:\Users\<ユーザー名>\Documents\GitHub\DriveRL\backend"
 | **1 ステップ全体（認識器あり）** | **32.04 ms** → 実効 1.56 倍まで |
 | 1 ステップ全体（認識器の学習前） | 10.05 ms → 実効 4.98 倍まで |
 
+歩行者を 64 人出すと、真値で走らせたときの 1 ステップが銀座で 13.6ms → 17.9ms、
+金沢で 19.6ms → 23.5ms に増えます（いずれも予算 50ms 内）。
+転送量は 64 人で 5,871B/frame ＝ 20Hz なら 114.7KB/s 増えます。
+
 倍速スライダーは 8 倍まで動きますが、**認識器を使うと 1.5 倍前後で頭打ち**になります。
 HUD の「実効 N 倍」に実測値が出ます。速すぎて追いつかない場合は車両数を減らしてください。
 
@@ -889,7 +914,7 @@ OSM の `highway=traffic_signals` から実際の交差点位置を取り、
 | **Keras（`.keras`）**| 同じネットワークを Keras 3 のモデルとして組み直したもの。Keras / TensorFlow 系のツールで扱う |
 
 いずれにも**観測ベクトルの構成と行動のスケール**がメタデータとして埋め込まれます。
-これが無いと、受け取った側は 57 次元の入力に何を入れればよいか分からず、
+これが無いと、受け取った側は 66 次元の入力に何を入れればよいか分からず、
 ファイルは読めても実際には使えません。観測の正規化に使う `vehicle.maxSpeed` は
 **定数ではなく実行時に変えられるパラメータ**なので、書き出した時点の値を
 メタデータに入れてあります（`steerRate` / `maxLateralAccel` も、舵角を再現するには
@@ -906,10 +931,10 @@ policy = torch.jit.load("autoware-sim_ginza_upd585_20260905-163218.torchscript.p
                         _extra_files=extra)
 meta = json.loads(extra["metadata.json"])
 
-print(meta["observation"]["layout"])   # 57 次元の内訳
+print(meta["observation"]["layout"])   # 66 次元の内訳
 print(meta["action"]["fields"])        # accel / steer の物理量への換算
 
-obs = torch.zeros(1, meta["model"]["obsDim"])   # (B, 57) float32
+obs = torch.zeros(1, meta["model"]["obsDim"])   # (B, 66) float32
 action, value = policy(obs)                     # action: (B, 2), value: (B,)
 
 accel_cmd, steer_cmd = action[0].tolist()
@@ -943,9 +968,9 @@ model = keras.saving.load_model("autoware-sim_ginza_upd427_20260905-211557.keras
 # メタデータは .keras（zip）の中に同梱してある
 with zipfile.ZipFile("autoware-sim_ginza_upd427_20260905-211557.keras") as z:
     meta = json.loads(z.read("autoware_sim_metadata.json"))
-print(meta["observation"]["layout"])        # 57 次元の内訳
+print(meta["observation"]["layout"])        # 66 次元の内訳
 
-obs = np.zeros((1, meta["model"]["obsDim"]), dtype="float32")   # (B, 57) float32
+obs = np.zeros((1, meta["model"]["obsDim"]), dtype="float32")   # (B, 66) float32
 action, value = model.predict(obs)          # action: (B, 2), value: (B,)（TorchScript 版と同じ shape）
 print(meta["policy"]["logStd"])             # 探索ノイズを再現したいとき用
 ```
@@ -1046,7 +1071,7 @@ cd frontend; npm run verify:sun         # 日の出・日の入り
 cd frontend; npm run verify:detections  # 認識結果オーバーレイの座標変換
 cd frontend; npm run verify:markings    # 道路標示（破線の割り付け）
 cd frontend; npm run verify:weather     # 天候（フォグの距離・明るさ・雨粒）
-cd frontend; npm run verify:pedestrian  # 徒歩キャラクターの寸法・姿勢・当たり判定
+cd frontend; npm run verify:pedestrian  # 徒歩キャラと NPC 歩行者（寸法・姿勢・当たり判定・補間）
 cd frontend; npm run verify:taximap     # スマホ画面の 2D 地図の座標変換
 ```
 

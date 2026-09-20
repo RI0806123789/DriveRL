@@ -288,6 +288,7 @@ class _ParamSpec:
 
 _PARAM_SPECS: dict[str, _ParamSpec] = {
     "vehicle_count": _ParamSpec("vehicleCount", int, 0, None),
+    "pedestrian_count": _ParamSpec("pedestrianCount", int, 0, None),
     "sim_speed": _ParamSpec("simSpeed", float, 0.25, 8.0),
     "learning_rate": _ParamSpec("learningRate", float, 1e-6, 1e-2),
     "gamma": _ParamSpec("gamma", float, 0.5, 0.9999),
@@ -346,6 +347,7 @@ class SimParams:
     """docs/protocol.md 2.5 の params に対応。"""
 
     vehicle_count: int = 4
+    pedestrian_count: int = 16
     sim_speed: float = 1.0
     learning_rate: float = 3e-4
     gamma: float = 0.99
@@ -369,7 +371,13 @@ class SimParams:
     def to_wire(self) -> dict[str, Any]:
         return {spec.wire: getattr(self, snake) for snake, spec in _PARAM_SPECS.items()}
 
-    def apply_wire(self, patch: dict[str, Any], *, max_vehicles: int = 64) -> ParamPatchResult:
+    def apply_wire(
+        self,
+        patch: dict[str, Any],
+        *,
+        max_vehicles: int = 64,
+        max_pedestrians: int = 64,
+    ) -> ParamPatchResult:
         """camelCase の部分更新を検証してから適用する。"""
         result = ParamPatchResult()
         reverse = {spec.wire: snake for snake, spec in _PARAM_SPECS.items()}
@@ -402,6 +410,8 @@ class SimParams:
                 high = spec.maximum
                 if snake == "vehicle_count":
                     high = float(max(1, int(max_vehicles)))
+                elif snake == "pedestrian_count":
+                    high = float(max(0, int(max_pedestrians)))
                 clipped = number
                 if low is not None:
                     clipped = max(clipped, float(low))
@@ -477,6 +487,28 @@ class ObstacleSnapshot:
 
 
 @dataclass
+class PedestrianSnapshot:
+    """NPC 歩行者 1 人。`stride` は手足の振りの位相で、描画のためだけに送る。"""
+
+    id: int
+    x: float
+    y: float
+    heading: float
+    stride: float = 0.0
+    crossing: bool = False
+
+    def to_wire(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "x": round(self.x, 2),
+            "y": round(self.y, 2),
+            "heading": round(self.heading, 3),
+            "stride": round(self.stride, 2),
+            "crossing": self.crossing,
+        }
+
+
+@dataclass
 class FrameSnapshot:
     """docs/protocol.md 2.3 の frame に対応。vehicles は常に全スロット分含む。"""
 
@@ -484,6 +516,7 @@ class FrameSnapshot:
     sim_time: float
     vehicles: list[VehicleSnapshot]
     obstacles: list[ObstacleSnapshot]
+    pedestrians: list[PedestrianSnapshot] = field(default_factory=list)
     signals: list[int] = field(default_factory=list)
     detections: dict[int, list[dict[str, Any]]] = field(default_factory=dict)
     weather: dict[str, float] | None = None
@@ -495,6 +528,8 @@ class FrameSnapshot:
             "vehicles": [v.to_wire() for v in self.vehicles],
             "obstacles": [o.to_wire() for o in self.obstacles],
         }
+        if self.pedestrians:
+            payload["pedestrians"] = [p.to_wire() for p in self.pedestrians]
         if self.weather is not None:
             payload["weather"] = {k: round(v, 3) for k, v in self.weather.items()}
         if self.signals:

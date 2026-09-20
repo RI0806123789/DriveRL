@@ -83,6 +83,7 @@ export interface ErrorEntry {
 
 const DEFAULT_PARAMS: SimParams = {
   vehicleCount: 3,
+  pedestrianCount: 16,
   simSpeed: 1,
   learningRate: 3e-4,
   gamma: 0.99,
@@ -106,8 +107,9 @@ const DEFAULT_PARAMS: SimParams = {
 
 const DEFAULT_CONFIG: SimConfig = {
   maxVehicles: 8,
+  maxPedestrians: 64,
   simHz: 20,
-  obsDim: 57,
+  obsDim: 66,
   actionDim: 2,
 }
 

@@ -21,6 +21,10 @@ __all__ = [
     "FACING_TOLERANCE",
     "LANE_LOOKAHEAD_M",
     "LANE_POLYLINE_POINTS",
+    "PEDESTRIAN_HALF_WIDTH",
+    "PEDESTRIAN_HEAD_RADIUS",
+    "PEDESTRIAN_HEAD_Z",
+    "PEDESTRIAN_HEIGHT",
     "PerceptionResult",
     "SIGNAL_BEYOND_MARGIN",
     "SIGNAL_HEAD_Z",
@@ -94,6 +98,7 @@ class DetClass(IntEnum):
     VEHICLE = 2
     OBSTACLE = 3
     LANE = 4
+    PEDESTRIAN = 5
 
 
 NUM_CLASSES = len(DetClass)
@@ -136,6 +141,8 @@ class Detection:
             return "車線"
         if self.cls is DetClass.VEHICLE:
             return "車両"
+        if self.cls is DetClass.PEDESTRIAN:
+            return "歩行者"
         return "障害物"
 
     def to_wire(self) -> dict[str, Any]:
@@ -194,6 +201,11 @@ SIGNAL_LAMP_RADIUS = 0.15
 SIGNAL_HEAD_Z = SIGNAL_MOUNT_HEIGHT + SIGNAL_HOUSING_H * 0.5
 SIGNAL_BEYOND_MARGIN = 2.0
 
+PEDESTRIAN_HEIGHT = config.PEDESTRIAN_HEIGHT
+PEDESTRIAN_HALF_WIDTH = config.PEDESTRIAN_WIDTH * 0.5
+PEDESTRIAN_HEAD_Z = PEDESTRIAN_HEIGHT - 0.11
+PEDESTRIAN_HEAD_RADIUS = 0.105
+
 SIGN_RADIUS = config.SPEED_SIGN_DIAMETER * 0.5
 SIGN_BOTTOM_HEIGHT = config.SPEED_SIGN_BOTTOM_HEIGHT
 SIGN_BOARD_Z = SIGN_BOTTOM_HEIGHT + SIGN_RADIUS
@@ -229,6 +241,7 @@ CLASS_QUOTA: dict[DetClass, int] = {
     DetClass.LANE: 1,
     DetClass.TRAFFIC_LIGHT: 2,
     DetClass.SPEED_SIGN: 1,
+    DetClass.PEDESTRIAN: 3,
     DetClass.VEHICLE: 4,
     DetClass.OBSTACLE: 4,
 }
@@ -237,6 +250,7 @@ CLASS_PRIORITY: tuple[DetClass, ...] = (
     DetClass.LANE,
     DetClass.TRAFFIC_LIGHT,
     DetClass.SPEED_SIGN,
+    DetClass.PEDESTRIAN,
     DetClass.VEHICLE,
     DetClass.OBSTACLE,
 )

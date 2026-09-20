@@ -43,6 +43,13 @@ AUTOPILOT_HEADWAY_M = 2.5
 AUTOPILOT_LEAD_RANGE_M = 45.0
 AUTOPILOT_SAME_WAY_COS = 0.5
 
+#: 歩行者を見る範囲 [m] と、止まる相手と見なす車体中心からの横幅 [m]。
+#: 歩道を歩いているだけの人で止まらないよう、車両より狭く取る
+AUTOPILOT_PEDESTRIAN_RANGE_M = 30.0
+AUTOPILOT_PEDESTRIAN_HALF_WIDTH_M = 2.0
+#: 歩行者の手前で空ける距離 [m]。前走車より広く取る（人は急に向きを変える）
+AUTOPILOT_PEDESTRIAN_MARGIN_M = 4.5
+
 
 class SimulationEnv:
     """複数車両の物理更新・観測生成・報酬計算をまとめた環境。"""
@@ -83,6 +90,7 @@ class SimulationEnv:
         self._ground_truth_failed = False
 
         self.world.set_active_count(int(self.params.vehicle_count))
+        self.world.set_pedestrian_count(int(self.params.pedestrian_count))
         self.world.project_all()
         self._obs = self._compute_observations()
 
@@ -190,6 +198,33 @@ class SimulationEnv:
             return float("inf")
         return float(lon[ahead].min())
 
+    def _pedestrian_gap(self, slot: int) -> float:
+        """前方の進路上にいる歩行者までの距離 [m]。いなければ inf。
+
+        ★ **経路追従の車にだけ掛けること**（`_lead_gap` と同じ理由）。学習中の車に
+        掛けると「歩行者を轢かない世界」になり、PPO から見た環境が変わってしまう。
+        PPO 側は観測（歩行者の欄と走行可能領域）から自分で止まれるようになる。
+        """
+        people = self.world.pedestrian_xy
+        if people.shape[0] == 0:
+            return float("inf")
+        fleet = self.world.fleet
+        heading = float(fleet.heading[slot])
+        cos_h = math.cos(heading)
+        sin_h = math.sin(heading)
+        dx = people[:, 0] - float(fleet.x[slot])
+        dy = people[:, 1] - float(fleet.y[slot])
+        lon = dx * cos_h + dy * sin_h
+        lat = -dx * sin_h + dy * cos_h
+        ahead = (
+            (lon > 0.0)
+            & (lon <= AUTOPILOT_PEDESTRIAN_RANGE_M)
+            & (np.abs(lat) <= AUTOPILOT_PEDESTRIAN_HALF_WIDTH_M)
+        )
+        if not ahead.any():
+            return float("inf")
+        return float(lon[ahead].min())
+
     def commandeer_vehicle(self, slot: int) -> None:
         """実用モードの配車へ 1 台を徴用する。走行中のエピソードはここで打ち切る（決定 2）。"""
         slot = int(slot)
@@ -233,6 +268,7 @@ class SimulationEnv:
         for slot in range(config.MAX_VEHICLES):
             if self.world.fleet.active[slot]:
                 self.world.respawn(slot)
+        self.world.relocate_pedestrians()
         self._episode_reward[:] = 0.0
         self._episode_lateral[:] = 0.0
         self.world.set_event_flags(
@@ -302,6 +338,14 @@ class SimulationEnv:
                         abs(config.MAX_DECEL),
                         config.DT,
                         margin_m=config.VEHICLE_LENGTH + AUTOPILOT_HEADWAY_M,
+                    )
+                ),
+                float(
+                    stop_speed_limit(
+                        np.float64(self._pedestrian_gap(int(slot))),
+                        abs(config.MAX_DECEL),
+                        config.DT,
+                        margin_m=AUTOPILOT_PEDESTRIAN_MARGIN_M,
                     )
                 ),
             )
@@ -406,8 +450,12 @@ class SimulationEnv:
         """パラメータの実行時変更を反映する。学習は止めない。"""
         new_count = int(np.clip(int(params.vehicle_count), 0, config.MAX_VEHICLES))
         count_changed = new_count != int(self.world.active_count)
+        walkers = int(np.clip(int(params.pedestrian_count), 0, config.MAX_PEDESTRIANS))
         self.params = replace(params)
         self.params.vehicle_count = new_count
+        self.params.pedestrian_count = walkers
+        if walkers != int(self.world.crowd.count):
+            self.world.set_pedestrian_count(walkers)
         if count_changed:
             active_before = self.world.fleet.active.copy()
             self.world.set_active_count(new_count)

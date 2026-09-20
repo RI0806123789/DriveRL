@@ -26,7 +26,8 @@ _OFF_SIGNAL = _OFF_LANE + config.OBS_LANE_DIM
 _OFF_SIGN = _OFF_SIGNAL + config.OBS_SIGNAL_DIM
 _OFF_VEHICLE = _OFF_SIGN + config.OBS_SIGN_DIM
 _OFF_OBSTACLE = _OFF_VEHICLE + config.OBS_VEHICLE_DIM
-_OFF_FREESPACE = _OFF_OBSTACLE + config.OBS_OBSTACLE_DIM
+_OFF_PEDESTRIAN = _OFF_OBSTACLE + config.OBS_OBSTACLE_DIM
+_OFF_FREESPACE = _OFF_PEDESTRIAN + config.OBS_PEDESTRIAN_DIM
 assert (
     _OFF_FREESPACE + config.OBS_FREESPACE_DIM == config.OBS_DIM
 ), "OBS_* の内訳が OBS_DIM と一致しない"
@@ -40,6 +41,7 @@ OBS_OFFSETS: dict[str, int] = {
     "sign": _OFF_SIGN,
     "vehicles": _OFF_VEHICLE,
     "obstacles": _OFF_OBSTACLE,
+    "pedestrians": _OFF_PEDESTRIAN,
     "freespace": _OFF_FREESPACE,
 }
 
@@ -58,6 +60,7 @@ _ASSUMED_WIDTH_M: dict[DetClass, float] = {
     DetClass.SPEED_SIGN: float(config.SPEED_SIGN_DIAMETER),
     DetClass.VEHICLE: float(config.VEHICLE_WIDTH),
     DetClass.OBSTACLE: float(config.OBSTACLE_RADIUS) * 2.0,
+    DetClass.PEDESTRIAN: float(config.PEDESTRIAN_WIDTH),
 }
 
 
@@ -224,7 +227,17 @@ def _encode_camera(
         row[base + 1] = min(max(fy / obstacle_range, -1.0), 1.0)
         row[base + 2] = _confidence(det)
 
-    for cls in (DetClass.VEHICLE, DetClass.OBSTACLE):
+    pedestrian_range = float(config.OBS_PEDESTRIAN_RANGE)
+    for i, (_dist, det) in enumerate(
+        _pick(result, DetClass.PEDESTRIAN, config.OBS_PEDESTRIAN_COUNT, spec, pedestrian_range)
+    ):
+        base = _OFF_PEDESTRIAN + i * config.OBS_PEDESTRIAN_FIELDS
+        fx, fy, _ = _local_xy(det, spec)
+        row[base + 0] = min(max(fx / pedestrian_range, -1.0), 1.0)
+        row[base + 1] = min(max(fy / pedestrian_range, -1.0), 1.0)
+        row[base + 2] = _confidence(det)
+
+    for cls in (DetClass.VEHICLE, DetClass.OBSTACLE, DetClass.PEDESTRIAN):
         for det in _iter_class(result, cls):
             dist = _distance(det, spec)
             if dist >= config.OBS_FREESPACE_MAX_DISTANCE:
