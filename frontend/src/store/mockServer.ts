@@ -409,6 +409,8 @@ interface MockVehicle {
   heading: number
   speed: number
   steer: number
+  /** 加速指令 -1..1（ペダルの踏み込み）。`braking` と同じ出どころにする */
+  throttle: number
   collided: boolean
   reachedGoal: boolean
   /** いま適用されている規制速度 [m/s]。まだ標識を 1 基も通っていなければ 0 */
@@ -913,6 +915,7 @@ class MockServer {
       heading: 0,
       speed: 0,
       steer: 0,
+      throttle: 0,
       collided: false,
       reachedGoal: false,
       speedLimit: 0,
@@ -1133,7 +1136,12 @@ class MockServer {
       targetSpeed = Math.min(targetSpeed, Math.sqrt(2 * BRAKE_ACCEL * room))
     }
 
-    // 実機と同じく「指令が減速側か」で決める（実測の加速度では見ない）
+    // 実機と同じく「指令が減速側か」で決める（実測の加速度では見ない）。
+    // ★ ペダルの踏み込みも**同じ指令から**出す（別々にするとランプと足が食い違う）。
+    //   徒歩キャラで絞ったあとの `targetSpeed` を見るので、**人の前で止まるときも
+    //   ブレーキペダルが踏まれる**
+    const demand = targetSpeed - v.speed
+    v.throttle = Math.max(-1, Math.min(1, demand / 3))
     v.braking = targetSpeed < v.speed - 0.2
     v.turnSignal = this.turnSignalFor(v)
 
@@ -1298,6 +1306,7 @@ class MockServer {
         speedLimit: v.speedLimit,
         speedViolations: v.speedViolations,
         braking: v.braking,
+        throttle: v.throttle,
         turnSignal: v.turnSignal,
       }
       if (v.active && v.routeDirty) {

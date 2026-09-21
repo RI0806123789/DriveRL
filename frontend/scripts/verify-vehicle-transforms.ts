@@ -4,19 +4,68 @@ import * as THREE from 'three'
 import {
   BODY_OFFSET,
   CABIN_OFFSET,
+  COLUMN_TILT,
+  DASH_REAR_X,
+  GAUGE_KINDS,
+  GAUGE_SPEED_MAX_KMH,
+  NAV_SCREEN,
+  NAV_SPAN_MAX_M,
+  NAV_SPAN_MIN_M,
+  TURN_INDICATOR_SIZE,
+  TURN_INDICATOR_SLOTS,
+  DRIVER_SEAT_Z,
+  GAUGE_SLOTS,
+  NEEDLE_START,
+  NEEDLE_SWEEP,
   NOSE_OFFSET,
+  PASSENGER_SEAT_Z,
+  PEDAL_SLOTS,
+  PEDAL_TRAVEL,
+  STEERING_CENTER,
+  STEERING_RADIUS,
+  STEERING_RATIO,
+  VEHICLE_HEIGHT,
+  VEHICLE_LENGTH,
+  VEHICLE_WIDTH,
   WHEEL_OFFSETS,
   WHEEL_RADIUS,
+  composeFixedMatrix,
+  composeNeedleMatrix,
+  composePedalMatrix,
+  composeSteeringMatrix,
+  composeTurnIndicatorMatrix,
   composeVehicleMatrix,
   composeWheelMatrix,
   createTransformScratch,
   makeBodyGeometry,
   makeCabinGeometry,
+  makeGaugeFaceGeometry,
+  makeGlassGeometry,
+  makeInteriorGeometry,
+  makeNeedleGeometry,
   makeNoseGeometry,
+  makePedalGeometry,
+  makeNavScreenGeometry,
+  makeSteeringGeometry,
+  makeTurnIndicatorGeometry,
+  navSpanFor,
+  needleAngle,
+  pedalPress,
+  powerRatio,
+  speedRatio,
+  steeringAngle,
   composeLightMatrix,
   composePlateMatrix,
   makeWheelGeometry,
 } from '../src/scene/vehicleGeometry.ts'
+import {
+  DRIVER_EYE_HEIGHT,
+  DRIVER_FORWARD,
+  DRIVER_FOV_DEG,
+  DRIVER_LOOK_AHEAD,
+  DRIVER_LOOK_DROP,
+  DRIVER_RIGHT,
+} from '../src/scene/cameraMath.ts'
 import {
   DEFAULT_REGION,
   PLATES_PER_VEHICLE,
@@ -46,6 +95,9 @@ import {
 } from '../src/scene/vehicleLights.ts'
 
 let failures = 0
+
+/** ダッシュボード上面の高さ [m]（vehicleGeometry の DASH_TOP_Y と同じ値） */
+const DASH_TOP_Y_FOR_CHECK = 1.02
 
 function check(label: string, ok: boolean, detail = ''): void {
   console.log(`  [${ok ? 'OK  ' : 'NG  '}] ${label}${detail ? ` — ${detail}` : ''}`)
@@ -438,6 +490,720 @@ function state(over: Partial<Parameters<typeof lightStateFor>[0]>) {
   check(
     '点滅のデューティは半分',
     blinkOn(0) && !blinkOn(period * 0.75) && blinkOn(period),
+  )
+}
+
+console.log()
+console.log('='.repeat(70))
+console.log('車体の作り込み（外接寸法・窓・内装）')
+console.log('='.repeat(70))
+
+/** ジオメトリの外接箱 */
+function boundsOf(g: THREE.BufferGeometry): THREE.Box3 {
+  g.computeBoundingBox()
+  return g.boundingBox!.clone()
+}
+
+{
+  // ★ ここが一番大事。外接寸法は backend の `config.VEHICLE_*` と揃っていて、
+  //   衝突判定と擬似カメラの検出枠がこれを前提にしている。はみ出すと
+  //   「当たっていないのに当たる」「枠から車がはみ出す」が起きる
+  const limitX = VEHICLE_LENGTH / 2
+  const limitZ = VEHICLE_WIDTH / 2
+  const pieces: Array<[string, THREE.BufferGeometry]> = [
+    ['車体', makeBodyGeometry()],
+    ['ボンネットの飾り', makeNoseGeometry()],
+    ['窓ガラス', makeGlassGeometry()],
+    ['内装', makeInteriorGeometry()],
+  ]
+  for (const [name, g] of pieces) {
+    const b = boundsOf(g)
+    const ok =
+      b.min.x >= -limitX - 1e-6 &&
+      b.max.x <= limitX + 1e-6 &&
+      b.min.y >= -1e-6 &&
+      b.max.y <= VEHICLE_HEIGHT + 1e-6 &&
+      b.min.z >= -limitZ - 1e-6 &&
+      b.max.z <= limitZ + 1e-6
+    check(
+      name + 'が外接寸法 ' + VEHICLE_LENGTH + '×' + VEHICLE_WIDTH + '×' + VEHICLE_HEIGHT + 'm に収まる',
+      ok,
+      'X[' + b.min.x.toFixed(2) + ', ' + b.max.x.toFixed(2) + '] Y[' +
+        b.min.y.toFixed(2) + ', ' + b.max.y.toFixed(2) + '] Z[' +
+        b.min.z.toFixed(2) + ', ' + b.max.z.toFixed(2) + ']',
+    )
+    g.dispose()
+  }
+}
+
+{
+  const body = makeBodyGeometry()
+  const glass = makeGlassGeometry()
+  const bb = boundsOf(body)
+  const gb = boundsOf(glass)
+  check('窓はベルトラインより上にある', gb.min.y > 0.9, '窓の下端 ' + gb.min.y.toFixed(2) + 'm')
+  check(
+    '窓は車体の幅を越えない',
+    gb.max.z <= bb.max.z + 1e-6,
+    '窓 ' + gb.max.z.toFixed(2) + 'm / 車体 ' + bb.max.z.toFixed(2) + 'm',
+  )
+  body.dispose()
+  glass.dispose()
+}
+
+{
+  // 運転席は右（+Z）。`cameraMath` のアイポイントと同じ側でないと、
+  // 運転席視点なのに助手席に座ることになる
+  check(
+    '運転席は右ハンドル側（cameraMath と同じ +Z）',
+    Math.sign(DRIVER_SEAT_Z) === Math.sign(DRIVER_RIGHT) && DRIVER_SEAT_Z > 0,
+    '座席 ' + DRIVER_SEAT_Z.toFixed(2) + ' / カメラ ' + DRIVER_RIGHT.toFixed(2),
+  )
+  check('助手席は反対側にある', Math.sign(PASSENGER_SEAT_Z) === -Math.sign(DRIVER_SEAT_Z))
+  check(
+    'ハンドルは運転席の正面（アイポイントより前）にある',
+    Math.abs(STEERING_CENTER[2] - DRIVER_SEAT_Z) < 1e-6 && STEERING_CENTER[0] > DRIVER_FORWARD,
+    'ハンドル X=' + STEERING_CENTER[0].toFixed(2) + ' / アイポイント X=' + DRIVER_FORWARD.toFixed(2),
+  )
+  check(
+    'アイポイントはハンドルより上（メーターを見下ろせる）',
+    DRIVER_EYE_HEIGHT > STEERING_CENTER[1],
+    '目 ' + DRIVER_EYE_HEIGHT.toFixed(2) + 'm / ハンドル ' + STEERING_CENTER[1].toFixed(2) + 'm',
+  )
+  // ★ ダッシュボードを目へ近づけすぎると、運転席視点の下半分が壁で埋まる。
+  //   最初 0.52m に置いて、目の 0.17m 先が壁になり前が見えなくなった
+  const legroom = DASH_REAR_X - DRIVER_FORWARD
+  check(
+    'アイポイントからダッシュボードまで 0.3m 以上ある',
+    legroom >= 0.3,
+    legroom.toFixed(2) + 'm',
+  )
+}
+
+console.log()
+console.log('='.repeat(70))
+console.log('可動部（ハンドル・ペダル・メーター）')
+console.log('='.repeat(70))
+
+{
+  // 実車のギア比。最大舵角 0.55rad でおよそ 1.5 回転（540 度）になる
+  const full = steeringAngle(0.55)
+  const turns = full / (Math.PI * 2)
+  check(
+    '最大舵角でハンドルが ' + turns.toFixed(2) + ' 回転する',
+    turns > 1.2 && turns < 1.8,
+    ((full * 180) / Math.PI).toFixed(0) + ' 度 / 比 ' + STEERING_RATIO,
+  )
+  check('舵角 0 でハンドルも 0', Math.abs(steeringAngle(0)) < 1e-12)
+  check('左右で符号が反転する', Math.abs(steeringAngle(0.3) + steeringAngle(-0.3)) < 1e-12)
+}
+
+{
+  composeVehicleMatrix(scratch, 0, 0, 0, base)
+  const centre = new THREE.Vector3(STEERING_CENTER[0], STEERING_CENTER[1], STEERING_CENTER[2])
+
+  // ★ 回しても中心が動かないこと。ジオメトリ側を傾けていると回転軸まで傾き、
+  //   「斜めに首を振る」動きになる
+  let worst = 0
+  for (const steer of [-0.5, -0.2, 0, 0.2, 0.5]) {
+    composeSteeringMatrix(scratch, base, steer, out)
+    const pos = new THREE.Vector3().setFromMatrixPosition(out)
+    worst = Math.max(worst, pos.distanceTo(centre))
+  }
+  check('ハンドルは回しても中心が動かない', worst < 1e-9, '最大 ' + worst.toExponential(1) + 'm')
+
+  const top = new THREE.Vector3(0, STEERING_RADIUS, 0)
+  composeSteeringMatrix(scratch, base, 0, out)
+  const neutral = top.clone().applyMatrix4(out)
+  composeSteeringMatrix(scratch, base, 0.1, out)
+  const left = top.clone().applyMatrix4(out)
+  check(
+    '左へ切るとリムの上端が左（-Z）へ回る',
+    left.z < neutral.z - 1e-3,
+    'Z ' + neutral.z.toFixed(3) + ' → ' + left.z.toFixed(3),
+  )
+
+  composeSteeringMatrix(scratch, base, 0, out)
+  const normal = new THREE.Vector3(1, 0, 0).transformDirection(out)
+  const tilt = Math.asin(Math.max(-1, Math.min(1, normal.y)))
+  check(
+    'ハンドル面がコラムの傾き ' + ((COLUMN_TILT * 180) / Math.PI).toFixed(0) + ' 度で寝ている',
+    Math.abs(Math.abs(tilt) - COLUMN_TILT) < 1e-6,
+    ((tilt * 180) / Math.PI).toFixed(1) + ' 度',
+  )
+}
+
+{
+  check(
+    'アクセルは加速指令が正のときだけ踏まれる',
+    pedalPress('throttle', 0.8) === 0.8 && pedalPress('throttle', -0.8) === 0,
+  )
+  check(
+    'ブレーキは負のときだけ踏まれる',
+    pedalPress('brake', -0.8) === 0.8 && pedalPress('brake', 0.8) === 0,
+  )
+  check('踏み込みは 0..1 に収まる', pedalPress('throttle', 3) === 1 && pedalPress('brake', -3) === 1)
+
+  composeVehicleMatrix(scratch, 0, 0, 0, base)
+  const tip = new THREE.Vector3(0, -0.22, 0)
+  for (let k = 0; k < PEDAL_SLOTS.length; k++) {
+    const kind = PEDAL_SLOTS[k].kind
+    const name = kind === 'throttle' ? 'アクセル' : 'ブレーキ'
+    const press = kind === 'throttle' ? 1 : -1
+    composePedalMatrix(scratch, base, k, 0, out)
+    const rest = tip.clone().applyMatrix4(out)
+    composePedalMatrix(scratch, base, k, press, out)
+    const down = tip.clone().applyMatrix4(out)
+    check(
+      name + 'を踏むと踏面が前方（+X）へ回る',
+      down.x > rest.x + 1e-3,
+      'X ' + rest.x.toFixed(3) + ' → ' + down.x.toFixed(3),
+    )
+    const pivot = new THREE.Vector3(
+      PEDAL_SLOTS[k].pivot[0],
+      PEDAL_SLOTS[k].pivot[1],
+      PEDAL_SLOTS[k].pivot[2],
+    )
+    const at = new THREE.Vector3().setFromMatrixPosition(out)
+    check(name + 'の支点は動かない', at.distanceTo(pivot) < 1e-9)
+    check(
+      name + 'は運転席側にある',
+      Math.sign(PEDAL_SLOTS[k].pivot[2]) === Math.sign(DRIVER_SEAT_Z),
+      'Z=' + PEDAL_SLOTS[k].pivot[2].toFixed(2),
+    )
+  }
+  check(
+    '踏み切っても ' + ((PEDAL_TRAVEL * 180) / Math.PI).toFixed(0) + ' 度までしか回らない',
+    PEDAL_TRAVEL > 0.1 && PEDAL_TRAVEL < 0.8,
+  )
+}
+
+{
+  check(
+    '針は 0 で始点、1 で終点を指す',
+    needleAngle(0) === NEEDLE_START &&
+      Math.abs(needleAngle(1) - (NEEDLE_START + NEEDLE_SWEEP)) < 1e-12,
+  )
+  check(
+    '針は範囲の外を指さない',
+    needleAngle(-1) === NEEDLE_START && needleAngle(2) === NEEDLE_START + NEEDLE_SWEEP,
+  )
+  check(
+    '針の振れ角は 1 回転に満たない',
+    Math.abs(NEEDLE_SWEEP) > 0 && Math.abs(NEEDLE_SWEEP) < Math.PI * 2,
+    Math.abs((NEEDLE_SWEEP * 180) / Math.PI).toFixed(0) + ' 度',
+  )
+  // ★ 運転者から見て時計回りに振れること。針は車両ローカルの X 軸まわりに回り、
+  //   運転者からは +Z が左に見えるので、**開始が正・振れ幅が負**でないと逆回りになる
+  check(
+    '速度が上がると針が時計回り（運転者から見て右）へ回る',
+    NEEDLE_START > 0 && NEEDLE_SWEEP < 0,
+    '開始 ' + NEEDLE_START.toFixed(2) + ' / 振れ ' + NEEDLE_SWEEP.toFixed(2),
+  )
+
+  composeVehicleMatrix(scratch, 0, 0, 0, base)
+  const tipLocal = new THREE.Vector3(0, GAUGE_SLOTS[0].radius * 0.8, 0)
+  composeNeedleMatrix(scratch, base, 0, 0, out)
+  const slow = tipLocal.clone().applyMatrix4(out)
+  composeNeedleMatrix(scratch, base, 0, 1, out)
+  const fast = tipLocal.clone().applyMatrix4(out)
+  check('針は速度で動く', slow.distanceTo(fast) > 0.05, slow.distanceTo(fast).toFixed(3) + 'm')
+
+  for (let k = 0; k < GAUGE_SLOTS.length; k++) {
+    composeFixedMatrix(scratch, base, GAUGE_SLOTS[k].center, out)
+    const face = new THREE.Vector3().setFromMatrixPosition(out)
+    composeNeedleMatrix(scratch, base, k, 0.5, out)
+    const pivot = new THREE.Vector3().setFromMatrixPosition(out)
+    check(
+      'メーター ' + k + ' の針が文字盤の中心にある',
+      face.distanceTo(pivot) < 0.02,
+      face.distanceTo(pivot).toFixed(4) + 'm',
+    )
+  }
+
+  const faceGeom = makeGaugeFaceGeometry(GAUGE_SLOTS[0].radius)
+  const fb = boundsOf(faceGeom)
+  check(
+    '文字盤は薄い板になっている',
+    fb.max.x - fb.min.x < 1e-6,
+    '厚み ' + (fb.max.x - fb.min.x).toExponential(1) + 'm',
+  )
+  faceGeom.dispose()
+}
+
+{
+  const steeringGeom = makeSteeringGeometry()
+  const sb = boundsOf(steeringGeom)
+  const reach = Math.max(Math.abs(sb.min.y), sb.max.y, Math.abs(sb.min.z), sb.max.z)
+  check(
+    'ハンドルは回してもキャビンの中に収まる',
+    STEERING_CENTER[1] + reach < VEHICLE_HEIGHT &&
+      Math.abs(STEERING_CENTER[2]) + reach < VEHICLE_WIDTH / 2,
+    '半径 ' + reach.toFixed(3) + 'm',
+  )
+  steeringGeom.dispose()
+
+  const pedalGeom = makePedalGeometry()
+  const pb = boundsOf(pedalGeom)
+  check('ペダルは支点が原点にある', Math.abs(pb.max.y) < 1e-6, '上端 ' + pb.max.y.toFixed(4) + 'm')
+  pedalGeom.dispose()
+
+  const needleGeom = makeNeedleGeometry(GAUGE_SLOTS[0].radius)
+  const nb = boundsOf(needleGeom)
+  check('針は根元が原点にある', Math.abs(nb.min.y) < 1e-6, '下端 ' + nb.min.y.toFixed(4) + 'm')
+  check('針は文字盤からはみ出さない', nb.max.y <= GAUGE_SLOTS[0].radius + 1e-6)
+  needleGeom.dispose()
+}
+
+console.log()
+console.log('='.repeat(70))
+console.log('運転席から室内が見えるか（画角と遮蔽）')
+console.log('='.repeat(70))
+
+{
+  /**
+   * ★ 室内を作り込んでも、**運転席カメラの画角に入らなければ映らない。**
+   * 実際にアクセル・ブレーキが画角の 12 度下に外れていて、内装の隙間を
+   * 塞ぐ方向で直そうとして遠回りした。角度で検査する。
+   */
+  const eyeX = DRIVER_FORWARD
+  const eyeY = DRIVER_EYE_HEIGHT
+  /** 視線の俯角 [度]（下向きが正） */
+  const lookDown = (Math.atan2(DRIVER_LOOK_DROP, DRIVER_LOOK_AHEAD) * 180) / Math.PI
+  /** 画角の下端 [度] */
+  const bottom = lookDown + DRIVER_FOV_DEG / 2
+  const downTo = (x: number, y: number) => (Math.atan2(eyeY - y, x - eyeX) * 180) / Math.PI
+
+  const rimDrop = STEERING_RADIUS * Math.cos(COLUMN_TILT)
+  const rimShift = STEERING_RADIUS * Math.sin(COLUMN_TILT)
+
+  const seen: Array<[string, number, number]> = [
+    ['ハンドルの上端', STEERING_CENTER[0] - rimShift, STEERING_CENTER[1] + rimDrop],
+    ['ハンドルの下端', STEERING_CENTER[0] + rimShift, STEERING_CENTER[1] - rimDrop],
+    ['速度計', GAUGE_SLOTS[0].center[0], GAUGE_SLOTS[0].center[1]],
+    ['回転計', GAUGE_SLOTS[1].center[0], GAUGE_SLOTS[1].center[1]],
+    ['アクセルの支点', PEDAL_SLOTS[0].pivot[0], PEDAL_SLOTS[0].pivot[1]],
+    ['アクセルの踏面', PEDAL_SLOTS[0].pivot[0], PEDAL_SLOTS[0].pivot[1] - 0.22],
+    ['ブレーキの支点', PEDAL_SLOTS[1].pivot[0], PEDAL_SLOTS[1].pivot[1]],
+    ['ブレーキの踏面', PEDAL_SLOTS[1].pivot[0], PEDAL_SLOTS[1].pivot[1] - 0.22],
+  ]
+
+  for (const [name, x, y] of seen) {
+    const d = downTo(x, y)
+    check(
+      name + 'が運転席の画角に入る',
+      d <= bottom,
+      '俯角 ' + d.toFixed(1) + ' 度 / 下端 ' + bottom.toFixed(1) + ' 度',
+    )
+  }
+
+  // ★ メーターはハンドルの「リングの中」から覗く。ハブに重なると隠れる
+  //    （実際にハブとちょうど同じ高さにあって見えなかった）
+  const hubRadius = 0.052
+  for (let k = 0; k < GAUGE_SLOTS.length; k++) {
+    const g = GAUGE_SLOTS[k]
+    // 目からメーターへの視線が、ハンドル面（STEERING_CENTER[0]）を横切る高さ
+    const t = (STEERING_CENTER[0] - eyeX) / (g.center[0] - eyeX)
+    const crossY = eyeY + (g.center[1] - eyeY) * t
+    const offset = Math.abs(crossY - STEERING_CENTER[1])
+    check(
+      'メーター ' + k + ' への視線がハンドルのハブを外れる',
+      offset > hubRadius,
+      'ハンドル中心から ' + offset.toFixed(3) + 'm（ハブ半径 ' + hubRadius + 'm）',
+    )
+    check(
+      'メーター ' + k + ' への視線がリングの内側を通る',
+      offset < STEERING_RADIUS,
+      offset.toFixed(3) + 'm < リム半径 ' + STEERING_RADIUS + 'm',
+    )
+  }
+
+  // 前が見えなくなるほど下を向いていないこと
+  check(
+    '視線より上も同じだけ見える（空が見える）',
+    DRIVER_FOV_DEG / 2 - lookDown > 30,
+    '上端 ' + (DRIVER_FOV_DEG / 2 - lookDown).toFixed(1) + ' 度',
+  )
+}
+
+console.log()
+console.log('='.repeat(70))
+console.log('メーター（速度計とパワーメーター）')
+console.log('='.repeat(70))
+
+{
+  // EV なので回転計は持たない
+  check(
+    'メーターは速度計とパワーメーターの 2 つ',
+    GAUGE_KINDS.length === 2 && GAUGE_KINDS[0] === 'speed' && GAUGE_KINDS[1] === 'power',
+    GAUGE_KINDS.join(' / '),
+  )
+  check(
+    '文字盤の並びが GAUGE_SLOTS と一致する',
+    GAUGE_SLOTS.every((g, i) => g.kind === GAUGE_KINDS[i]),
+  )
+
+  // 速度計。目盛りは固定なので、設定できる最高速度（40 m/s = 144 km/h）を覆うこと
+  check(
+    '速度計の目盛りが maxSpeed の上限（144 km/h）を覆う',
+    GAUGE_SPEED_MAX_KMH >= 144,
+    '0〜' + GAUGE_SPEED_MAX_KMH + ' km/h',
+  )
+  check('停車で針が 0 を指す', speedRatio(0) === 0)
+  // 目盛りは固定なので、既定の最高速度でどれだけ振れるかは選んだ上限で決まる。
+  // 読み取れる範囲（目盛りの 1/4 以上）に入っていること
+  check(
+    '既定の最高速度（13.9 m/s ≒ 50 km/h）で針が読める範囲まで振れる',
+    speedRatio(13.9) >= 0.25,
+    (speedRatio(13.9) * 100).toFixed(1) + '%（上限 ' + GAUGE_SPEED_MAX_KMH + ' km/h）',
+  )
+  check('目盛りを超えても振り切れない', speedRatio(100) === 1)
+  check(
+    '速度が上がるほど針が進む',
+    speedRatio(5) < speedRatio(10) && speedRatio(10) < speedRatio(20),
+  )
+
+  // パワーメーター。中央が 0 で、回生（負）と出力（正）に振れる
+  check(
+    'アクセルもブレーキも踏んでいないとき、針が中央を指す',
+    Math.abs(powerRatio(0) - 0.5) < 1e-12,
+    powerRatio(0).toFixed(3),
+  )
+  check('目いっぱいの出力で右いっぱい', powerRatio(1) === 1)
+  check('目いっぱいの回生で左いっぱい', powerRatio(-1) === 0)
+  check(
+    '出力と回生が中央に対して対称',
+    Math.abs(powerRatio(0.4) - 0.5 - (0.5 - powerRatio(-0.4))) < 1e-12,
+  )
+  check('範囲の外へは振れない', powerRatio(3) === 1 && powerRatio(-3) === 0)
+
+  // 針の角度。中央（0.5）が真上を向くこと
+  check(
+    'パワーメーターの中央が真上を向く',
+    Math.abs(needleAngle(powerRatio(0))) < 1e-12,
+    (needleAngle(powerRatio(0)) * 180 / Math.PI).toFixed(1) + ' 度',
+  )
+  // 出力側（正）は時計回り = 角度が負の側
+  check(
+    '出力側で針が右（時計回り）へ振れる',
+    needleAngle(powerRatio(0.5)) < 0,
+    (needleAngle(powerRatio(0.5)) * 180 / Math.PI).toFixed(1) + ' 度',
+  )
+  check(
+    '回生側で針が左へ振れる',
+    needleAngle(powerRatio(-0.5)) > 0,
+    (needleAngle(powerRatio(-0.5)) * 180 / Math.PI).toFixed(1) + ' 度',
+  )
+}
+
+console.log()
+console.log('='.repeat(70))
+console.log('メーターのウインカー表示')
+console.log('='.repeat(70))
+
+{
+  check('左右 2 つある', TURN_INDICATOR_SLOTS.length === 2)
+  check(
+    '左が -1・右が +1（frame の turnSignal と同じ符号）',
+    TURN_INDICATOR_SLOTS[0].side === -1 && TURN_INDICATOR_SLOTS[1].side === 1,
+  )
+  // 運転者から見て +Z が左。左の矢印は +Z 側に置く
+  check(
+    '左の表示が運転席から見て左（+Z）にある',
+    TURN_INDICATOR_SLOTS[0].center[2] > TURN_INDICATOR_SLOTS[1].center[2],
+    TURN_INDICATOR_SLOTS[0].center[2].toFixed(2) + ' / ' + TURN_INDICATOR_SLOTS[1].center[2].toFixed(2),
+  )
+  check(
+    '左右がメーターの中心に対して対称',
+    Math.abs(
+      TURN_INDICATOR_SLOTS[0].center[2] +
+        TURN_INDICATOR_SLOTS[1].center[2] -
+        2 * DRIVER_SEAT_Z,
+    ) < 1e-9,
+  )
+
+  // 2 つのメーターの「間」に収まっていること
+  const gapMin = Math.min(GAUGE_SLOTS[0].center[2], GAUGE_SLOTS[1].center[2])
+  const gapMax = Math.max(GAUGE_SLOTS[0].center[2], GAUGE_SLOTS[1].center[2])
+  for (let k = 0; k < TURN_INDICATOR_SLOTS.length; k++) {
+    const z = TURN_INDICATOR_SLOTS[k].center[2]
+    check(
+      'ウインカー表示 ' + k + ' が 2 つのメーターの間にある',
+      z > gapMin && z < gapMax,
+      'Z=' + z.toFixed(3) + '（メーター ' + gapMin.toFixed(2) + '〜' + gapMax.toFixed(2) + '）',
+    )
+  }
+
+  // ★ メーターの円と重ならないこと（間は狭いので、上へ逃がしてある）
+  for (let k = 0; k < TURN_INDICATOR_SLOTS.length; k++) {
+    const c = TURN_INDICATOR_SLOTS[k].center
+    let worst = Infinity
+    for (const g of GAUGE_SLOTS) {
+      worst = Math.min(worst, Math.hypot(c[1] - g.center[1], c[2] - g.center[2]) - g.radius)
+    }
+    check(
+      'ウインカー表示 ' + k + ' が文字盤の円と重ならない',
+      worst > 0,
+      '余白 ' + (worst * 1000).toFixed(0) + 'mm',
+    )
+  }
+
+  // ★ ハンドルのリングの内側から覗く位置なので、**ハブとスポークを外すこと**。
+  //   スポークは下・左・右の 3 本なので、視線がハンドル中心より「上」を通れば当たらない
+  const eyeX = DRIVER_FORWARD
+  const eyeY = DRIVER_EYE_HEIGHT
+  const eyeZ = DRIVER_SEAT_Z
+  const hubRadius = 0.052
+  for (let k = 0; k < TURN_INDICATOR_SLOTS.length; k++) {
+    const c = TURN_INDICATOR_SLOTS[k].center
+    const t = (STEERING_CENTER[0] - eyeX) / (c[0] - eyeX)
+    const crossY = eyeY + (c[1] - eyeY) * t
+    const crossZ = eyeZ + (c[2] - eyeZ) * t
+    const d = Math.hypot(crossY - STEERING_CENTER[1], crossZ - STEERING_CENTER[2])
+    check(
+      'ウインカー表示 ' + k + ' への視線がハンドルのハブを外れる',
+      d > hubRadius,
+      'ハンドル中心から ' + d.toFixed(3) + 'm（ハブ半径 ' + hubRadius + 'm）',
+    )
+    check(
+      'ウインカー表示 ' + k + ' への視線がリングの内側を通る',
+      d < STEERING_RADIUS,
+      d.toFixed(3) + 'm < リム半径 ' + STEERING_RADIUS + 'm',
+    )
+    check(
+      'ウインカー表示 ' + k + ' への視線がスポークの無い上側を通る',
+      crossY > STEERING_CENTER[1],
+      '高さ ' + crossY.toFixed(3) + 'm（ハンドル中心 ' + STEERING_CENTER[1].toFixed(3) + 'm）',
+    )
+  }
+
+  // 矢印の向き。左は +Z、右は -Z を指す
+  composeVehicleMatrix(scratch, 0, 0, 0, base)
+  const tip = new THREE.Vector3(0, 0, TURN_INDICATOR_SIZE)
+  for (let k = 0; k < TURN_INDICATOR_SLOTS.length; k++) {
+    composeTurnIndicatorMatrix(scratch, base, k, out)
+    const at = tip.clone().applyMatrix4(out)
+    const centre = new THREE.Vector3(
+      TURN_INDICATOR_SLOTS[k].center[0],
+      TURN_INDICATOR_SLOTS[k].center[1],
+      TURN_INDICATOR_SLOTS[k].center[2],
+    )
+    const points = at.z - centre.z
+    const wantLeft = TURN_INDICATOR_SLOTS[k].side < 0
+    check(
+      (wantLeft ? '左' : '右') + 'の矢印が' + (wantLeft ? '左（+Z）' : '右（-Z）') + 'を指す',
+      wantLeft ? points > 0 : points < 0,
+      points.toFixed(4),
+    )
+  }
+
+  // ★ 点灯は車外の方向指示器と同じ `lightStateFor` から取ること
+  const left = lightStateFor({ braking: false, turnSignal: -1, hazard: false, headlights: false, blink: true })
+  check('左を出すと左だけ点く', left.left && !left.right)
+  const right = lightStateFor({ braking: false, turnSignal: 1, hazard: false, headlights: false, blink: true })
+  check('右を出すと右だけ点く', right.right && !right.left)
+  const off = lightStateFor({ braking: false, turnSignal: -1, hazard: false, headlights: false, blink: false })
+  check('点滅の消えている位相では消灯する', !off.left && !off.right)
+  const hazard = lightStateFor({ braking: false, turnSignal: 0, hazard: true, headlights: false, blink: true })
+  check('ハザードで左右とも点く', hazard.left && hazard.right)
+
+  const geom = makeTurnIndicatorGeometry(TURN_INDICATOR_SIZE)
+  geom.computeBoundingBox()
+  const b = geom.boundingBox!
+  check(
+    '矢印が板（厚みを持たない）',
+    Math.abs(b.max.x - b.min.x) < 1e-9,
+    '厚み ' + (b.max.x - b.min.x).toExponential(1) + 'm',
+  )
+  geom.dispose()
+}
+
+console.log()
+console.log('='.repeat(70))
+console.log('カーナビ（インパネ中央）')
+console.log('='.repeat(70))
+
+{
+  const eyeX = DRIVER_FORWARD
+  const eyeY = DRIVER_EYE_HEIGHT
+  const eyeZ = DRIVER_SEAT_Z
+  const c = NAV_SCREEN.center
+
+  check('画面は車体の中央（インパネ中央部）にある', Math.abs(c[2]) < 1e-9, 'Z=' + c[2].toFixed(2))
+  check(
+    '画面はメーターより下にある',
+    c[1] < GAUGE_SLOTS[0].center[1],
+    'ナビ ' + c[1].toFixed(2) + 'm / メーター ' + GAUGE_SLOTS[0].center[1].toFixed(2) + 'm',
+  )
+
+  // 運転席の画角に入るか（垂直だけ見る。横は画面のほうが広い）
+  const down = (Math.atan2(eyeY - c[1], c[0] - eyeX) * 180) / Math.PI
+  const lookDown = (Math.atan2(DRIVER_LOOK_DROP, DRIVER_LOOK_AHEAD) * 180) / Math.PI
+  check(
+    'ナビが運転席の画角に入る',
+    down <= lookDown + DRIVER_FOV_DEG / 2,
+    '俯角 ' + down.toFixed(1) + ' 度 / 下端 ' + (lookDown + DRIVER_FOV_DEG / 2).toFixed(1) + ' 度',
+  )
+
+  // ★ ハンドルのリムに隠れないこと（中央にあるので、リムの外を通るはず）
+  const t = (STEERING_CENTER[0] - eyeX) / (c[0] - eyeX)
+  const crossY = eyeY + (c[1] - eyeY) * t
+  const crossZ = eyeZ + (c[2] - eyeZ) * t
+  const d = Math.hypot(crossY - STEERING_CENTER[1], crossZ - STEERING_CENTER[2])
+  check(
+    'ナビへの視線がハンドルのリムの外を通る',
+    d > STEERING_RADIUS,
+    'ハンドル中心から ' + d.toFixed(3) + 'm（リム半径 ' + STEERING_RADIUS + 'm）',
+  )
+
+  // 画面がダッシュボードに収まること
+  check(
+    'ナビの画面がダッシュボードの高さに収まる',
+    c[1] - NAV_SCREEN.height / 2 > 0.7 && c[1] + NAV_SCREEN.height / 2 < DASH_TOP_Y_FOR_CHECK,
+    'Y ' + (c[1] - NAV_SCREEN.height / 2).toFixed(2) + '〜' + (c[1] + NAV_SCREEN.height / 2).toFixed(2),
+  )
+
+  // 縮尺。**停車で寄り、速度が上がるほど引く**
+  const maxSpeed = 13.9
+  check('停車でいちばん寄る', navSpanFor(0, maxSpeed) === NAV_SPAN_MIN_M, navSpanFor(0, maxSpeed) + 'm')
+  check(
+    '最高速でいちばん引く',
+    navSpanFor(maxSpeed, maxSpeed) === NAV_SPAN_MAX_M,
+    navSpanFor(maxSpeed, maxSpeed) + 'm',
+  )
+  check(
+    '速度が上がるほど広く見える',
+    navSpanFor(3, maxSpeed) < navSpanFor(8, maxSpeed) && navSpanFor(8, maxSpeed) < navSpanFor(13, maxSpeed),
+    [3, 8, 13].map((v) => navSpanFor(v, maxSpeed).toFixed(0) + 'm').join(' → '),
+  )
+  check(
+    '最高速を超えても引きすぎない',
+    navSpanFor(100, maxSpeed) === NAV_SPAN_MAX_M,
+  )
+  check(
+    '引く幅が寄る幅より広い（実車のナビと同じ向き）',
+    NAV_SPAN_MAX_M > NAV_SPAN_MIN_M,
+    NAV_SPAN_MIN_M + 'm 〜 ' + NAV_SPAN_MAX_M + 'm',
+  )
+
+  const geom = makeNavScreenGeometry(NAV_SCREEN.width, NAV_SCREEN.height)
+  geom.computeBoundingBox()
+  const b = geom.boundingBox!
+  check(
+    'ナビの画面が板（厚みを持たない）',
+    Math.abs(b.max.x - b.min.x) < 1e-6,
+    '厚み ' + (b.max.x - b.min.x).toExponential(1) + 'm',
+  )
+  check(
+    'ナビの画面が横長',
+    b.max.z - b.min.z > b.max.y - b.min.y,
+    (b.max.z - b.min.z).toFixed(2) + 'm x ' + (b.max.y - b.min.y).toFixed(2) + 'm',
+  )
+  geom.dispose()
+}
+
+console.log()
+console.log('='.repeat(70))
+console.log('面の重なり（Z ファイティングの種）')
+console.log('='.repeat(70))
+
+{
+  /**
+   * ★ 別々のメッシュの面が**同じ深度**に来ると、どちらが手前か決まらず
+   * フレームごとに色が入れ替わって点滅する。実際に内装のドアと車体の外板、
+   * バルクヘッドとダッシュボードで起きた。
+   *
+   * ここでは「軸に平行な平面」を数え、車体・内装・ガラスのあいだで
+   * **同じ座標に面が来ていないか**を見る。左右対称で同じ値が出るのは正常なので、
+   * 比べるのは**別のメッシュどうし**だけ。
+   */
+  const EPS = 1e-4
+
+  /** 軸ごとに、頂点が乗っている平面の座標を集める */
+  function planesOf(g: THREE.BufferGeometry): [Set<number>, Set<number>, Set<number>] {
+    const pos = g.attributes.position
+    const out: [Set<number>, Set<number>, Set<number>] = [new Set(), new Set(), new Set()]
+    for (let i = 0; i < pos.count; i++) {
+      out[0].add(Math.round(pos.getX(i) / EPS) * EPS)
+      out[1].add(Math.round(pos.getY(i) / EPS) * EPS)
+      out[2].add(Math.round(pos.getZ(i) / EPS) * EPS)
+    }
+    return out
+  }
+
+  const body = makeBodyGeometry()
+  const interior = makeInteriorGeometry()
+  const glass = makeGlassGeometry()
+
+  // ★ 窓ガラスは `transparent` + `depthWrite: false` で描くので**深度を書かない**。
+  //   面が重なってもファイティングは起きないため、比べるのは不透明どうしだけ。
+  const pairs: Array<[string, THREE.BufferGeometry, THREE.BufferGeometry]> = [
+    ['車体と内装', body, interior],
+  ]
+  const axis = ['X', 'Y', 'Z']
+
+  for (const [name, a, b] of pairs) {
+    const pa = planesOf(a)
+    const pb = planesOf(b)
+    const shared: string[] = []
+    for (let k = 0; k < 3; k++) {
+      for (const v of pa[k]) {
+        if (pb[k].has(v)) shared.push(axis[k] + '=' + v.toFixed(3))
+      }
+    }
+    check(
+      name + 'が同じ平面を共有しない',
+      shared.length === 0,
+      shared.length === 0 ? '' : '共有 ' + shared.length + ' 面: ' + shared.slice(0, 6).join(' / '),
+    )
+  }
+
+  body.dispose()
+  interior.dispose()
+  glass.dispose()
+}
+
+console.log()
+console.log('='.repeat(70))
+console.log('描画コスト（台数によらず一定であること）')
+console.log('='.repeat(70))
+
+{
+  /**
+   * 1 台あたりの部品と個数。**instancedMesh の数 = ドローコールの数**なので、
+   * 部品を増やすほどここが伸びる。
+   */
+  const parts: Array<[string, () => THREE.BufferGeometry, number]> = [
+    ['車体', makeBodyGeometry, 1],
+    ['ボンネットの飾り', makeNoseGeometry, 1],
+    ['窓ガラス', makeGlassGeometry, 1],
+    ['内装', makeInteriorGeometry, 1],
+    ['ハンドル', makeSteeringGeometry, 1],
+    ['ペダル', makePedalGeometry, PEDAL_SLOTS.length],
+    ['文字盤', () => makeGaugeFaceGeometry(GAUGE_SLOTS[0].radius), GAUGE_SLOTS.length],
+    ['針', () => makeNeedleGeometry(GAUGE_SLOTS[0].radius), GAUGE_SLOTS.length],
+    ['車輪', makeWheelGeometry, WHEEL_OFFSETS.length],
+  ]
+
+  let tris = 0
+  for (const [, make, n] of parts) {
+    const g = make()
+    const count = g.index ? g.index.count / 3 : g.attributes.position.count / 3
+    tris += count * n
+    g.dispose()
+  }
+
+  // 金沢は建物 35,607 棟・標識 15,719 本がある。車の作り込みがそれに並ぶと
+  // 重いフレームの原因が読めなくなるので、1 台 3,000 三角形を上限にしておく
+  check(
+    '1 台あたりの三角形が 3,000 以下',
+    tris <= 3000,
+    Math.round(tris) + ' 三角形（8 台で ' + Math.round(tris * 8) + '）',
+  )
+  check(
+    '部品ごとの instancedMesh が 15 個以下',
+    parts.length + 2 <= 15,
+    (parts.length + 2) + ' 個（灯体・プレートを含む。台数によらず一定）',
   )
 }
 

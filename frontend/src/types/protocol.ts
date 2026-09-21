@@ -242,6 +242,8 @@ export interface VehicleState {
   speedViolations: number
   /** 制動指令が出ているか（ブレーキランプ）。**加速度の実測ではなく指令** */
   braking?: boolean
+  /** 加速指令 -1..1（ペダルの踏み込み）。`braking` と同じ指令から出る */
+  throttle?: number
   /** 方向指示器。-1=左 / 0=消灯 / +1=右 */
   turnSignal?: number
   /** 目的地までの経路。変化があったフレームのみ含まれる。省略時は前回値を保持 */

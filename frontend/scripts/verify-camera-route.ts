@@ -2,13 +2,17 @@
 
 import {
   DRIVER_EYE_HEIGHT,
+  DRIVER_FOLLOW_RATE,
   DRIVER_FORWARD,
   DRIVER_RIGHT,
   FOLLOW_BACK,
+  FOLLOW_FOLLOW_RATE,
   FOLLOW_UP,
   driverEye,
   driverLookAt,
+  driverSeatLag,
   followEye,
+  followLerpFactor,
   followLookAt,
 } from '../src/scene/cameraMath.ts'
 import {
@@ -277,6 +281,81 @@ for (const [name, h] of HEADINGS) {
     for (let i = 1; i < pos.count; i++) if (Math.abs(pos.getY(i) - y0) > 1e-9) sameY = false
     check('矢羽根が水平に置かれている', sameY, `高さ ${y0.toFixed(3)}m`)
   }
+}
+
+
+console.log()
+console.log('='.repeat(70))
+console.log('運転席カメラが車体に固定されているか')
+console.log('='.repeat(70))
+
+{
+  /**
+   * ★ カメラを遅れて追わせると、定常状態で `速度 / rate` だけ後ろに居座る。
+   * 加減速でこの量が変わるので、**車内が前後に滑って見える**。
+   * 実際に rate 22 で走らせていて、目からダッシュボードまでの 0.51m より
+   * 大きく揺れていた。
+   */
+  const maxSpeed = 13.9
+  check(
+    '運転席カメラは車体に対して遅れない',
+    driverSeatLag(DRIVER_FOLLOW_RATE, maxSpeed) === 0,
+    'ずれ ' + driverSeatLag(DRIVER_FOLLOW_RATE, maxSpeed).toFixed(3) + 'm（rate ' + DRIVER_FOLLOW_RATE + '）',
+  )
+  check(
+    '追従カメラ（車外）は遅れてよい',
+    driverSeatLag(FOLLOW_FOLLOW_RATE, maxSpeed) > 0.5,
+    'ずれ ' + driverSeatLag(FOLLOW_FOLLOW_RATE, maxSpeed).toFixed(2) + 'm',
+  )
+  check(
+    'rate 0 なら毎フレーム目標へ合わせる',
+    followLerpFactor(DRIVER_FOLLOW_RATE, 1 / 60) === 1,
+  )
+  check(
+    'rate が正なら 1 フレームでは追いつかない',
+    followLerpFactor(FOLLOW_FOLLOW_RATE, 1 / 60) < 1,
+    followLerpFactor(FOLLOW_FOLLOW_RATE, 1 / 60).toFixed(3),
+  )
+
+  // 加減速のあいだに車内がどれだけ滑るか。急加速 3m/s^2 を 1 秒
+  const accel = 3.0
+  const before = driverSeatLag(DRIVER_FOLLOW_RATE, 5.0)
+  const after = driverSeatLag(DRIVER_FOLLOW_RATE, 5.0 + accel)
+  check(
+    '加速しても車内の見え方が変わらない',
+    Math.abs(after - before) < 1e-9,
+    '滑り ' + Math.abs(after - before).toFixed(4) + 'm',
+  )
+
+  // 20Hz を 60fps へ線形補間したとき、1 フレームの移動量がどれだけ跳ねるか。
+  // 補間の継ぎ目で速度が階段状に変わるが、知覚できる量かを見る
+  const hz = 20
+  const fps = 60
+  const dtFrame = 1 / fps
+  const samples: number[] = []
+  let prevPos = 0
+  let lastStep = 0
+  let worstJump = 0
+  for (let i = 0; i < fps; i++) {
+    const t = i * dtFrame
+    // 等加速度運動を 20Hz でサンプルし、その間を線形につなぐ
+    const k = Math.floor(t * hz)
+    const a0 = k / hz
+    const a1 = (k + 1) / hz
+    const p = (tt: number) => 5.0 * tt + 0.5 * accel * tt * tt
+    const alpha = (t - a0) / (a1 - a0)
+    const pos = p(a0) + (p(a1) - p(a0)) * alpha
+    const step = pos - prevPos
+    if (i > 1) worstJump = Math.max(worstJump, Math.abs(step - lastStep))
+    lastStep = step
+    prevPos = pos
+    samples.push(pos)
+  }
+  check(
+    '20Hz を 60fps へ補間しても、1 フレームの移動量が跳ねない',
+    worstJump < 0.005,
+    '最大 ' + (worstJump * 1000).toFixed(2) + 'mm（3m/s^2 で加速中）',
+  )
 }
 
 console.log('')

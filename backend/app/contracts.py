@@ -447,6 +447,8 @@ class VehicleSnapshot:
     speed_violations: int = 0
     #: 制動指令が出ているか（ブレーキランプ）
     braking: bool = False
+    #: 加速指令 -1..1（ペダルの踏み込み）。**実測の加速度ではなく指令**
+    throttle: float = 0.0
     #: 方向指示器。-1=左 / 0=消灯 / +1=右
     turn_signal: int = 0
     route: list[tuple[float, float]] | None = None
@@ -469,6 +471,7 @@ class VehicleSnapshot:
             "speedLimit": round(self.speed_limit, 3),
             "speedViolations": self.speed_violations,
             "braking": self.braking,
+            "throttle": round(self.throttle, 3),
             "turnSignal": int(self.turn_signal),
         }
         if self.route is not None:

@@ -33,6 +33,8 @@ export interface VehiclePose {
   goalY: number
   /** 制動指令が出ているか（ブレーキランプ）。**補間しない** */
   braking: boolean
+  /** 加速指令 -1..1（ペダルの踏み込み）。**補間しない**（20Hz の指令をそのまま使う） */
+  throttle: number
   /** 方向指示器。-1=左 / 0=消灯 / +1=右。**補間しない** */
   turnSignal: number
   /** この呼び出しで瞬間移動したか（カメラ側で減衰を切るのに使う） */
@@ -74,6 +76,7 @@ export function sampleVehicle(
   out.collided = cv.collided
   out.reachedGoal = cv.reachedGoal
   out.braking = cv.braking ?? false
+  out.throttle = cv.throttle ?? 0
   out.turnSignal = cv.turnSignal ?? 0
   out.goalX = cv.goal[0]
   out.goalY = cv.goal[1]
@@ -123,6 +126,7 @@ export function createPose(): VehiclePose {
     goalX: 0,
     goalY: 0,
     braking: false,
+    throttle: 0,
     turnSignal: 0,
     teleported: false,
   }

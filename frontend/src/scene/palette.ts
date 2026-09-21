@@ -57,8 +57,18 @@ export interface ScenePalette {
 
   /** タイヤ */
   readonly vehicleWheel: string
-  /** ガラス（キャビン） */
+  /** 窓ガラス */
   readonly vehicleGlass: string
+  /** 内装（ダッシュボード・シート・内張り） */
+  readonly vehicleInterior: string
+  /** ハンドル・ペダルなど、手足が触れる黒い部品 */
+  readonly vehicleTrim: string
+  /** 車載の画面（カーナビ）の地色。メーターの文字盤はテクスチャに焼いてある */
+  readonly vehicleGauge: string
+  /** メーターの針。**昼夜で変えない**（発光しているため） */
+  readonly vehicleNeedle: string
+  /** メーター脇のウインカー表示。**昼夜で変えない**（実車と同じ緑） */
+  readonly vehicleIndicator: string
   /** 衝突中に寄せる色 */
   readonly vehicleCollided: string
   /** 目的地に着いたときに寄せる色 */
@@ -116,6 +126,11 @@ export const DARK_SCENE: ScenePalette = {
 
   vehicleWheel: '#15181c',
   vehicleGlass: '#0f1b26',
+  vehicleInterior: '#23262b',
+  vehicleTrim: '#141619',
+  vehicleGauge: '#0c0e11',
+  vehicleNeedle: '#ff4a3d',
+  vehicleIndicator: '#4ade80',
   vehicleCollided: '#ff5a4d',
   vehicleReached: '#3ad2a0',
   vehicleHighlight: '#7adcc8',
@@ -167,6 +182,11 @@ export const LIGHT_SCENE: ScenePalette = {
 
   vehicleWheel: '#1c2024',
   vehicleGlass: '#4a6a8a',
+  vehicleInterior: '#4a4d55',
+  vehicleTrim: '#26282c',
+  vehicleGauge: '#15181d',
+  vehicleNeedle: '#ff4a3d',
+  vehicleIndicator: '#4ade80',
   vehicleCollided: '#d43526',
   vehicleReached: '#0f9a6d',
   vehicleHighlight: '#0b8f79',

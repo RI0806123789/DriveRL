@@ -156,6 +156,8 @@ class World:
         self.reached_flags = np.zeros(n, dtype=bool)
 
         self.braking = np.zeros(n, dtype=bool)
+        #: 加速指令 -1..1。ペダルの踏み込みを描くのに使う（`braking` と同じ出どころ）
+        self.throttle = np.zeros(n, dtype=np.float32)
         #: 方向指示器。-1=左 / 0=消灯 / +1=右
         self.turn_signal = np.zeros(n, dtype=np.int8)
         #: 直近の `check_collisions()` で歩行者に当たったスロット
@@ -986,13 +988,16 @@ class World:
                 self.slots[slot].steps += 1
 
     def set_braking(self, accel_cmd: np.ndarray) -> None:
-        """制動指令が出ているスロットを記録する（ブレーキランプ）。
+        """制動指令が出ているスロットと、その踏み込み量を記録する。
 
         **加速度の実測ではなく指令を見る。** エンジンブレーキや空気抵抗で減速しても
-        実車のブレーキランプは点かない。
+        実車のブレーキランプは点かない。ペダルの踏み込み（`throttle`）も同じ指令から
+        出す。**別々の出どころにしないこと** — ブレーキランプが点いているのに
+        ブレーキペダルが戻っている、という食い違いが起きる。
         """
         cmd = np.asarray(accel_cmd, dtype=np.float32)
         self.braking = (cmd < np.float32(BRAKE_COMMAND_THRESHOLD)) & self.fleet.active
+        self.throttle = np.where(self.fleet.active, cmd, np.float32(0.0)).astype(np.float32)
 
     def update_turn_signals(self) -> None:
         """経路の先を見て方向指示器を出す。**`project_all()` の後に呼ぶこと**。
@@ -1132,6 +1137,7 @@ class World:
                     ),
                     speed_violations=int(state.speed_violations),
                     braking=bool(self.braking[slot]),
+                    throttle=float(self.throttle[slot]),
                     turn_signal=int(self.turn_signal[slot]),
                     route=route,
                 )
