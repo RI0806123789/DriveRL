@@ -37,6 +37,7 @@ import {
   composeVehicleMatrix,
   composeWheelMatrix,
   createTransformScratch,
+  gaugeUvRow,
   makeBodyGeometry,
   makeCabinGeometry,
   makeGaugeFaceGeometry,
@@ -65,6 +66,8 @@ import {
   DRIVER_LOOK_AHEAD,
   DRIVER_LOOK_DROP,
   DRIVER_RIGHT,
+  driverEye,
+  driverLookAt,
 } from '../src/scene/cameraMath.ts'
 import {
   DEFAULT_REGION,
@@ -124,6 +127,48 @@ function legacyWorld(
   const leaf = build(root)
   root.updateMatrixWorld(true)
   return leaf.matrixWorld.clone()
+}
+
+/**
+ * 車両ローカル座標の点を、**実際の運転席カメラ**で投影したときの画面 x（-1..1）。
+ * ★ 「運転者から見て +Z は左か右か」を**手で書かないため**の道具。
+ * 一度その思い込みを検証にも書いてしまい、
+ * メーターの針が逆回り・ウインカーが左右あべこべなまま OK が並んだ。
+ */
+function screenX(local: readonly [number, number, number]): number {
+  const cam = new THREE.PerspectiveCamera(DRIVER_FOV_DEG, 16 / 9, 0.1, 100)
+  const eye = driverEye(0, 0, 0)
+  const at = driverLookAt(0, 0, 0)
+  cam.position.set(eye.x, eye.y, eye.z)
+  cam.up.set(0, 1, 0)
+  cam.lookAt(at.x, at.y, at.z)
+  cam.updateMatrixWorld(true)
+  cam.updateProjectionMatrix()
+  const m = createTransformScratch()
+  const b = new THREE.Matrix4()
+  const o = new THREE.Matrix4()
+  composeVehicleMatrix(m, 0, 0, 0, b)
+  composeFixedMatrix(m, b, local, o)
+  return new THREE.Vector3().setFromMatrixPosition(o).project(cam).x
+}
+
+/** 針先（割合 `ratio`）の画面 x。時計回りかどうかはこれで決める */
+function needleScreenX(slot: number, ratio: number): number {
+  const cam = new THREE.PerspectiveCamera(DRIVER_FOV_DEG, 16 / 9, 0.1, 100)
+  const eye = driverEye(0, 0, 0)
+  const at = driverLookAt(0, 0, 0)
+  cam.position.set(eye.x, eye.y, eye.z)
+  cam.up.set(0, 1, 0)
+  cam.lookAt(at.x, at.y, at.z)
+  cam.updateMatrixWorld(true)
+  cam.updateProjectionMatrix()
+  const m = createTransformScratch()
+  const b = new THREE.Matrix4()
+  const o = new THREE.Matrix4()
+  composeVehicleMatrix(m, 0, 0, 0, b)
+  composeNeedleMatrix(m, b, slot, ratio, o)
+  const tip = new THREE.Vector3(0, GAUGE_SLOTS[slot].radius * 0.8, 0).applyMatrix4(o)
+  return tip.project(cam).x
 }
 
 const scratch = createTransformScratch()
@@ -693,12 +738,25 @@ console.log('='.repeat(70))
     Math.abs(NEEDLE_SWEEP) > 0 && Math.abs(NEEDLE_SWEEP) < Math.PI * 2,
     Math.abs((NEEDLE_SWEEP * 180) / Math.PI).toFixed(0) + ' 度',
   )
-  // ★ 運転者から見て時計回りに振れること。針は車両ローカルの X 軸まわりに回り、
-  //   運転者からは +Z が左に見えるので、**開始が正・振れ幅が負**でないと逆回りになる
+  // ★ 運転者から見て時計回りに振れること。**符号を手で決めない**（`screenX`）
+  const nx0 = needleScreenX(0, 0)
+  const nxHalf = needleScreenX(0, 0.5)
+  const nx1 = needleScreenX(0, 1)
+  const dialX = screenX(GAUGE_SLOTS[0].center)
   check(
-    '速度が上がると針が時計回り（運転者から見て右）へ回る',
-    NEEDLE_START > 0 && NEEDLE_SWEEP < 0,
-    '開始 ' + NEEDLE_START.toFixed(2) + ' / 振れ ' + NEEDLE_SWEEP.toFixed(2),
+    '針は 0 のとき文字盤の左寄りを指す',
+    nx0 < dialX,
+    '画面 x=' + nx0.toFixed(3) + '（文字盤 ' + dialX.toFixed(3) + '）',
+  )
+  check(
+    '針は 0.5 のとき真上（文字盤の中心の真上）を指す',
+    Math.abs(nxHalf - dialX) < 0.01,
+    '画面 x=' + nxHalf.toFixed(3) + ' / 文字盤 ' + dialX.toFixed(3),
+  )
+  check(
+    '速度が上がると針が時計回り（左 → 上 → 右）へ回る',
+    nx0 < nxHalf && nxHalf < nx1,
+    nx0.toFixed(3) + ' → ' + nxHalf.toFixed(3) + ' → ' + nx1.toFixed(3),
   )
 
   composeVehicleMatrix(scratch, 0, 0, 0, base)
@@ -843,6 +901,21 @@ console.log('='.repeat(70))
     GAUGE_SLOTS.every((g, i) => g.kind === GAUGE_KINDS[i]),
   )
 
+  // ★ プレートと同じ罠。Canvas は上から 'speed', 'power' と描くが、v は下から数える。
+  //   素通しにすると速度計の枠にパワーメーターの絵が貼られ、停車中でも
+  //   針が真上（＝ 80km/h に見える）を指したまま動かなくなる
+  {
+    const n = GAUGE_KINDS.length
+    const rows = GAUGE_KINDS.map((_, i) => gaugeUvRow(i, n))
+    check('文字盤の段は 0〜種類数-1 に収まる', rows.every((r) => r >= 0 && r < n))
+    check('種類ごとに違う段を使う', new Set(rows).size === n)
+    check(
+      'いちばん上に描いた speed が v では最後の段',
+      gaugeUvRow(GAUGE_KINDS.indexOf('speed'), n) === n - 1,
+      'row=' + gaugeUvRow(GAUGE_KINDS.indexOf('speed'), n),
+    )
+  }
+
   // 速度計。目盛りは固定なので、設定できる最高速度（40 m/s = 144 km/h）を覆うこと
   check(
     '速度計の目盛りが maxSpeed の上限（144 km/h）を覆う',
@@ -883,16 +956,18 @@ console.log('='.repeat(70))
     Math.abs(needleAngle(powerRatio(0))) < 1e-12,
     (needleAngle(powerRatio(0)) * 180 / Math.PI).toFixed(1) + ' 度',
   )
-  // 出力側（正）は時計回り = 角度が負の側
+  // 出力側（正）は時計回り。**画面へ投影して決める**
+  const powerSlot = GAUGE_SLOTS.findIndex((g) => g.kind === 'power')
+  const mid = needleScreenX(powerSlot, powerRatio(0))
   check(
     '出力側で針が右（時計回り）へ振れる',
-    needleAngle(powerRatio(0.5)) < 0,
-    (needleAngle(powerRatio(0.5)) * 180 / Math.PI).toFixed(1) + ' 度',
+    needleScreenX(powerSlot, powerRatio(0.5)) > mid,
+    '画面 x=' + needleScreenX(powerSlot, powerRatio(0.5)).toFixed(3) + '（中央 ' + mid.toFixed(3) + '）',
   )
   check(
     '回生側で針が左へ振れる',
-    needleAngle(powerRatio(-0.5)) > 0,
-    (needleAngle(powerRatio(-0.5)) * 180 / Math.PI).toFixed(1) + ' 度',
+    needleScreenX(powerSlot, powerRatio(-0.5)) < mid,
+    '画面 x=' + needleScreenX(powerSlot, powerRatio(-0.5)).toFixed(3) + '（中央 ' + mid.toFixed(3) + '）',
   )
 }
 
@@ -907,11 +982,13 @@ console.log('='.repeat(70))
     '左が -1・右が +1（frame の turnSignal と同じ符号）',
     TURN_INDICATOR_SLOTS[0].side === -1 && TURN_INDICATOR_SLOTS[1].side === 1,
   )
-  // 運転者から見て +Z が左。左の矢印は +Z 側に置く
+  // ★ どちらが画面の左かは**投影で決める**（+Z が左か右かを手で書かない）
+  const leftX = screenX(TURN_INDICATOR_SLOTS[0].center)
+  const rightX = screenX(TURN_INDICATOR_SLOTS[1].center)
   check(
-    '左の表示が運転席から見て左（+Z）にある',
-    TURN_INDICATOR_SLOTS[0].center[2] > TURN_INDICATOR_SLOTS[1].center[2],
-    TURN_INDICATOR_SLOTS[0].center[2].toFixed(2) + ' / ' + TURN_INDICATOR_SLOTS[1].center[2].toFixed(2),
+    '左の表示が運転席から見て画面の左にある',
+    leftX < rightX,
+    '左 x=' + leftX.toFixed(3) + ' / 右 x=' + rightX.toFixed(3),
   )
   check(
     '左右がメーターの中心に対して対称',
@@ -977,24 +1054,29 @@ console.log('='.repeat(70))
     )
   }
 
-  // 矢印の向き。左は +Z、右は -Z を指す
-  composeVehicleMatrix(scratch, 0, 0, 0, base)
-  const tip = new THREE.Vector3(0, 0, TURN_INDICATOR_SIZE)
-  for (let k = 0; k < TURN_INDICATOR_SLOTS.length; k++) {
-    composeTurnIndicatorMatrix(scratch, base, k, out)
-    const at = tip.clone().applyMatrix4(out)
-    const centre = new THREE.Vector3(
-      TURN_INDICATOR_SLOTS[k].center[0],
-      TURN_INDICATOR_SLOTS[k].center[1],
-      TURN_INDICATOR_SLOTS[k].center[2],
-    )
-    const points = at.z - centre.z
-    const wantLeft = TURN_INDICATOR_SLOTS[k].side < 0
-    check(
-      (wantLeft ? '左' : '右') + 'の矢印が' + (wantLeft ? '左（+Z）' : '右（-Z）') + 'を指す',
-      wantLeft ? points > 0 : points < 0,
-      points.toFixed(4),
-    )
+  // ★ 矢印の向きも投影で確かめる。左の矢印は画面の左を指すこと
+  {
+    const cam = new THREE.PerspectiveCamera(DRIVER_FOV_DEG, 16 / 9, 0.1, 100)
+    const eye = driverEye(0, 0, 0)
+    const at = driverLookAt(0, 0, 0)
+    cam.position.set(eye.x, eye.y, eye.z)
+    cam.up.set(0, 1, 0)
+    cam.lookAt(at.x, at.y, at.z)
+    cam.updateMatrixWorld(true)
+    cam.updateProjectionMatrix()
+    composeVehicleMatrix(scratch, 0, 0, 0, base)
+    const tipLocal = new THREE.Vector3(0, 0, TURN_INDICATOR_SIZE)
+    for (let k = 0; k < TURN_INDICATOR_SLOTS.length; k++) {
+      composeTurnIndicatorMatrix(scratch, base, k, out)
+      const tipX = tipLocal.clone().applyMatrix4(out).project(cam).x
+      const baseX = screenX(TURN_INDICATOR_SLOTS[k].center)
+      const wantLeft = TURN_INDICATOR_SLOTS[k].side < 0
+      check(
+        (wantLeft ? '左' : '右') + 'の矢印が画面の' + (wantLeft ? '左' : '右') + 'を指す',
+        wantLeft ? tipX < baseX : tipX > baseX,
+        '先端 x=' + tipX.toFixed(4) + ' / 根元 x=' + baseX.toFixed(4),
+      )
+    }
   }
 
   // ★ 点灯は車外の方向指示器と同じ `lightStateFor` から取ること

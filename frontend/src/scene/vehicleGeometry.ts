@@ -8,6 +8,12 @@ import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js
  * 右が +Z なのは `composeVehicleMatrix` が ENU の方位をそのまま three の Y 回転に
  * 入れており、three の z が ENU の -y だから（`cameraMath.DRIVER_RIGHT` も +Z 側）。
  * 日本車なので運転席は +Z 側に置く。
+ *
+ * ★ **運転席から前を見たときも、画面の右は +Z のまま。**
+ * ここを「運転者から見ると +Z は左」と取り違えて、メーターの針を逆回りにし、
+ * ウインカーの矢印を左右あべこべに置いた。
+ * `verify:vehicles` は実際の運転席カメラへ投影して左右を決めており、
+ * **思い込みを書かないこと**（`screenX()`）。
  */
 
 /** 外接寸法 [m]。**backend の `config.VEHICLE_*` と揃える。ここを越える部品を作らない** */
@@ -305,6 +311,17 @@ export type GaugeKind = (typeof GAUGE_KINDS)[number]
 /** 速度計の目盛りの上限 [km/h]。`maxSpeed` の設定上限（40 m/s = 144 km/h）を覆う */
 export const GAUGE_SPEED_MAX_KMH = 160
 
+/**
+ * 文字盤アトラスの何段目を貼るかを、テクスチャ座標 v の段へ写す。
+ * ★ **Canvas は上から順に描くが、v は下から数える**（`plateUvRow` と同じ罠）。
+ * 素通しにすると速度計の枠に**パワーメーターの絵**が貼られ、針だけが速度で動く。
+ * 停車中でもパワーメーターの針は中央（真上）を指すので、
+ * **速度計が常に 80km/h を指しているように見える**という形で表に出た。
+ */
+export function gaugeUvRow(kindIndex: number, rows: number): number {
+  return Math.max(0, rows - 1 - kindIndex)
+}
+
 /** メーターの文字盤。針と同じ面に置く */
 export const GAUGE_SLOTS: ReadonlyArray<{
   readonly center: readonly [number, number, number]
@@ -358,16 +375,16 @@ export const TURN_INDICATOR_SLOTS: ReadonlyArray<{
   readonly center: readonly [number, number, number]
   readonly side: -1 | 1
 }> = [
-  { center: [DASH_REAR_X - 0.01, DASH_TOP_Y - 0.02, DRIVER_SEAT_Z + 0.028], side: -1 },
-  { center: [DASH_REAR_X - 0.01, DASH_TOP_Y - 0.02, DRIVER_SEAT_Z - 0.028], side: 1 },
+  { center: [DASH_REAR_X - 0.01, DASH_TOP_Y - 0.02, DRIVER_SEAT_Z - 0.028], side: -1 },
+  { center: [DASH_REAR_X - 0.01, DASH_TOP_Y - 0.02, DRIVER_SEAT_Z + 0.028], side: 1 },
 ]
 
 /** インジケーターの大きさ [m]（三角形の高さ） */
 export const TURN_INDICATOR_SIZE = 0.017
 
 /**
- * ウインカーの矢印 1 個。平面 X=0 の上に、**+Z（運転者から見て左）を指す**三角形を作る。
- * 右側は行列側で X 軸まわりに反転させる。
+ * ウインカーの矢印 1 個。平面 X=0 の上に、**+Z（運転者から見て右）を指す**三角形を作る。
+ * 左側は行列側で X 軸まわりに反転させる。
  */
 export function makeTurnIndicatorGeometry(size: number): THREE.BufferGeometry {
   const g = new THREE.BufferGeometry()
@@ -502,12 +519,12 @@ export function makeNeedleGeometry(radius: number): THREE.BufferGeometry {
 
 /**
  * 針が振れる範囲 [rad]。**運転者から見て左下から右下へ（時計回りに）**回る。
- * ★ 針は車両ローカルの X 軸まわりに回り、運転者から見ると +Z が**左**になるので、
- * 時計回りにするには開始を正・振れ幅を負にする（符号を逆にすると反時計回りになり、
- * 速度が上がるほど針が左へ動く）。
+ * ★ 針は X 軸まわりに角度 θ で回り、針先は `(0, L·cosθ, L·sinθ)`。
+ * **運転者から見て +Z は右**なので θ が増えるほど右へ回る。つまり
+ * **開始が負・振れ幅が正**で時計回り。逆にすると、速度が上がるほど針が左へ動く。
  */
-export const NEEDLE_START = 2.2
-export const NEEDLE_SWEEP = -4.4
+export const NEEDLE_START = -2.2
+export const NEEDLE_SWEEP = 4.4
 
 /** タイヤの幅 [m]。リムとスポークはこの中へ収める */
 const WHEEL_WIDTH = 0.24
@@ -670,8 +687,9 @@ export function composeTurnIndicatorMatrix(
   const spec = TURN_INDICATOR_SLOTS[index]
   const n = scratch.part
   n.position.set(spec.center[0], spec.center[1], spec.center[2])
-  // X 軸まわりに 180 度回すと、法線を保ったまま指す向きだけが裏返る
-  n.rotation.set(spec.side > 0 ? Math.PI : 0, 0, 0)
+  // X 軸まわりに 180 度回すと、法線を保ったまま指す向きだけが裏返る。
+  // 素の矢印は +Z（運転者から見て右）を指すので、**裏返すのは左側**
+  n.rotation.set(spec.side < 0 ? Math.PI : 0, 0, 0)
   n.scale.setScalar(1)
   n.updateMatrix()
   return out.multiplyMatrices(base, n.matrix)
