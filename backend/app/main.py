@@ -409,6 +409,12 @@ async def handle_client_message(websocket: WebSocket, message: dict[str, Any]) -
         engine.taxi_command(_TAXI_COMMANDS[kind])
         return
 
+    if kind == "player_pose":
+        # 10Hz で届くので、値が読めないときは黙って街から消す。
+        # エラーを返すと同じ頻度で返し続けることになる
+        engine.submit_player_pose(_parse_point(message.get("at")))
+        return
+
     if kind == "cancel_taxi":
         halt = coerce_bool(message.get("halt")) or False
         engine.taxi_command("halt" if halt else "cancel")

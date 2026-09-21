@@ -39,6 +39,11 @@ logger = logging.getLogger(__name__)
 
 _EPISODE_WINDOW = 50
 
+#: 徒歩キャラの位置が届かなくなってから、街から消すまで [秒]。
+#: タブを閉じた・回線が切れた利用者を街に置き去りにすると、そこに見えない人が
+#: 立ち続けて車が永久に止まる
+PLAYER_POSE_TTL_SEC = 1.0
+
 
 @dataclass
 class ExportTicket:
@@ -115,6 +120,9 @@ class SimulationEngine:
         self._network_snapshot_failed = False
         self._autosave_every = 20
         self._last_autosave_updates = 0
+
+        # 徒歩キャラの位置を最後に受け取った時刻。0 なら街に居ない
+        self._player_pose_at: float = 0.0
 
     def start(self) -> None:
         if self._thread is not None:
@@ -193,6 +201,10 @@ class SimulationEngine:
     def taxi_command(self, action: str, payload: dict[str, Any] | None = None) -> None:
         """配車の操作を積む（request / board / alight / cancel / halt）。"""
         self._inbox.put(("taxi", (str(action), payload or {})))
+
+    def submit_player_pose(self, at: tuple[float, float] | None) -> None:
+        """実用モードの徒歩キャラの位置を積む（None で街から消す）。"""
+        self._inbox.put(("player_pose", at))
 
     def take_taxi(self, last_seq: int) -> tuple[int, dict[str, Any] | None]:
         """前回配信した番号より新しい配車状態があれば返す（frame と同じ作法）。"""
@@ -473,6 +485,9 @@ class SimulationEngine:
             action, args = payload
             self._handle_taxi(str(action), args or {})
 
+        elif kind == "player_pose":
+            self._apply_player_pose(payload)
+
         elif kind == "publish_taxi":
             with self._lock:
                 self._taxi_sent_revision = -1
@@ -529,6 +544,8 @@ class SimulationEngine:
         if self._env is not None:
             # 実用モードの間だけ街の車も経路追従にする（止まったままだと道が詰まる）
             self._env.autopilot_all = practical
+        # 開発モードに徒歩キャラは居ない。残すと PPO から見た環境が変わってしまう
+        self._apply_player_pose(None)
 
         self._taxi.cancel(
             self._env,
@@ -544,6 +561,21 @@ class SimulationEngine:
             if practical
             else "開発モードに戻りました。学習を再開します"
         )
+
+    def _apply_player_pose(self, at: tuple[float, float] | None) -> None:
+        """徒歩キャラの位置を env へ渡す。
+
+        ★ **乗車中と開発モードでは必ず消すこと。** 乗せたまま渡すと、自分を乗せた
+        車が車内の乗客を歩行者として見て永久に止まる。
+        """
+        if at is not None:
+            with self._lock:
+                practical = self._practical_mode
+            if not practical or self._taxi.onboard:
+                at = None
+        self._player_pose_at = time.perf_counter() if at is not None else 0.0
+        if self._env is not None:
+            self._env.set_player_pose(at)
 
     def _handle_taxi(self, action: str, args: dict[str, Any]) -> None:
         """配車の操作を適用する。断った理由は `status.message` で返す。"""
@@ -578,6 +610,10 @@ class SimulationEngine:
 
         if problem:
             self._notify(problem)
+        # 乗った瞬間に街から消す。TTL 任せにすると、乗せた車が車内の乗客を
+        # 歩行者と見て 1 秒ぶん止まる
+        if self._taxi.onboard:
+            self._apply_player_pose(None)
         self._publish_taxi()
 
     def _sync_vehicle_count(self) -> None:
@@ -794,6 +830,8 @@ class SimulationEngine:
             env.autopilot_all = self._practical_mode
         self._env = env
         self._map_index = map_index
+        # 新しい env は徒歩キャラを知らないので、次の報告が届くまで街に居ない扱い
+        self._player_pose_at = 0.0
 
         logger.info("%s", self._env.world.signals.describe())
 
@@ -839,6 +877,11 @@ class SimulationEngine:
 
         with self._lock:
             practical = self._practical_mode
+
+        # 届かなくなった徒歩キャラは街から消す（見えない人の前で車が止まり続ける）
+        if self._player_pose_at > 0.0:
+            if time.perf_counter() - self._player_pose_at >= PLAYER_POSE_TTL_SEC:
+                self._apply_player_pose(None)
 
         obs = env.observations
         active = env.active_mask

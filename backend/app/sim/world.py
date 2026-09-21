@@ -45,6 +45,10 @@ LANE_RETURN_M = config.LANE_RETURN_M
 #: 誰にも見えていない歩行者を車の近くへ回す間隔 [秒]。毎ステップやる必要はない
 PEDESTRIAN_RECYCLE_SEC = 2.0
 
+#: 徒歩キャラが居ないときに返す空配列。毎回作らないよう 1 つだけ持つ
+_NO_PLAYER = np.zeros((0, 2), dtype=np.float64)
+_NO_PLAYER.flags.writeable = False
+
 #: これより強い制動指令が出ている間はブレーキランプを点ける。
 #: 0 にすると、方策が出す微小な負の値で点きっぱなしになる
 BRAKE_COMMAND_THRESHOLD = -0.05
@@ -125,6 +129,8 @@ class World:
         self.rng = rng
         self.fleet = VehicleFleet(config.MAX_VEHICLES)
         self.crowd = PedestrianCrowd(map_index, rng)
+        #: 実用モードの徒歩キャラ (0, 2) か (1, 2)。**NPC 群衆とは別に持つ**
+        self._player_xy = _NO_PLAYER
         self.obstacles: list[ObstacleState] = []
         self.slots: list[SlotState] = [SlotState() for _ in range(config.MAX_VEHICLES)]
 
@@ -410,10 +416,36 @@ class World:
             (self.fleet.x[idx].astype(np.float64), self.fleet.y[idx].astype(np.float64))
         )
 
+    def set_player(self, at: tuple[float, float] | None) -> None:
+        """実用モードの徒歩キャラの位置を差し替える（None で消す）。"""
+        if at is None:
+            self._player_xy = _NO_PLAYER
+            return
+        x, y = float(at[0]), float(at[1])
+        if not (math.isfinite(x) and math.isfinite(y)):
+            self._player_xy = _NO_PLAYER
+            return
+        self._player_xy = np.array([[x, y]], dtype=np.float64)
+
+    @property
+    def has_player(self) -> bool:
+        """徒歩キャラが街に立っているか。"""
+        return bool(self._player_xy.shape[0] > 0)
+
     @property
     def pedestrian_xy(self) -> np.ndarray:
-        """いる歩行者の座標 (K, 2) float64。擬似カメラ・正解ラベル・衝突判定が使う。"""
-        return self.crowd.positions
+        """いる歩行者の座標 (K, 2) float64。擬似カメラ・正解ラベル・衝突判定が使う。
+
+        NPC 群衆に**実用モードの徒歩キャラを連結して**返す。ここが唯一の出典なので、
+        混ぜるだけで擬似カメラ・正解ラベル・観測・車間・衝突判定の 5 つが同時に
+        利用者を見るようになる（別々に足すと、どれかを足し忘れて気づけない）。
+        """
+        people = self.crowd.positions
+        if self._player_xy.shape[0] == 0:
+            return people
+        if people.shape[0] == 0:
+            return self._player_xy.copy()
+        return np.vstack((people, self._player_xy))
 
     def next_signal(self, slot: int) -> tuple[float, int]:
         """そのスロットの前方にある直近の信号を (停止線までの距離 [m], 灯色) で返す。"""
