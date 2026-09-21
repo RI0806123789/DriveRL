@@ -55,13 +55,13 @@ const COMPASS_FADE_RAD = 0.18
 const COMPASS_RADIUS = 11
 const COMPASS_MARGIN = 12
 
-export type PickTarget = 'pickup' | 'dropoff' | null
+/** 選ぶのは降車地点だけ。乗車地点は利用者の現在地なので選ばせない */
+export type PickTarget = 'dropoff' | null
 
 export interface TaxiMapProps {
   /** いま地点を選んでいる最中か */
   picking: PickTarget
   onPick: (point: Vec2) => void
-  draftPickup: Vec2 | null
   draftDropoff: Vec2 | null
   /** 地図の上へ重ねるもの（車載カメラ）。位置は重ねる側が決める */
   children?: ReactNode
@@ -70,7 +70,6 @@ export interface TaxiMapProps {
 export function TaxiMap({
   picking,
   onPick,
-  draftPickup,
   draftDropoff,
   children,
 }: TaxiMapProps) {
@@ -157,12 +156,13 @@ export function TaxiMap({
     } else if (taxi.phase === 'arrived') {
       if (taxi.dropoff) points.push(taxi.dropoff)
       if (car) points.push([car.x, car.y])
-    } else if (draftPickup && draftDropoff && picking === null) {
-      // 2 点を選び終えたら、その区間が見えるところまで寄せる
-      points.push(draftPickup, draftDropoff)
+    } else if (draftDropoff && picking === null) {
+      // 降車地点を選び終えたら、**現在地との区間**が見えるところまで寄せる
+      if (pedestrian.placed) points.push([pedestrian.x, pedestrian.y])
+      points.push(draftDropoff)
     }
     return fitView(map.bounds, points, size.width, size.height, rotation)
-  }, [map, size.width, size.height, draftPickup, draftDropoff, picking])
+  }, [map, size.width, size.height, draftDropoff, picking])
 
   /** 道路と建物は動かないので、見え方が大きく変わったときだけ描き直す */
   const ensureStaticLayer = useCallback(
@@ -253,7 +253,10 @@ export function TaxiMap({
         drawRoute(ctx, p, taxi.route, palette.taxiMarker, 2.5)
       }
 
-      const pickup = draftPickup ?? taxi.pickup
+      // 乗車地点は利用者の現在地。呼ぶ前は自分の足元を、呼んだ後は
+      // サーバーが道路へ寄せた点を出す（**寄せた後の点が正**）
+      const pickup =
+        taxi.pickup ?? (pedestrian.placed ? ([pedestrian.x, pedestrian.y] as Vec2) : null)
       const dropoff = draftDropoff ?? taxi.dropoff
       if (pickup) drawPin(ctx, p, pickup[0], pickup[1], palette.vehicleReached, 4, true)
       if (dropoff) drawPin(ctx, p, dropoff[0], dropoff[1], palette.vehicleCollided, 4, true)
@@ -301,7 +304,7 @@ export function TaxiMap({
         Math.abs(normalizeAngle(p.rotation)) / COMPASS_FADE_RAD,
       )
     },
-    [projectionFor, ensureStaticLayer, palette, draftPickup, draftDropoff],
+    [projectionFor, ensureStaticLayer, palette, draftDropoff],
   )
 
   // ★ パネルが閉じている間はループごと止める（code_review F-10）

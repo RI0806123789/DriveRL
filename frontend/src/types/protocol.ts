@@ -723,6 +723,12 @@ export interface CancelTaxiMessage {
   halt?: boolean
 }
 
+/** 徒歩キャラの位置を知らせる。`at` が null なら街から消える（乗車中・実用モードを抜けたとき） */
+export interface PlayerPoseMessage {
+  type: 'player_pose'
+  at: Vec2 | null
+}
+
 /** クライアント → サーバーの全メッセージ */
 export type ClientMessage =
   | LoadMapMessage
@@ -745,6 +751,7 @@ export type ClientMessage =
   | BoardTaxiMessage
   | AlightTaxiMessage
   | CancelTaxiMessage
+  | PlayerPoseMessage
   | PingMessage
 
 /** WebSocket の接続状態 */

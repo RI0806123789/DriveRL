@@ -53,6 +53,12 @@ const CURB_OFFSET_M = 3.2
 /** 実用モードに入ったとき、最寄り車両の後方に立つ距離 [m] */
 const SPAWN_BEHIND_M = 9
 
+/**
+ * 位置をサーバーへ知らせる間隔 [ms]。**60fps で送らないこと**（frameBuffer と同じ作法で、
+ * 20Hz のサーバーが読むのは 1 ステップに 1 回だけ）。
+ */
+const POSE_REPORT_MS = 100
+
 function isTypingTarget(target: EventTarget | null): boolean {
   const el = target as HTMLElement | null
   return !!el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName)
@@ -81,8 +87,8 @@ function routeHeadingAtEnd(route: Vec2[] | undefined): number {
 }
 
 /**
- * 乗車地点の歩道へ立たせる。**リロードや再マウントのあとにも呼ぶ**ので、
- * 「配車中なら待っている場所へ戻る」が成り立つ。
+ * 乗車地点の歩道へ立たせる。**まだ街に立っていないときだけ呼ぶこと。**
+ * 乗車地点は利用者の現在地なので、呼んだ瞬間に立たせ直すと自分がワープする。
  */
 function placeAtPickup(taxi: { pickup: Vec2 | null; route?: Vec2[] }, index: BuildingIndex | null): void {
   if (!taxi.pickup) return
@@ -115,6 +121,8 @@ export function Pedestrian() {
   const bodyRefs = useRef<(THREE.Mesh | null)[]>([])
   const limbRefs = useRef<(THREE.Mesh | null)[]>([])
   const rootRef = useRef<THREE.Group>(null)
+  const poseSentAt = useRef(0)
+  const poseOnServer = useRef(false)
 
   const scratch = useMemo(
     () => ({
@@ -160,8 +168,16 @@ export function Pedestrian() {
     }
   }, [resources])
 
-  // 実用モードを抜けるまで状態を持ち越す
-  useEffect(() => () => resetPedestrian(), [])
+  // 実用モードを抜けるまで状態を持ち越す。
+  // ★ 抜けるときは**必ず街から消すこと**。残すと開発モードに戻ったあとも、
+  //   見えない人の前で車が止まり続ける（サーバー側の TTL では 1 秒かかる）
+  useEffect(
+    () => () => {
+      send({ type: 'player_pose', at: null })
+      resetPedestrian()
+    },
+    [],
+  )
 
   // 配車の段階に合わせて、待つ位置・乗る・降りるを切り替える
   useEffect(() => {
@@ -195,7 +211,10 @@ export function Pedestrian() {
       return
     }
 
-    if (phase === 'approaching') placeAtPickup(taxi, index)
+    // ★ 既に立っているなら動かさない。乗車地点は自分の現在地なので、
+    //   ここで立たせ直すと「呼んだ瞬間に自分が飛ぶ」ことになる。
+    //   立たせるのはリロード・再マウントで街から消えているときだけ
+    if (phase === 'approaching' && !pedestrian.placed) placeAtPickup(taxi, index)
 
     // 停まったタクシーの方へ向き直す。**照準に入らないと [Enter] が効かない**ので、
     // 待っている人が自分で振り向く手間を省く
@@ -299,6 +318,21 @@ export function Pedestrian() {
     const root = rootRef.current
     if (!root) return
 
+    // サーバーは徒歩キャラを NPC 歩行者と同じ 1 人として扱う。
+    // 送らないと、車は目の前に立っても止まらず、轢いてもすり抜ける
+    const reportAway = () => {
+      if (!poseOnServer.current) return
+      if (send({ type: 'player_pose', at: null })) poseOnServer.current = false
+    }
+    const reportHere = () => {
+      const now = performance.now()
+      if (now - poseSentAt.current < POSE_REPORT_MS) return
+      poseSentAt.current = now
+      if (send({ type: 'player_pose', at: [pedestrian.x, pedestrian.y] })) {
+        poseOnServer.current = true
+      }
+    }
+
     const blockers = collectBlockers(scratch.blockers, scratch.pose)
 
     // ★ 立たせるのは**走っている車が見えてから**。道路上だと保証できるのがそれだけで、
@@ -306,6 +340,7 @@ export function Pedestrian() {
     //   配車の途中でリロードされたときは、待っていた乗車地点へ戻す
     if (!pedestrian.placed) {
       root.visible = false
+      reportAway()
       const taxi = useSimStore.getState().taxi
       if (isBoardablePhase(taxi.phase)) {
         placeAtPickup(taxi, index)
@@ -327,8 +362,11 @@ export function Pedestrian() {
     if (!visible) {
       pedestrian.speed = 0
       pedestrian.aimed = -1
+      // 乗車中は車内にいる。送り続けると、乗せた車が乗客を歩行者と見て止まる
+      reportAway()
       return
     }
+    reportHere()
 
     const input = pedestrian.input
     let ax = 0

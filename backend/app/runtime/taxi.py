@@ -64,6 +64,11 @@ class TaxiService:
     def vehicle_id(self) -> int:
         return int(self.status.vehicle_id)
 
+    @property
+    def onboard(self) -> bool:
+        """乗客が車内にいるか。**`arrived`（降車待ち）もまだ車内**（`code_review` T-01）。"""
+        return self.status.phase in (TAXI_PHASE_RIDING, TAXI_PHASE_ARRIVED)
+
     def request(
         self,
         env: "SimulationEnv",
@@ -146,7 +151,7 @@ class TaxiService:
 
     def alight(self, env: "SimulationEnv") -> str | None:
         """降車する。徴用を解いて PPO の走行へ戻す（決定 3・15）。"""
-        if self.status.phase not in (TAXI_PHASE_RIDING, TAXI_PHASE_ARRIVED):
+        if not self.onboard:
             return "いまは降車できません"
         arrived = self.status.phase == TAXI_PHASE_ARRIVED
         self._release(env)
