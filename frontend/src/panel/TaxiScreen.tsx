@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react'
 
 import { send } from '../store/connection'
+import { pedestrian } from '../store/pedestrian'
 import { useSimStore } from '../store/simStore'
 import { isBoardablePhase, isRidingPhase } from '../types/protocol'
 import type { Vec2 } from '../types/protocol'
@@ -35,7 +36,6 @@ export function TaxiScreen() {
 
   const [clock, setClock] = useState(nowLabel)
   const [picking, setPicking] = useState<PickTarget>(null)
-  const [draftPickup, setDraftPickup] = useState<Vec2 | null>(null)
   const [draftDropoff, setDraftDropoff] = useState<Vec2 | null>(null)
 
   useEffect(() => {
@@ -51,44 +51,44 @@ export function TaxiScreen() {
       return
     }
     setPicking(null)
-    setDraftPickup(null)
     setDraftDropoff(null)
   }, [taxi.phase, setCameraOn])
 
   const areaName = presets.find((p) => p.id === map?.presetId)?.name ?? map?.name ?? '—'
   const riding = isRidingPhase(taxi.phase)
   const waiting = isBoardablePhase(taxi.phase)
-  const ready = draftPickup !== null && draftDropoff !== null
+  const ready = draftDropoff !== null
 
   const handlePick = (point: Vec2) => {
-    if (picking === 'pickup') {
-      setDraftPickup(point)
-      setPicking('dropoff')
-    } else if (picking === 'dropoff') {
-      setDraftDropoff(point)
-      setPicking(null)
-    }
+    if (picking !== 'dropoff') return
+    setDraftDropoff(point)
+    setPicking(null)
   }
 
   const startPicking = () => {
-    setDraftPickup(null)
     setDraftDropoff(null)
-    setPicking('pickup')
+    setPicking('dropoff')
   }
 
+  // ★ 乗車地点は**呼ぶ瞬間の現在地**。60fps で動くので state には置かず、
+  //   ここで `pedestrian` から直に読む（`frameBuffer` と同じ作法）
   const callTaxi = () => {
-    if (!draftPickup || !draftDropoff) return
-    send({ type: 'request_taxi', pickup: draftPickup, dropoff: draftDropoff })
+    if (!draftDropoff) return
+    if (!pedestrian.placed) return
+    send({
+      type: 'request_taxi',
+      pickup: [pedestrian.x, pedestrian.y],
+      dropoff: draftDropoff,
+    })
   }
 
   let headline: string
-  if (picking === 'pickup') headline = '地図をタップして乗車地点を選ぶ'
-  else if (picking === 'dropoff') headline = '次に降車地点を選ぶ'
+  if (picking === 'dropoff') headline = '地図をタップして行き先を選ぶ'
   else if (taxi.phase === 'approaching') headline = `到着まで ${formatEta(taxi.etaSeconds)}`
   else if (taxi.phase === 'waiting') headline = '乗車地点で待っています'
   else if (taxi.phase === 'riding') headline = `目的地まで ${formatEta(taxi.etaSeconds)}`
   else if (taxi.phase === 'arrived') headline = '目的地に到着しました'
-  else if (ready) headline = 'この経路で呼べます'
+  else if (ready) headline = 'この行き先で呼べます'
   else headline = 'タクシーを呼ぶ'
 
   return (
@@ -110,12 +110,7 @@ export function TaxiScreen() {
           </span>
         </div>
 
-        <TaxiMap
-          picking={picking}
-          onPick={handlePick}
-          draftPickup={draftPickup}
-          draftDropoff={draftDropoff}
-        >
+        <TaxiMap picking={picking} onPick={handlePick} draftDropoff={draftDropoff}>
           <TaxiCameraView on={cameraOn} vehicleId={taxi.vehicleId} />
         </TaxiMap>
 
@@ -143,7 +138,7 @@ export function TaxiScreen() {
               </>
             )}
             {taxi.phase === 'idle' && picking === null && !ready && (
-              <span>乗車地点と降車地点を地図から選びます</span>
+              <span>いまいる場所まで迎えに来ます。行き先だけ地図から選びます</span>
             )}
             {picking !== null && (
               <span>
@@ -184,10 +179,10 @@ export function TaxiScreen() {
             ) : ready ? (
               <>
                 <Button variant="filled" block onClick={callTaxi}>
-                  この経路で呼ぶ
+                  ここまで呼ぶ
                 </Button>
                 <Button variant="text" block onClick={startPicking}>
-                  選び直す
+                  行き先を選び直す
                 </Button>
               </>
             ) : picking !== null ? (
@@ -201,7 +196,7 @@ export function TaxiScreen() {
                 disabled={!status.mapLoaded}
                 onClick={startPicking}
               >
-                乗車する
+                タクシーを呼ぶ
               </Button>
             )}
           </div>
