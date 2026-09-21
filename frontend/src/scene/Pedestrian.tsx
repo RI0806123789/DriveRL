@@ -13,6 +13,7 @@ import {
   resetPedestrian,
 } from '../store/pedestrian'
 import { useSimStore } from '../store/simStore'
+import { decideAutoAction, pickDropoff, taxiAutopilot } from '../store/taxiAutopilot'
 import { isBoardablePhase, isRidingPhase } from '../types/protocol'
 import type { Vec2 } from '../types/protocol'
 import { computeAlpha, createPose, sampleVehicle } from './interpolation'
@@ -174,6 +175,7 @@ export function Pedestrian() {
   useEffect(
     () => () => {
       send({ type: 'player_pose', at: null })
+      stopAutoWalk()
       resetPedestrian()
     },
     [],
@@ -357,6 +359,8 @@ export function Pedestrian() {
       return
     }
 
+    driveAutopilot(blockers)
+
     const visible = !pedestrian.riding
     root.visible = visible
     if (!visible) {
@@ -478,6 +482,75 @@ export function Pedestrian() {
       ))}
     </group>
   )
+}
+
+/** 自動操作の足を止める。 */
+function stopAutoWalk(): void {
+  if (!taxiAutopilot.walking) return
+  pedestrian.input.forward = false
+  taxiAutopilot.walking = false
+}
+
+/**
+ * 配車を自分で回す。**入っていなければ何もしない。**
+ * 判断は `store/taxiAutopilot.ts` の純粋関数が持ち、ここは実行だけを担う。
+ */
+function driveAutopilot(blockers: readonly VehicleBlocker[]): void {
+  const store = useSimStore.getState()
+  if (!store.taxiAutoOn) {
+    stopAutoWalk()
+    return
+  }
+
+  const taxi = store.taxi
+  const now = performance.now() / 1000
+  if (taxiAutopilot.lastPhase !== taxi.phase) {
+    taxiAutopilot.lastPhase = taxi.phase
+    taxiAutopilot.lastSentAt = now
+  }
+
+  const action = decideAutoAction({
+    phase: taxi.phase,
+    vehicleId: taxi.vehicleId,
+    aimed: pedestrian.aimed,
+    placed: pedestrian.placed,
+    mapReady: store.status.mapLoaded && store.map !== null,
+    now,
+    lastSentAt: taxiAutopilot.lastSentAt,
+  })
+
+  if (action !== 'approach') stopAutoWalk()
+
+  switch (action) {
+    case 'request': {
+      const dropoff = store.map
+        ? pickDropoff(store.map.nodes, pedestrian.x, pedestrian.y, Math.random)
+        : null
+      if (!dropoff) return
+      taxiAutopilot.lastSentAt = now
+      send({ type: 'request_taxi', pickup: [pedestrian.x, pedestrian.y], dropoff })
+      return
+    }
+    case 'board':
+      taxiAutopilot.lastSentAt = now
+      send({ type: 'board_taxi' })
+      return
+    case 'alight':
+      taxiAutopilot.lastSentAt = now
+      send({ type: 'alight_taxi' })
+      return
+    case 'approach': {
+      const car = blockers.find((b) => b.id === taxi.vehicleId)
+      if (!car) return
+      pedestrian.heading = Math.atan2(car.y - pedestrian.y, car.x - pedestrian.x)
+      pedestrian.pitch = 0
+      pedestrian.input.forward = true
+      taxiAutopilot.walking = true
+      return
+    }
+    default:
+      return
+  }
 }
 
 /** [Enter]: 照準の車両に乗る／降りる。 */

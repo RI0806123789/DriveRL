@@ -1,10 +1,11 @@
 /** 実用モードのスマホ画面（決定 9・10）。 */
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 import { send } from '../store/connection'
 import { pedestrian } from '../store/pedestrian'
 import { useSimStore } from '../store/simStore'
+import { resetTaxiAutopilot } from '../store/taxiAutopilot'
 import { isBoardablePhase, isRidingPhase } from '../types/protocol'
 import type { Vec2 } from '../types/protocol'
 import { PLATE_BG, PLATE_INK, plateLabel, withPlateNames } from '../scene/licensePlate'
@@ -18,9 +19,13 @@ import { CameraIcon, CarIcon, MapIcon, TargetIcon, WarningIcon } from '../ui/Ico
 /** 時計の更新間隔 [ms]。分表示なので 15 秒で足りる */
 const CLOCK_MS = 15000
 
-function nowLabel(): string {
+/** 時計を続けて叩いたと見なす間隔 [ms] と、その回数 */
+const TAP_GAP_MS = 600
+const TAP_COUNT = 5
+
+function nowLabel(): { hh: string; mm: string } {
   const d = new Date()
-  return `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`
+  return { hh: String(d.getHours()), mm: String(d.getMinutes()).padStart(2, '0') }
 }
 
 export function TaxiScreen() {
@@ -30,6 +35,8 @@ export function TaxiScreen() {
   const presets = useSimStore((s) => s.presets)
   const cameraOn = useSimStore((s) => s.taxiCameraOn)
   const setCameraOn = useSimStore((s) => s.setTaxiCameraOn)
+  const autoOn = useSimStore((s) => s.taxiAutoOn)
+  const setAutoOn = useSimStore((s) => s.setTaxiAutoOn)
 
   // 車はナンバープレートで指す（実車の配車アプリと同じ）
   const plate = plateLabel(taxi.vehicleId, status.presetId)
@@ -38,10 +45,23 @@ export function TaxiScreen() {
   const [picking, setPicking] = useState<PickTarget>(null)
   const [draftDropoff, setDraftDropoff] = useState<Vec2 | null>(null)
 
+  const taps = useRef({ count: 0, at: 0 })
+
   useEffect(() => {
     const timer = window.setInterval(() => setClock(nowLabel()), CLOCK_MS)
     return () => window.clearInterval(timer)
   }, [])
+
+  const tapClock = () => {
+    const now = performance.now()
+    const t = taps.current
+    t.count = now - t.at <= TAP_GAP_MS ? t.count + 1 : 1
+    t.at = now
+    if (t.count < TAP_COUNT) return
+    t.count = 0
+    resetTaxiAutopilot(now / 1000)
+    setAutoOn(!autoOn)
+  }
 
   // 配車が動き出したら、選びかけの地点は捨てる（サーバーが返す地点が正）
   useEffect(() => {
@@ -95,7 +115,11 @@ export function TaxiScreen() {
     <div className="taxi-phone">
       <div className="taxi-phone-bezel">
         <div className="taxi-status-bar">
-          <span className="taxi-clock">{clock}</span>
+          <span className="taxi-clock" data-auto={autoOn} onPointerDown={tapClock}>
+            {clock.hh}
+            <span className="taxi-clock-colon">:</span>
+            {clock.mm}
+          </span>
           <span className="taxi-status-icons" aria-hidden>
             <SignalIcon />
             <BatteryIcon />

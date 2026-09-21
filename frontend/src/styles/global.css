@@ -2179,6 +2179,30 @@ button.m3-chip:active:not(:disabled) {
   font-size: 12px;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.taxi-clock[data-auto='true'] {
+  color: #5fd6a0;
+}
+:root[data-theme='light'] .taxi-clock[data-auto='true'] {
+  color: #12795a;
+}
+
+.taxi-clock[data-auto='true'] .taxi-clock-colon {
+  animation: taxi-clock-blink 1.6s var(--m3-ease-standard) infinite;
+}
+
+@keyframes taxi-clock-blink {
+  0%,
+  45% {
+    opacity: 1;
+  }
+  55%,
+  100% {
+    opacity: 0.12;
+  }
 }
 
 .taxi-status-icons {
