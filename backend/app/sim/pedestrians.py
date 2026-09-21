@@ -22,9 +22,6 @@ CROSS_MIN_SEC = 1.2
 #: 再配置のときに車両から離す距離 [m]。湧いた瞬間に轢かれるのを避ける
 SPAWN_CLEARANCE_M = 6.0
 
-#: 交差点の信号を「この端のもの」と認める向きのずれ [rad]
-SIGNAL_MATCH_RAD = math.radians(50.0)
-
 #: これより遠い歩行者は誰の視界にも入らないので、車の近くへ回す [m]。
 #: 擬似カメラの far は 120m なので、その倍は見えない
 RECYCLE_FAR_M = 220.0
@@ -87,6 +84,11 @@ class SidewalkNetwork:
         ★ 歩行者用の信号は**車両信号の裏返し**として扱う（`docs/protocol.md` 2.3）。
         エッジを横断する歩行者にとって危ないのはそのエッジを走る車なので、
         その車が赤で止まっていれば渡ってよい。
+
+        ★ 灯器は進入路 1 本につき 1 基作られるので、**`MapSignal.edge_id` で引くこと。**
+        向きの近さで選ぶと、同じ交差点の別の進入路の灯器（＝別の群）を掴むことがある。
+        一方通行の出口側にはその基が無いので、**同じ軸の基**で代える（群が同じなら
+        現示も同じ。軸が違う基しか無ければ信号の無い交差点として扱う）。
         """
         self.signal_fwd = np.full(self.count, -1, dtype=np.int32)
         self.signal_bwd = np.full(self.count, -1, dtype=np.int32)
@@ -94,18 +96,28 @@ class SidewalkNetwork:
         if not signals or self.count == 0:
             return
 
+        by_approach = {
+            (int(sig.edge_id), int(sig.node_id)): i for i, sig in enumerate(signals)
+        }
         by_node: dict[int, list[tuple[int, float]]] = {}
         for i, sig in enumerate(signals):
             by_node.setdefault(int(sig.node_id), []).append((i, float(sig.heading)))
 
         for e in range(self.count):
+            edge_id = int(edges[e].id)
             lo = int(self.start[e])
             hi = lo + int(self.point_count[e])
             pts = self.points[lo:hi]
             head_in = math.atan2(pts[-1, 1] - pts[-2, 1], pts[-1, 0] - pts[-2, 0])
             head_out = math.atan2(pts[0, 1] - pts[1, 1], pts[0, 0] - pts[1, 0])
-            self.signal_fwd[e] = _closest_signal(by_node.get(int(self.node_v[e])), head_in)
-            self.signal_bwd[e] = _closest_signal(by_node.get(int(self.node_u[e])), head_out)
+            node_v = int(self.node_v[e])
+            node_u = int(self.node_u[e])
+            self.signal_fwd[e] = by_approach.get(
+                (edge_id, node_v), _same_axis_signal(by_node.get(node_v), head_in)
+            )
+            self.signal_bwd[e] = by_approach.get(
+                (edge_id, node_u), _same_axis_signal(by_node.get(node_u), head_out)
+            )
 
     def signal_at(self, edge: int, forward: bool) -> int:
         """エッジの端にある車両信号の添字。無ければ -1。"""
@@ -201,16 +213,17 @@ class SidewalkNetwork:
         return int(self.adj_edge[k]), int(self.adj_dir[k])
 
 
-def _closest_signal(
+def _same_axis_signal(
     candidates: list[tuple[int, float]] | None, heading: float
 ) -> int:
-    """進行方向がいちばん近い信号を選ぶ。離れすぎていれば -1。"""
+    """同じ軸を向く灯器のうち、向きがいちばん近いものを選ぶ。無ければ -1。"""
     if not candidates:
         return -1
     best = -1
-    best_gap = SIGNAL_MATCH_RAD
+    best_gap = math.pi / 4
     for index, sig_heading in candidates:
-        gap = abs(math.atan2(math.sin(sig_heading - heading), math.cos(sig_heading - heading)))
+        d = abs(math.atan2(math.sin(sig_heading - heading), math.cos(sig_heading - heading)))
+        gap = min(d, math.pi - d)
         if gap < best_gap:
             best = index
             best_gap = gap

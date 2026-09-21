@@ -21,7 +21,7 @@ from app.contracts import (
 from app.percep.encoder import encode_observations
 from app.percep.types import DEFAULT_CAMERA, PerceptionResult
 from app.percep.weather import Weather, auto_weather
-from app.sim.signals import constrain_accel, stop_speed_limit
+from app.sim.signals import GREEN, STOP_MARGIN_M, constrain_accel, stop_speed_limit
 from app.sim.world import World
 
 logger = logging.getLogger("autoware_sim")
@@ -49,6 +49,9 @@ AUTOPILOT_PEDESTRIAN_RANGE_M = 30.0
 AUTOPILOT_PEDESTRIAN_HALF_WIDTH_M = 2.0
 #: 歩行者の手前で空ける距離 [m]。前走車より広く取る（人は急に向きを変える）
 AUTOPILOT_PEDESTRIAN_MARGIN_M = 4.5
+
+#: 速度上限がこれ以下まで抑えられていたら「交通に止められている」とみなす [m/s]
+TRAFFIC_HOLD_MPS = 1.0
 
 
 class SimulationEnv:
@@ -226,6 +229,24 @@ class SimulationEnv:
         if not ahead.any():
             return float("inf")
         return float(lon[ahead].min())
+
+    def traffic_hold(self, slot: int) -> bool:
+        """いま赤信号・前走車・歩行者に止められているか（`runtime/taxi.py` の停滞判定）。"""
+        slot = int(slot)
+        if not (0 <= slot < config.MAX_VEHICLES):
+            return False
+        decel = abs(config.MAX_DECEL)
+
+        def held(gap: float, margin: float) -> bool:
+            limit = stop_speed_limit(np.float64(gap), decel, config.DT, margin_m=margin)
+            return float(limit) <= TRAFFIC_HOLD_MPS
+
+        distance, phase = self.world.next_signal(slot)
+        if int(phase) != GREEN and held(distance, STOP_MARGIN_M):
+            return True
+        if held(self._lead_gap(slot), config.VEHICLE_LENGTH + AUTOPILOT_HEADWAY_M):
+            return True
+        return held(self._pedestrian_gap(slot), AUTOPILOT_PEDESTRIAN_MARGIN_M)
 
     def set_player_pose(self, at: tuple[float, float] | None) -> None:
         """実用モードの徒歩キャラの位置を反映する（None で消す）。

@@ -7,12 +7,14 @@ import math
 import logging
 import time
 from pathlib import Path
+from dataclasses import replace
 from typing import Any, Iterable, Sequence
 
 import numpy as np
 
 from app import config
 from app.contracts import (
+    SIGNAL_MERGE_M,
     Bounds,
     MapBuilding,
     MapData,
@@ -30,7 +32,7 @@ class MapLoadError(RuntimeError):
     """OSM の取得・正規化に失敗したときに投げる。"""
 
 
-CACHE_VERSION = 6
+CACHE_VERSION = 7
 
 _DEFAULT_LANES: dict[str, int] = {
     "motorway": 3,
@@ -420,7 +422,7 @@ def _build_signals(
         half_width = max(e.width for e in around) / 2.0
         setback = half_width + SIGNAL_CROSSWALK_M + SIGNAL_STOPLINE_MARGIN_M
 
-        approaches: dict[int, tuple[float, tuple[float, float], float]] = {}
+        approaches: dict[int, tuple[float, tuple[float, float], float, int]] = {}
         for e in around:
             if e.v == node_id:
                 neighbour = e.u
@@ -430,14 +432,14 @@ def _build_signals(
                 point, heading = _point_before_end(list(reversed(e.polyline)), setback)
             else:
                 continue
-            approaches.setdefault(neighbour, (heading, point, e.width))
+            approaches.setdefault(neighbour, (heading, point, e.width, e.id))
 
         if not approaches:
             continue
 
         ordered = [approaches[k] for k in sorted(approaches)]
         ref = ordered[0][0]
-        for heading, (px, py), width in ordered:
+        for heading, (px, py), width, edge_id in ordered:
             signals.append(
                 MapSignal(
                     id=len(signals),
@@ -447,10 +449,77 @@ def _build_signals(
                     heading=heading,
                     group=0 if _axis_angle(heading, ref) < math.pi / 4 else 1,
                     road_width=width,
+                    phase_key=node_id,
+                    edge_id=edge_id,
                 )
             )
 
-    return signals
+    return _merge_phases(signals)
+
+
+def _merge_phases(signals: list[MapSignal]) -> list[MapSignal]:
+    """近接した灯器を 1 つの交差点とみなし、現示（位相と群）を揃える。"""
+    n = len(signals)
+    if n == 0:
+        return signals
+
+    parent = list(range(n))
+
+    def find(a: int) -> int:
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[max(ra, rb)] = min(ra, rb)
+
+    by_node: dict[int, list[int]] = {}
+    for i, sg in enumerate(signals):
+        by_node.setdefault(sg.node_id, []).append(i)
+    for members in by_node.values():
+        for i in members[1:]:
+            union(members[0], i)
+
+    cells: dict[tuple[int, int], list[int]] = {}
+    for i, sg in enumerate(signals):
+        key = (int(sg.x // SIGNAL_MERGE_M), int(sg.y // SIGNAL_MERGE_M))
+        cells.setdefault(key, []).append(i)
+    reach = SIGNAL_MERGE_M * SIGNAL_MERGE_M
+    for (cx, cy), members in cells.items():
+        for dx, dy in ((0, 0), (0, 1), (1, -1), (1, 0), (1, 1)):
+            other = cells.get((cx + dx, cy + dy))
+            if not other:
+                continue
+            same_cell = dx == 0 and dy == 0
+            for i in members:
+                for j in other:
+                    if same_cell and j <= i:
+                        continue
+                    a, b = signals[i], signals[j]
+                    if (a.x - b.x) ** 2 + (a.y - b.y) ** 2 <= reach:
+                        union(i, j)
+
+    leader: dict[int, int] = {}
+    for i, sg in enumerate(signals):
+        root = find(i)
+        best = leader.get(root)
+        if best is None or (sg.node_id, sg.id) < (signals[best].node_id, signals[best].id):
+            leader[root] = i
+
+    out: list[MapSignal] = []
+    for i, sg in enumerate(signals):
+        head = signals[leader[find(i)]]
+        out.append(
+            replace(
+                sg,
+                phase_key=head.node_id,
+                group=0 if _axis_angle(sg.heading, head.heading) < math.pi / 4 else 1,
+            )
+        )
+    return out
 
 
 SIGNS_ONLY_WHERE_LIMIT_CHANGES = True
@@ -861,6 +930,8 @@ def _to_cache_dict(data: MapData) -> dict[str, Any]:
                 round(sg.heading, 4),
                 sg.group,
                 round(sg.road_width, 2),
+                sg.phase_key,
+                sg.edge_id,
             ]
             for sg in data.signals
         ],
@@ -925,6 +996,8 @@ def _from_cache_dict(payload: dict[str, Any], preset: MapPreset) -> MapData:
             heading=float(sg[4]),
             group=int(sg[5]),
             road_width=float(sg[6]),
+            phase_key=int(sg[7]),
+            edge_id=int(sg[8]),
         )
         for sg in payload.get("signals", [])
     ]
