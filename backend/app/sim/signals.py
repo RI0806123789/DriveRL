@@ -49,7 +49,7 @@ class SignalController:
         self._groups = np.array([s.group for s in signals], dtype=np.int8)
 
         offsets = np.array(
-            [(s.node_id * 7919) % max(1, int(self.cycle)) for s in signals],
+            [(s.phase_key * 7919) % max(1, int(self.cycle)) for s in signals],
             dtype=np.float64,
         )
         self._offsets = offsets

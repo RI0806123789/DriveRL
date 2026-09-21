@@ -13,16 +13,13 @@ import shapely
 from shapely.geometry import LineString, Point, Polygon
 
 from app import config
-from app.contracts import MapData, MapEdge, OccupancyGrid
+from app.contracts import SIGNAL_MERGE_M, MapData, MapEdge, OccupancyGrid
 
 __all__ = ["MapIndexImpl", "build_map_index"]
 
 from app.map.lanes import RouteSegment, build_lane_route
 
 logger = logging.getLogger("autoware_sim")
-
-#: 経路上でこの距離より近い信号は同じ交差点のものとして 1 基にまとめる [m]
-SIGNAL_MERGE_M = 8.0
 
 _WARNED: set[str] = set()
 
@@ -277,9 +274,9 @@ class MapIndexImpl:
         out.sort(key=lambda item: item[0])
 
         # ★ 同じ交差点の灯器が二重に拾われることがある（近接した別ノードに灯器が
-        #   立っている）。現示は node_id からオフセットを決めるので、重なった 2 基は
-        #   位相がずれ、**片方が青でも片方が赤**になる。前方の信号すべてに停止線を
-        #   引くため、車はそこから永久に動けなくなる（実測で 444 秒）。
+        #   立っている）。前方の信号すべてに停止線を引くので、まとめないと同じ
+        #   交差点で二度止まる。現示は `MapSignal.phase_key` が揃えているので、
+        #   どちらが残っても色は同じ。
         merged: list[tuple[float, int]] = []
         for arc, idx in out:
             if merged and arc - merged[-1][0] < SIGNAL_MERGE_M:

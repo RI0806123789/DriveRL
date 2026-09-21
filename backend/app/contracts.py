@@ -78,6 +78,12 @@ class MapBuilding:
     outline: list[tuple[float, float]]
 
 
+#: これだけ近い灯器は同じ交差点とみなす [m]。
+#: 車が従う灯器（`map/index.py` の `signals_on_route`）と、歩行者が裏返して見る灯器
+#: （`sim/pedestrians.py`）が別の基でも同じ現示になるよう、ここが唯一の出典
+SIGNAL_MERGE_M = 8.0
+
+
 @dataclass
 class MapSignal:
     """交通信号機（車両用）。OSM の `highway=traffic_signals` ノードから作る。"""
@@ -89,6 +95,10 @@ class MapSignal:
     heading: float
     group: int
     road_width: float
+    #: 現示を揃える相手を表すキー（`SIGNAL_MERGE_M` 以内をまとめた交差点の代表ノード）
+    phase_key: int
+    #: この灯器が規制する進入路（`MapEdge.id`）。歩行者用の現示もここから引く
+    edge_id: int
 
 
 @dataclass

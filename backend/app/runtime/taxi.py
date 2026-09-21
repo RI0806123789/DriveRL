@@ -37,8 +37,13 @@ MAX_HANDOVERS = 3
 
 #: 乗車地点へこれだけ近づけない時間が続いたら「来られない」とみなす [秒]
 STALL_TIMEOUT_SEC = 25.0
-#: 近づいたと認める最小の距離 [m]。信号待ちの揺れで進捗と見なさないための幅
+#: 待たされている時間も含め、1m も近づけないまま続いたら詰まりとみなす [秒]。
+#: 赤信号 1 回（半サイクル 30 秒）では届かず、流れないままの渋滞は拾える
+STALL_HELD_TIMEOUT_SEC = 90.0
+#: 近づいたと認める最小の距離 [m]。経路追従の揺れを進捗と見なさないための幅
 STALL_PROGRESS_M = 1.0
+#: これだけ出ていれば動いているとみなす [m/s]。詰まってはいない
+STALL_MOVING_MPS = 1.0
 
 ETA_MIN_SPEED_MPS = 3.5
 ETA_SPEED_SMOOTH = 0.08
@@ -53,6 +58,7 @@ class TaxiService:
         self._handovers = 0
         self._tried: set[int] = set()
         self._stall_since = -1.0
+        self._no_progress_since = -1.0
         self._stall_best = float("inf")
 
     @property
@@ -270,6 +276,7 @@ class TaxiService:
 
     def _reset_stall(self) -> None:
         self._stall_since = -1.0
+        self._no_progress_since = -1.0
         self._stall_best = float("inf")
 
     def _stalled(self, env: "SimulationEnv") -> bool:
@@ -278,6 +285,11 @@ class TaxiService:
         事故（`collided_flags`）は当たった瞬間しか立たないので、**当たらずに
         詰まって動けない**場合はこちらでしか拾えない。交差点で対向車と睨み合う、
         塞がれた道の先に乗車地点がある、といった形で実際に起きる。
+
+        ★ **「詰まっている」と「待たされている」は別物。** 赤信号・前走車・歩行者に
+        止められている間と、動けている間は時計を進めない（`env.traffic_hold`）。
+        待たされたまま流れない渋滞は、進捗そのものを見る `STALL_HELD_TIMEOUT_SEC`
+        が拾う（こちらは待たされている間も進む）。
         """
         if self.status.phase != TAXI_PHASE_APPROACHING:
             return False
@@ -286,11 +298,20 @@ class TaxiService:
         if remaining < self._stall_best - STALL_PROGRESS_M:
             self._stall_best = remaining
             self._stall_since = now
+            self._no_progress_since = now
             return False
-        if self._stall_since < 0.0:
+        if self._no_progress_since < 0.0:
+            self._no_progress_since = now
+        slot = self.vehicle_id
+        held = (
+            float(env.world.fleet.speed[slot]) >= STALL_MOVING_MPS
+            or env.traffic_hold(slot)
+        )
+        if held or self._stall_since < 0.0:
             self._stall_since = now
-            return False
-        return (now - self._stall_since) >= STALL_TIMEOUT_SEC
+        if (now - self._stall_since) >= STALL_TIMEOUT_SEC:
+            return True
+        return (now - self._no_progress_since) >= STALL_HELD_TIMEOUT_SEC
 
     def _assign(
         self,
