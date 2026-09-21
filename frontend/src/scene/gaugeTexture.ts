@@ -31,11 +31,13 @@ function faceAngle(ratio: number): number {
 
 /**
  * 文字盤の角度を、キャンバス上の向きへ直す。
- * 針は車両ローカルの X 軸まわりに回り、運転者から見ると **+Z が左**になる。
- * キャンバスは右が +x なので、左右を反転して合わせる。
+ * 針先は `(0, L·cosθ, L·sinθ)` で、**運転者から見て +Z が右・+Y が上**。
+ * 文字盤の UV は u が +Z・v が +Y に増えるので、キャンバスは鏡にならない。
+ * キャンバスの y は下向きなので、θ から 90 度戻すだけで針と重なる。
+ * ★ **ここで符号を反転すると、目盛りだけが左右逆**に焼かれて針と合わなくなる。
  */
 function canvasAngle(ratio: number): number {
-  return -faceAngle(ratio) - Math.PI / 2
+  return faceAngle(ratio) - Math.PI / 2
 }
 
 function drawTick(

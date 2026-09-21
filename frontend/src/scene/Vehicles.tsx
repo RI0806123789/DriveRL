@@ -46,6 +46,7 @@ import {
   composeVehicleMatrix,
   composeWheelMatrix,
   createTransformScratch,
+  gaugeUvRow,
   makeBodyGeometry,
   makeGaugeFaceGeometry,
   makeGlassGeometry,
@@ -416,11 +417,12 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
       }
     }
     resources.plateRows.needsUpdate = true
-    // 文字盤の段はメーターの種類で決まる（車両によらない）
+    // 文字盤の段はメーターの種類で決まる（車両によらない）。
+    // ★ ナンバープレートと同じく **`gaugeUvRow()` で v の向きへ直すこと**
     for (let id = 0; id < count; id++) {
       for (let k = 0; k < GAUGES_PER_VEHICLE; k++) {
-        const kind = GAUGE_SLOTS[k].kind
-        resources.gaugeRows.array[id * GAUGES_PER_VEHICLE + k] = GAUGE_KINDS.indexOf(kind)
+        const row = gaugeUvRow(GAUGE_KINDS.indexOf(GAUGE_SLOTS[k].kind), GAUGE_KINDS.length)
+        resources.gaugeRows.array[id * GAUGES_PER_VEHICLE + k] = row
       }
     }
     resources.gaugeRows.needsUpdate = true
