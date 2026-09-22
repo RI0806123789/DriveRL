@@ -24,6 +24,12 @@ from app.sim.vehicle import VehicleFleet
 __all__ = ["ObstacleState", "SlotState", "World"]
 
 ROUTE_MIN_DISTANCE_M = 120.0
+
+#: 再スポーン時の目的地までの直線距離の上限 [m]。
+#: 金沢は 12.3km 四方あり、上限が無いと経路長の中央値が 7,043m（点数 3,524）になる。
+#: 1 エピソードで進めるのは 2,780m なので走り切れないうえ、`shortest_path` と
+#: `_install_route` のコストがそのまま経路長に比例する（実測 46.6ms → 6.5ms）
+ROUTE_MAX_DISTANCE_M = 3000.0
 DESTINATION_TRIALS = 24
 PROJECT_WINDOW_BACK = 8
 PROJECT_WINDOW_FWD = 48
@@ -207,26 +213,48 @@ class World:
         """経路の始点が、既に走っている車両と重なっていないか。"""
         return self._start_clearance(route, exclude) >= SPAWN_CLEARANCE_M2
 
+    def _node_clearance(self, node: int, exclude: int) -> float:
+        """そのノードから、いちばん近い他車までの距離の二乗。他に誰もいなければ inf。"""
+        if not (0 <= int(node) < self._node_xy.shape[0]):
+            return -1.0
+        active = self.fleet.active.copy()
+        if 0 <= exclude < active.shape[0]:
+            active[exclude] = False
+        idx = np.flatnonzero(active)
+        if idx.size == 0:
+            return float("inf")
+        dx = self.fleet.x[idx] - np.float32(self._node_xy[int(node), 0])
+        dy = self.fleet.y[idx] - np.float32(self._node_xy[int(node), 1])
+        return float(np.min(dx * dx + dy * dy))
+
     def _random_route(self, exclude: int = -1) -> np.ndarray | None:
         """ランダムな出発地・目的地の組から経路を作る。"""
-        best: np.ndarray | None = None
+        best_src = -1
+        best_dst = -1
         best_clearance = -1.0
         for _ in range(SPAWN_ROUTE_TRIALS):
-            src, dst = self.map_index.random_node_pair(self.rng, ROUTE_MIN_DISTANCE_M)
+            src, dst = self.map_index.random_node_pair(
+                self.rng, ROUTE_MIN_DISTANCE_M, ROUTE_MAX_DISTANCE_M
+            )
             if int(src) == int(dst):
                 continue
-            route = self._route_from_nodes(src, dst)
-            if route is None:
-                continue
-            if exclude < 0:
-                return route
-            clearance = self._start_clearance(route, exclude)
+            # 経路を作る前に始点の空きを見る。経路生成は金沢で 1 本 25ms かかるので、
+            # 作ってから捨てると再スポーン 1 回が 50ms の予算を超える
+            clearance = (
+                float("inf") if exclude < 0 else self._node_clearance(src, exclude)
+            )
             if clearance >= SPAWN_CLEARANCE_M2:
-                return route
+                route = self._route_from_nodes(src, dst)
+                if route is not None:
+                    return route
+                continue
             if clearance > best_clearance:
                 best_clearance = clearance
-                best = route
-        return best
+                best_src, best_dst = int(src), int(dst)
+        if best_src >= 0:
+            # 空いた始点が見つからなかった。**最初の 1 本ではなく、いちばん空いている候補**
+            return self._route_from_nodes(best_src, best_dst)
+        return None
 
     def _route_from_point(
         self, x: float, y: float, *, heading: float | None = None
@@ -252,7 +280,12 @@ class World:
             dx = self._node_xy[:, 0] - np.float32(snap_x)
             dy = self._node_xy[:, 1] - np.float32(snap_y)
             dist2 = dx * dx + dy * dy
-            far = np.flatnonzero(dist2 >= np.float32(ROUTE_MIN_DISTANCE_M * ROUTE_MIN_DISTANCE_M))
+            # 目的地は近すぎず遠すぎない範囲から選ぶ（`_random_route` と同じ理由）
+            near_enough = dist2 <= np.float32(ROUTE_MAX_DISTANCE_M * ROUTE_MAX_DISTANCE_M)
+            far_enough = dist2 >= np.float32(ROUTE_MIN_DISTANCE_M * ROUTE_MIN_DISTANCE_M)
+            far = np.flatnonzero(far_enough & near_enough)
+            if far.size == 0:
+                far = np.flatnonzero(far_enough)
             if far.size == 0:
                 far = np.flatnonzero(dist2 > np.float32(1.0))
             trials = min(DESTINATION_TRIALS, max(int(far.size), 1))
@@ -488,17 +521,18 @@ class World:
         ds = np.maximum((seg_len[:-1] + seg_len[1:]) * 0.5, 1e-3)
         curvature = np.abs(dtheta) / ds
 
-        limit = np.full(n, np.float32(1e6), dtype=np.float32)
-        safe = np.sqrt(a_lat / np.maximum(curvature, 1e-6))
-        limit[1:-1] = np.minimum(limit[1:-1], safe.astype(np.float32))
+        limit = np.full(n, 1e6, dtype=np.float64)
+        limit[1:-1] = np.minimum(limit[1:-1], np.sqrt(a_lat / np.maximum(curvature, 1e-6)))
 
+        # 手前で減速しきれる速度へ丸める。`v[i]^2 <= v[i+1]^2 + 2*brake*step` は
+        # `u[i] = v[i]^2 + 2*brake*s[i]` の後ろ向き累積最小と同値なので、
+        # 逐次ループは要らない（金沢の経路は数千点あり、1 本 4ms 使っていた）
         brake = a_lat * 0.9
-        for i in range(n - 2, -1, -1):
-            step = max(float(cum[i + 1] - cum[i]), 1e-3)
-            reachable = math.sqrt(float(limit[i + 1]) ** 2 + 2.0 * brake * step)
-            if reachable < limit[i]:
-                limit[i] = np.float32(reachable)
-        return limit
+        step = np.maximum(np.diff(np.asarray(cum, dtype=np.float64)), 1e-3)
+        s = np.concatenate(([0.0], np.cumsum(step)))
+        u = limit * limit + 2.0 * brake * s
+        u = np.minimum.accumulate(u[::-1])[::-1]
+        return np.sqrt(np.maximum(u - 2.0 * brake * s, 0.0)).astype(np.float32)
 
     def curve_speed_limits(self) -> np.ndarray:
         """いまいる位置で出してよい速度 [m/s]（カーブ手前の減速を含む）。"""

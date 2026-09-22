@@ -259,7 +259,10 @@ class MapIndex(Protocol):
         ...
 
     def random_node_pair(
-        self, rng: np.random.Generator, min_distance_m: float = 150.0
+        self,
+        rng: np.random.Generator,
+        min_distance_m: float = 150.0,
+        max_distance_m: float = float("inf"),
     ) -> tuple[int, int]:
         """経路が存在し、かつ十分離れた出発ノードと目的ノードの組を返す。"""
         ...

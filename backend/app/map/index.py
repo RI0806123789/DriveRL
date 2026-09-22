@@ -47,6 +47,7 @@ class MapIndexImpl:
         self._edges_by_id: dict[int, MapEdge] = {e.id: e for e in data.edges}
 
         self.graph = self._build_graph(data)
+        self._reachable = self._build_reachable_nodes()
 
         self._edge_lines: list[LineString] = []
         self._edge_line_ids: list[int] = []
@@ -95,6 +96,16 @@ class MapIndexImpl:
             if not edge.oneway:
                 graph.add_edge(edge.v, edge.u, length=edge.length, edge_id=edge.id)
         return graph
+
+    def _build_reachable_nodes(self) -> np.ndarray:
+        """互いに行き来できるノードの添字（最大の強連結成分）。"""
+        if self.graph.number_of_nodes() == 0:
+            return np.zeros(0, dtype=np.int64)
+        try:
+            largest = max(nx.strongly_connected_components(self.graph), key=len)
+        except ValueError:
+            return np.zeros(0, dtype=np.int64)
+        return np.fromiter(sorted(largest), dtype=np.int64, count=len(largest))
 
     def _build_occupancy(self, data: MapData) -> OccupancyGrid:
         """建物レイヤと道路レイヤをラスタ化した占有グリッドを作る。"""
@@ -359,41 +370,40 @@ class MapIndexImpl:
         return 0.0, 0.0
 
     def random_node_pair(
-        self, rng: np.random.Generator, min_distance_m: float = 150.0
+        self,
+        rng: np.random.Generator,
+        min_distance_m: float = 150.0,
+        max_distance_m: float = float("inf"),
     ) -> tuple[int, int]:
-        """経路が存在し、十分離れた出発／目的ノードの組を返す。"""
-        n = self._node_xy.shape[0]
-        if n == 0:
+        """経路が存在し、指定の距離の範囲にある出発／目的ノードの組を返す。"""
+        # 到達できるかは読み込み時の強連結成分で決める（ここで shortest_path を
+        # 呼ぶと、再スポーン 1 回あたり dijkstra が 2 回になる）
+        pool = self._reachable
+        n = int(self._node_xy.shape[0])
+        if pool.size >= 2:
+            xy = self._node_xy[pool]
+            lo2 = float(min_distance_m) ** 2
+            hi = float(max_distance_m)
+            src_i = int(rng.integers(0, pool.size))
+            dx = xy[:, 0] - xy[src_i, 0]
+            dy = xy[:, 1] - xy[src_i, 1]
+            d2 = dx * dx + dy * dy
+            ok = np.flatnonzero((d2 >= lo2) & (d2 <= hi * hi)) if hi < float("inf") else (
+                np.flatnonzero(d2 >= lo2)
+            )
+            if ok.size == 0:
+                # 上限の内側に候補が無い（狭いマップ・辺縁のノード）。まず下限だけで探す
+                ok = np.flatnonzero(d2 >= lo2)
+            if ok.size == 0:
+                dst_i = int(rng.integers(0, pool.size))
+                if dst_i == src_i:
+                    dst_i = (src_i + 1) % int(pool.size)
+            else:
+                dst_i = int(ok[int(rng.integers(0, ok.size))])
+            return int(pool[src_i]), int(pool[dst_i])
+
+        if n == 0 or n == 1:
             return 0, 0
-        if n == 1:
-            return 0, 0
-
-        threshold = float(min_distance_m)
-
-        for _ in range(50):
-            src = int(rng.integers(0, n))
-            dx = self._node_xy[:, 0] - self._node_xy[src, 0]
-            dy = self._node_xy[:, 1] - self._node_xy[src, 1]
-            far = np.flatnonzero((dx * dx + dy * dy) >= threshold * threshold)
-            if far.size == 0:
-                continue
-            dst = int(far[int(rng.integers(0, far.size))])
-            if dst == src:
-                continue
-            if self.shortest_path(src, dst) is not None:
-                return src, dst
-
-        for _ in range(min(n, 20)):
-            src = int(rng.integers(0, n))
-            if not self.graph.has_node(src):
-                continue
-            lengths = nx.single_source_dijkstra_path_length(self.graph, src, weight="length")
-            lengths.pop(src, None)
-            if not lengths:
-                continue
-            dst = int(max(lengths, key=lengths.__getitem__))
-            return src, dst
-
         return 0, min(1, n - 1)
 
     def raycast(
