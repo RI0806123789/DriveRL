@@ -504,7 +504,13 @@ export function NetworkGraph() {
 
       <div className="netgraph-legend">
         <span><i className="netgraph-key netgraph-key--w" />線の太さ = 重みの大きさ</span>
-        <span><i className="netgraph-key netgraph-key--g" />流れ = 勾配（止まったら学習も止まっている）</span>
+        <span><i className="netgraph-key netgraph-key--g" />流れ = 勾配（クリップ前。止まったら学習も止まっている）</span>
+        {net.gradClipRate !== undefined && (
+          <span>
+            全体 {fmt(net.gradTotalNorm ?? 0, 3)} / 上限 {fmt(net.gradMaxNorm ?? 0, 2)}
+            ・クリップ {Math.round(net.gradClipRate * 100)}%
+          </span>
+        )}
       </div>
 
       <table className="netgraph-table">

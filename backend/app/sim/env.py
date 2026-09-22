@@ -90,6 +90,7 @@ class SimulationEnv:
         self._respawn_queue: list[int] = []
 
         self.latest_perception: dict[int, PerceptionResult] = {}
+        self._latest_freespace: dict[int, np.ndarray] = {}
         self._camera_spec = DEFAULT_CAMERA
         self._camera: Any | None = None
         self._detector: Any | None = None
@@ -427,11 +428,17 @@ class SimulationEnv:
         self._episode_reward += rewards
 
         dones = (reached | collided | offroad | timeout) & active_before
+        truncated = timeout & ~(reached | collided | offroad) & active_before
         held = int(self.commandeered_slot)
         if 0 <= held < n:
             # 徴用中の 1 台は乗降地点で止まるので、到達しても respawn させない
             # （させると乗客を置いて別の街区へ飛ぶ）。衝突・逸脱は配車側が拾う
             dones[held] = False
+        truncated &= dones
+        # 打ち切りの価値目標は「打ち切った時点の状態」から作る。再スポーンの後に
+        # 評価すると、別のエピソードの初期状態の価値が混ざる（`rl/buffer.py`）
+        final_obs = self._encode_last_perception() if bool(truncated.any()) else None
+
         episodes: list[EpisodeResult] = []
         for slot in np.flatnonzero(dones):
             slot = int(slot)
@@ -472,7 +479,8 @@ class SimulationEnv:
             rewards=rewards,
             dones=dones,
             active=active_before,
-            truncated=timeout & ~(reached | collided | offroad),
+            truncated=truncated,
+            final_obs=final_obs,
             episodes=episodes,
         )
 
@@ -702,6 +710,19 @@ class SimulationEnv:
                 perceptions[int(slot)] = result
 
         self.latest_perception = perceptions
+        self._latest_freespace = freespace
         return encode_observations(
             self.world, self.params, perceptions, freespace=freespace, spec=spec
+        )
+
+    def _encode_last_perception(self) -> np.ndarray:
+        """直近の検出のまま、いまの世界の状態で観測だけ作り直す。"""
+        if not self._observations_enabled:
+            return np.zeros((config.MAX_VEHICLES, config.OBS_DIM), dtype=np.float32)
+        return encode_observations(
+            self.world,
+            self.params,
+            self.latest_perception,
+            freespace=self._latest_freespace,
+            spec=self._camera_spec,
         )

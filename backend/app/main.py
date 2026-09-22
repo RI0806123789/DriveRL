@@ -120,6 +120,17 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 
+def _detector_training_error(
+    what: str = "認識器の学習中は物理が止まっているため、配車できません",
+) -> dict[str, Any]:
+    """学習中に弾いたことを伝えるエラー応答を作る。"""
+    return {
+        "type": "error",
+        "code": "DETECTOR_TRAINING",
+        "message": f"{what}。中止するか、終わるまで待ってください",
+    }
+
+
 async def send_json(websocket: WebSocket, payload: dict[str, Any]) -> None:
     await websocket.send_text(orjson.dumps(payload).decode("utf-8"))
 
@@ -305,11 +316,7 @@ async def handle_client_message(websocket: WebSocket, message: dict[str, Any]) -
         if engine.detector_job.running:
             await send_json(
                 websocket,
-                {
-                    "type": "error",
-                    "code": "DETECTOR_TRAINING",
-                    "message": "認識器の学習中はエリアを変えられません。中止するか、終わるまで待ってください",
-                },
+                _detector_training_error("認識器の学習中はエリアを変えられません"),
             )
             return
         _spawn_background(handle_load_map(preset_id), name=f"load-map-{preset_id}")
@@ -368,6 +375,9 @@ async def handle_client_message(websocket: WebSocket, message: dict[str, Any]) -
 
     if kind == "set_app_mode":
         mode = message.get("mode")
+        if mode == "taxi" and engine.detector_job.running:
+            await send_json(websocket, _detector_training_error())
+            return
         if mode not in ("dev", "taxi"):
             await send_json(
                 websocket,
@@ -382,6 +392,9 @@ async def handle_client_message(websocket: WebSocket, message: dict[str, Any]) -
         return
 
     if kind == "request_taxi":
+        if engine.detector_job.running:
+            await send_json(websocket, _detector_training_error())
+            return
         pickup = _parse_point(message.get("pickup"))
         dropoff = _parse_point(message.get("dropoff"))
         if pickup is None or dropoff is None:
@@ -406,6 +419,9 @@ async def handle_client_message(websocket: WebSocket, message: dict[str, Any]) -
         return
 
     if kind in _TAXI_COMMANDS:
+        if kind == "board_taxi" and engine.detector_job.running:
+            await send_json(websocket, _detector_training_error())
+            return
         engine.taxi_command(_TAXI_COMMANDS[kind])
         return
 
