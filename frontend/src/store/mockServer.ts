@@ -57,12 +57,14 @@ const FRAME_MS = 1000 / SIM_HZ
 const SIGNAL_MIN_STREETS = 3
 /** 停止線を交差点端からどれだけ手前に引くか（横断歩道 4m + 余裕 1m） */
 const SIGNAL_SETBACK_EXTRA_M = 4.0 + 1.0
-/** 青 25 / 黄 3 / 全赤 2 秒。半サイクルで交差方向と入れ替わる */
+/** 青 25 / 黄 3 / 全赤 2 秒。現示の数だけ枠を分け合う（config.SIGNAL_*） */
 const SIGNAL_GREEN_SEC = 25
 const SIGNAL_YELLOW_SEC = 3
 const SIGNAL_ALL_RED_SEC = 2
-const SIGNAL_HALF_CYCLE = SIGNAL_GREEN_SEC + SIGNAL_YELLOW_SEC + SIGNAL_ALL_RED_SEC
-const SIGNAL_CYCLE = SIGNAL_HALF_CYCLE * 2
+const SIGNAL_GREEN_MIN_SEC = 6
+const SIGNAL_CYCLE = (SIGNAL_GREEN_SEC + SIGNAL_YELLOW_SEC + SIGNAL_ALL_RED_SEC) * 2
+/** 同じ現示にまとめてよい進入路の軸差の上限（loader.SIGNAL_CONFLICT_ANGLE） */
+const SIGNAL_CONFLICT_ANGLE = (30 * Math.PI) / 180
 
 /** 交差点から標識までの距離 [m]（config.SPEED_SIGN_SETBACK_M） */
 const SPEED_SIGN_SETBACK_M = 12.0
@@ -269,10 +271,35 @@ function buildMockMap(presetId: string, name: string): MapMessage {
   }
 }
 
-/** 2 つの方位を「軸」として比べた角度差 [0, pi/2]（loader._axis_angle と同じ） */
-function axisAngle(a: number, b: number): number {
-  const d = Math.abs(Math.atan2(Math.sin(a - b), Math.cos(a - b)))
-  return Math.min(d, Math.PI - d)
+/** 進入路を、軸のそろった組へ分けた群番号を返す（loader._phase_groups と同じ） */
+function phaseGroups(headings: number[]): number[] {
+  const n = headings.length
+  if (n <= 1) return new Array<number>(n).fill(0)
+
+  const modPi = (v: number) => ((v % Math.PI) + Math.PI) % Math.PI
+  const axes = headings.map((h, i) => ({ axis: modPi(h), i })).sort((a, b) => a.axis - b.axis)
+  let start = 0
+  let widest = -1
+  for (let k = 0; k < n; k++) {
+    const gap = modPi(axes[(k + 1) % n].axis - axes[k].axis)
+    if (gap > widest) {
+      widest = gap
+      start = (k + 1) % n
+    }
+  }
+
+  const out = new Array<number>(n).fill(0)
+  let group = 0
+  let base = axes[start].axis
+  for (let step = 0; step < n; step++) {
+    const { axis, i } = axes[(start + step) % n]
+    if (step && modPi(axis - base) >= SIGNAL_CONFLICT_ANGLE) {
+      group += 1
+      base = axis
+    }
+    out[i] = group
+  }
+  return out
 }
 
 /** 交差点ごとに、進入路 1 本につき 1 基の信号機を作る。 */
@@ -310,15 +337,16 @@ function buildMockSignals(nodes: MapNode[], edges: MapEdge[]): MapSignal[] {
     }
 
     const ordered = [...approaches.keys()].sort((a, b) => a - b).map((k) => approaches.get(k)!)
-    const ref = ordered[0].heading
-    for (const a of ordered) {
+    const groups = phaseGroups(ordered.map((a) => a.heading))
+    for (let k = 0; k < ordered.length; k++) {
+      const a = ordered[k]
       signals.push({
         id: signals.length,
         nodeId: node.id,
         x: a.x,
         y: a.y,
         heading: a.heading,
-        group: axisAngle(a.heading, ref) < Math.PI / 4 ? 0 : 1,
+        group: groups[k],
         roadWidth: a.width,
       })
     }
@@ -616,6 +644,7 @@ class MockServer {
   private signalIndex = new Map<string, number>()
   /** 各信号の停止線が交差点からどれだけ手前か [m]（signals と同じ並び） */
   private signalSetback: number[] = []
+  private signalTiming: { green: number; cycle: number; offset: number; shift: number }[] = []
   /** 「どの区間に入るか」→ その入口に立つ標識の規制速度 [m/s] */
   private signLimits = new Map<string, number>()
   private obstacles: ObstacleState[] = []
@@ -871,6 +900,7 @@ class MockServer {
   private buildSignalIndex(): void {
     this.signalIndex.clear()
     this.signalSetback = []
+    this.signalTiming = []
     this.signLimits.clear()
     for (const sg of this.map?.signs ?? []) {
       const gx = sg.nodeId % GRID_N
@@ -880,6 +910,10 @@ class MockServer {
       this.signLimits.set(`${gx},${gy}>${tx},${ty}`, sg.speedLimit)
     }
     const signals = this.map?.signals ?? []
+    const phaseCount = new Map<number, number>()
+    for (const sg of signals) {
+      phaseCount.set(sg.nodeId, Math.max(phaseCount.get(sg.nodeId) ?? 2, sg.group + 1))
+    }
     for (let i = 0; i < signals.length; i++) {
       const sg = signals[i]
       const gx = sg.nodeId % GRID_N
@@ -888,6 +922,20 @@ class MockServer {
       const fy = gy - Math.round(Math.sin(sg.heading))
       this.signalIndex.set(`${fx},${fy}>${gx},${gy}`, i)
       this.signalSetback.push(Math.hypot(nodeX(gx) - sg.x, nodeY(gy) - sg.y))
+
+      const count = phaseCount.get(sg.nodeId) ?? 2
+      const green = Math.max(
+        SIGNAL_GREEN_MIN_SEC,
+        SIGNAL_CYCLE / count - SIGNAL_YELLOW_SEC - SIGNAL_ALL_RED_SEC,
+      )
+      const slot = green + SIGNAL_YELLOW_SEC + SIGNAL_ALL_RED_SEC
+      const cycle = slot * count
+      this.signalTiming.push({
+        green,
+        cycle,
+        offset: (sg.nodeId * 7919) % Math.max(1, Math.floor(cycle)),
+        shift: slot * sg.group,
+      })
     }
   }
 
@@ -896,14 +944,12 @@ class MockServer {
     const signals = this.map?.signals ?? []
     const out: number[] = new Array(signals.length)
     for (let i = 0; i < signals.length; i++) {
-      const sg = signals[i]
-      const offset = (sg.nodeId * 7919) % SIGNAL_CYCLE
-      const t = (this.simTime + offset) % SIGNAL_CYCLE
-      const local = sg.group === 0 ? t : (t + SIGNAL_HALF_CYCLE) % SIGNAL_CYCLE
+      const timing = this.signalTiming[i]
+      const local = (this.simTime + timing.offset + timing.shift) % timing.cycle
       out[i] =
-        local < SIGNAL_GREEN_SEC
+        local < timing.green
           ? SIGNAL_GREEN
-          : local < SIGNAL_GREEN_SEC + SIGNAL_YELLOW_SEC
+          : local < timing.green + SIGNAL_YELLOW_SEC
             ? SIGNAL_YELLOW
             : SIGNAL_RED
     }

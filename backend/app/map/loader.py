@@ -32,7 +32,7 @@ class MapLoadError(RuntimeError):
     """OSM の取得・正規化に失敗したときに投げる。"""
 
 
-CACHE_VERSION = 7
+CACHE_VERSION = 8
 
 _DEFAULT_LANES: dict[str, int] = {
     "motorway": 3,
@@ -337,6 +337,8 @@ SIGNAL_CROSSWALK_M = 4.0
 
 SIGNAL_STOPLINE_MARGIN_M = 1.0
 
+SIGNAL_CONFLICT_ANGLE = math.radians(30.0)
+
 
 def _collect_signal_osmids(nodes_gdf: Any) -> set[int]:
     """`highway=traffic_signals` が付いたノードの osmid を集める。"""
@@ -382,6 +384,30 @@ def _axis_angle(a: float, b: float) -> float:
     """2 つの方位を「軸」として比べた角度差 [0, pi/2]。向きの正負は無視する。"""
     d = abs(math.atan2(math.sin(a - b), math.cos(a - b)))
     return min(d, math.pi - d)
+
+
+def _phase_groups(
+    headings: Sequence[float], thresh: float = SIGNAL_CONFLICT_ANGLE
+) -> list[int]:
+    """進入路を、軸のそろった組（同時に青にしてよい流れ）へ分けた群番号を返す。"""
+    n = len(headings)
+    if n <= 1:
+        return [0] * n
+
+    axes = sorted((h % math.pi, i) for i, h in enumerate(headings))
+    gaps = [(axes[(k + 1) % n][0] - axes[k][0]) % math.pi for k in range(n)]
+    start = (max(range(n), key=lambda k: gaps[k]) + 1) % n
+
+    out = [0] * n
+    group = 0
+    base = axes[start][0]
+    for step in range(n):
+        axis, idx = axes[(start + step) % n]
+        if step and (axis - base) % math.pi >= thresh:
+            group += 1
+            base = axis
+        out[idx] = group
+    return out
 
 
 def _build_signals(
@@ -437,9 +463,9 @@ def _build_signals(
         if not approaches:
             continue
 
-        ordered = [approaches[k] for k in sorted(approaches)]
-        ref = ordered[0][0]
-        for heading, (px, py), width, edge_id in ordered:
+        for heading, (px, py), width, edge_id in (
+            approaches[k] for k in sorted(approaches)
+        ):
             signals.append(
                 MapSignal(
                     id=len(signals),
@@ -447,7 +473,7 @@ def _build_signals(
                     x=px,
                     y=py,
                     heading=heading,
-                    group=0 if _axis_angle(heading, ref) < math.pi / 4 else 1,
+                    group=0,
                     road_width=width,
                     phase_key=node_id,
                     edge_id=edge_id,
@@ -503,22 +529,20 @@ def _merge_phases(signals: list[MapSignal]) -> list[MapSignal]:
                         union(i, j)
 
     leader: dict[int, int] = {}
+    members: dict[int, list[int]] = {}
     for i, sg in enumerate(signals):
         root = find(i)
+        members.setdefault(root, []).append(i)
         best = leader.get(root)
         if best is None or (sg.node_id, sg.id) < (signals[best].node_id, signals[best].id):
             leader[root] = i
 
-    out: list[MapSignal] = []
-    for i, sg in enumerate(signals):
-        head = signals[leader[find(i)]]
-        out.append(
-            replace(
-                sg,
-                phase_key=head.node_id,
-                group=0 if _axis_angle(sg.heading, head.heading) < math.pi / 4 else 1,
-            )
-        )
+    out = list(signals)
+    for root, idxs in members.items():
+        phase_key = signals[leader[root]].node_id
+        groups = _phase_groups([signals[i].heading for i in idxs])
+        for i, group in zip(idxs, groups):
+            out[i] = replace(signals[i], phase_key=phase_key, group=group)
     return out
 
 
