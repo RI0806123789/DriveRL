@@ -102,6 +102,33 @@ for preset_id in targets:
         print(f"  {ctrl.describe()}")
         red = longest_red(ctrl, len(data.signals))
         check("赤で待たされるのは 60 秒未満", red < 60.0, f"最長 {red:.1f} 秒")
+
+        # 位相のずれ（交差点ごとに 1 つ）。整数の剰余で散らすと、周期 60 秒に対して
+        # 7919 % 60 = 59 ≡ -1 になり、番号が隣り合う交差点が 1 秒ずつずれた波になる
+        keys = np.array([sg.phase_key for sg in data.signals], dtype=np.int64)
+        seen: dict[int, float] = {}
+        for key, off in zip(keys, ctrl._offsets):
+            seen.setdefault(int(key), float(off))
+        ordered = np.array(sorted(seen), dtype=np.int64)
+        offsets = np.array([seen[int(k)] for k in ordered])
+        unique = int(np.unique(np.round(offsets, 3)).size)
+        check(
+            "位相のずれが交差点ごとに散っている",
+            unique >= ordered.size * 0.9,
+            f"{unique} / {ordered.size} 通り",
+        )
+        adjacent = np.flatnonzero(np.diff(ordered) == 1)
+        if adjacent.size:
+            gap = np.abs(np.diff(offsets))[adjacent]
+            narrow = ctrl.cycle * 0.05
+            close = float((gap < narrow).mean())
+            # 一様なら 2 * 3 / 60 ＝ 10% 前後。旧実装（1 秒差の波）は 100% になる
+            check(
+                "番号が隣り合う交差点が同じずれ幅で並ばない",
+                close < 0.25 and float(np.median(gap)) > ctrl.cycle / 6.0,
+                f"{narrow:.0f} 秒未満が {close:.1%}"
+                f"（{adjacent.size} 組・中央値 {np.median(gap):.1f} 秒）",
+            )
     print()
 
 print("=" * 72)

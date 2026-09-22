@@ -570,7 +570,7 @@ export interface NetworkLayer {
   /** 重みの絶対値の平均。学習が進むと動く */
   weightAbsMean: number
   weightStd: number
-  /** 直近の更新で流れた勾配の大きさ。0 なら学習していない */
+  /** 直近の更新で流れた勾配の大きさ（**クリップ前**）。0 なら学習していない */
   gradNorm: number
   /** **直前の 1 更新で重みが動いた量。** 更新ごとに確定する。 */
   deltaNorm: number
@@ -590,6 +590,12 @@ export interface NetworkMessage {
   actionStd: number[]
   logStdMin: number
   logStdMax: number
+  /** クリップ前の勾配の全体ノルム（ミニバッチ平均） */
+  gradTotalNorm?: number
+  /** クリップが効いたミニバッチの割合（0〜1）。1 に張り付いていれば暴れている */
+  gradClipRate?: number
+  /** クリップの上限（`config.PPO_MAX_GRAD_NORM`） */
+  gradMaxNorm?: number
 }
 
 export type ServerMessage =

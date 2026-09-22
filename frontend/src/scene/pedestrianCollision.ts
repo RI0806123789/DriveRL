@@ -2,12 +2,15 @@
 
 import type { MapBuilding } from '../types/protocol'
 
-/** 歩行者の体の半径 [m] */
-export const PEDESTRIAN_RADIUS = 0.34
+/** 歩行者の体の半径 [m]（backend/app/config.py の `PEDESTRIAN_RADIUS` と揃える） */
+export const PEDESTRIAN_RADIUS = 0.26
 
 /** 車体の当たり判定に使う寸法 [m]（backend/app/config.py と揃える） */
 export const VEHICLE_HALF_LENGTH = 2.2
 export const VEHICLE_HALF_WIDTH = 0.9
+
+/** 降車位置を車体の中心から離す距離 [m] */
+export const ALIGHT_OFFSET_M = VEHICLE_HALF_WIDTH + PEDESTRIAN_RADIUS + 0.5
 
 /** 建物の格子索引。**毎フレーム数千件を総当たりしないためだけに存在する** */
 export interface BuildingIndex {
@@ -243,11 +246,33 @@ export function aimedVehicle(
 /** 降車するときに立つ位置（車体の左側面の外）。 */
 export function alightPosition(
   blocker: VehicleBlocker,
-  offset: number = VEHICLE_HALF_WIDTH + PEDESTRIAN_RADIUS + 0.5,
+  offset: number = ALIGHT_OFFSET_M,
 ): { x: number; y: number } {
   // 左側通行なので、歩道側（進行方向の左）へ降ろす
   return {
     x: blocker.x - Math.sin(blocker.heading) * offset,
     y: blocker.y + Math.cos(blocker.heading) * offset,
   }
+}
+
+/** 降りる場所を選ぶ。歩道側が建物なら反対側、車の後ろ、最後は車の位置へ落とす。 */
+export function alightSpot(
+  blocker: VehicleBlocker,
+  index: BuildingIndex | null,
+  offset: number = ALIGHT_OFFSET_M,
+): { x: number; y: number } {
+  const back = VEHICLE_HALF_LENGTH + PEDESTRIAN_RADIUS + 0.5
+  const candidates = [
+    alightPosition(blocker, offset),
+    alightPosition(blocker, -offset),
+    {
+      x: blocker.x - Math.cos(blocker.heading) * back,
+      y: blocker.y - Math.sin(blocker.heading) * back,
+    },
+  ]
+  for (const spot of candidates) {
+    if (!touchesBuilding(index, spot.x, spot.y)) return spot
+  }
+  // どこも建物の中。車の位置なら少なくとも道路上にはいる（`resolveMove` で抜けられる）
+  return { x: blocker.x, y: blocker.y }
 }

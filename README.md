@@ -30,6 +30,7 @@ DriveRL/
 │   ├── warmstart_policy.py         「止まる」に固まった方策を経路追従で立て直す CLI
 │   ├── verify_log_std.py           方策分布（log_std）の健全性チェック
 │   ├── verify_signal_phases.py     信号の現示（交差する流れが同時に青にならないか）
+│   ├── verify_publish_routes.py    経路の配信（取りこぼしてもクライアントへ届くか）
 │   ├── app/
 │   │   ├── config.py               定数（観測 66 次元の内訳・車両諸元・PPO 設定）
 │   │   ├── contracts.py            パッケージ間の共有型。ここが内部の契約
@@ -1181,6 +1182,7 @@ cd frontend; npm run verify:conventions # コメント規約と CSS の遷移規
 # バックエンドの検証（キャッシュ済みのマップを読むだけ。ブラウザもサーバーも要らない）
 cd backend; .venv\Scripts\python.exe verify_log_std.py        # 方策分布（log_std）
 cd backend; .venv\Scripts\python.exe verify_signal_phases.py  # 信号の現示（プリセット名を渡せば 1 つだけ）
+cd backend; .venv\Scripts\python.exe verify_publish_routes.py # 配車と frame の経路が配信で落ちないか
 ```
 
 `npm run verify` は Node で直接実行する検証スクリプトです。3D の向きは**間違っていても

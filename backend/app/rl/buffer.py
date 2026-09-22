@@ -25,6 +25,7 @@ class RolloutBuffer:
         self.rewards = np.zeros(shape, dtype=np.float32)
         self.dones = np.zeros(shape, dtype=bool)
         self.truncated = np.zeros(shape, dtype=bool)
+        self.truncated_values = np.zeros(shape, dtype=np.float32)
         self.active = np.zeros(shape, dtype=bool)
         self.advantages = np.zeros(shape, dtype=np.float32)
         self.returns = np.zeros(shape, dtype=np.float32)
@@ -54,6 +55,7 @@ class RolloutBuffer:
         dones: np.ndarray,
         active: np.ndarray,
         truncated: np.ndarray | None = None,
+        truncated_values: np.ndarray | None = None,
     ) -> None:
         """1 ステップ分を追加する。満杯なら何もしない（実行ループを止めないため）。"""
         if self.full:
@@ -70,6 +72,11 @@ class RolloutBuffer:
             np.zeros(n, dtype=bool)
             if truncated is None
             else np.asarray(truncated, dtype=bool).reshape(n)
+        )
+        self.truncated_values[i] = (
+            np.zeros(n, dtype=np.float32)
+            if truncated_values is None
+            else np.asarray(truncated_values, dtype=np.float32).reshape(n)
         )
         self.active[i] = np.asarray(active, dtype=bool).reshape(n)
         self.ptr = i + 1
@@ -97,10 +104,16 @@ class RolloutBuffer:
 
         for t in range(size - 1, -1, -1):
             non_terminal = ((~self.dones[t]) & next_active).astype(np.float32)
+            # 打ち切りは「続いていたはずの先」の価値で補う。ただし `next_values` は
+            # 再スポーン後（別のエピソード）の価値なので、打ち切った時点で評価した
+            # 値に差し替える
             bootstrap = (
-                ((~self.dones[t]) | self.truncated[t]) & next_active
+                ((~self.dones[t]) & next_active) | self.truncated[t]
             ).astype(np.float32)
-            delta = self.rewards[t] + gamma * next_values * bootstrap - self.values[t]
+            boot_values = np.where(
+                self.truncated[t], self.truncated_values[t], next_values
+            ).astype(np.float32)
+            delta = self.rewards[t] + gamma * boot_values * bootstrap - self.values[t]
             adv = delta + gamma * lam * non_terminal * adv
             adv = np.where(self.active[t], adv, np.float32(0.0)).astype(np.float32)
             self.advantages[t] = adv

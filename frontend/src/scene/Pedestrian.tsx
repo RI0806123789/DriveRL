@@ -19,7 +19,7 @@ import type { Vec2 } from '../types/protocol'
 import { computeAlpha, createPose, sampleVehicle } from './interpolation'
 import {
   aimedVehicle,
-  alightPosition,
+  alightSpot,
   buildBuildingIndex,
   resolveMove,
   touchesBuilding,
@@ -200,7 +200,7 @@ export function Pedestrian() {
           y: pedestrian.y,
           heading: pedestrian.heading,
         }
-      const spot = alightPosition(seat)
+      const spot = alightSpot(seat, index)
       placePedestrian(spot.x, spot.y, seat.heading - Math.PI / 2)
       pedestrian.riding = false
       pedestrian.ridingVehicle = -1

@@ -86,6 +86,8 @@ class SimulationEngine:
         self._detector_active: bool = False
         self._latest_frame: FrameSnapshot | None = None
         self._frame_seq: int = 0
+        self._frame_taken_seq: int = -1
+        self._unconfirmed_routes: tuple[int, ...] = ()
         self._want_full_frame: bool = True
         self._last_frame_at: float = 0.0
         self._map_pending: bool = False
@@ -101,6 +103,7 @@ class SimulationEngine:
         self._taxi_wire: dict[str, Any] | None = None
         self._taxi_seq: int = 0
         self._taxi_sent_revision: int = -1
+        self._taxi_route_pending: bool = False
         self._taxi_last_phase: str = ""
         self._taxi_vehicle_id: int = -1
 
@@ -207,10 +210,12 @@ class SimulationEngine:
         self._inbox.put(("player_pose", at))
 
     def take_taxi(self, last_seq: int) -> tuple[int, dict[str, Any] | None]:
-        """前回配信した番号より新しい配車状態があれば返す（frame と同じ作法）。"""
+        """前回配信した番号より新しい配車状態があれば返す（経路はここで配り終える）。"""
         with self._lock:
             if self._taxi_wire is None or self._taxi_seq == last_seq:
                 return last_seq, None
+            if "route" in self._taxi_wire:
+                self._taxi_route_pending = False
             return self._taxi_seq, dict(self._taxi_wire)
 
     def request_full_taxi(self) -> None:
@@ -218,12 +223,13 @@ class SimulationEngine:
         self._inbox.put(("publish_taxi", None))
 
     def _publish_taxi(self) -> None:
-        """配車の状態を asyncio 側へ渡す。**経路は版が変わったときだけ載せる。**"""
+        """配車の状態を asyncio 側へ渡す。**経路は配り終えるまで載せ続ける。**"""
         status = self._taxi.status
         with self._lock:
-            include_route = status.route_revision != self._taxi_sent_revision
-            self._taxi_sent_revision = status.route_revision
-            self._taxi_wire = status.to_wire(include_route=include_route)
+            if status.route_revision != self._taxi_sent_revision:
+                self._taxi_sent_revision = status.route_revision
+                self._taxi_route_pending = True
+            self._taxi_wire = status.to_wire(include_route=self._taxi_route_pending)
             self._taxi_seq += 1
             self._taxi_vehicle_id = int(status.vehicle_id)
             self._taxi_last_phase = status.phase
@@ -313,6 +319,7 @@ class SimulationEngine:
         with self._lock:
             if self._render_paused or self._map_pending or self._frame_seq == last_seq:
                 return last_seq, None
+            self._frame_taken_seq = self._frame_seq
             return self._frame_seq, self._latest_frame
 
     def metrics_payload(self) -> dict[str, Any]:
@@ -852,6 +859,7 @@ class SimulationEngine:
 
         initial_frame = self._env.snapshot(self._tick, self._sim_time)
         initial_frame.signals = self._env.signal_phases
+        self._unconfirmed_routes = initial_frame.routed_slots
 
         with self._lock:
             self._state = "running"
@@ -896,6 +904,7 @@ class SimulationEngine:
                 dones=result.dones,
                 active=result.active,
                 truncated=result.truncated,
+                final_obs=result.final_obs,
             )
 
             stats = trainer.maybe_update(result.obs, result.active)
@@ -935,6 +944,9 @@ class SimulationEngine:
         detector_active = None
         if (now - self._last_metrics_at) >= metrics_interval:
             self._last_metrics_at = now
+            # 再スポーンに失敗して非アクティブになったぶんを画面の台数へ映す。
+            # 映さないと、次に別のパラメータを変えた瞬間に車が起き上がる
+            self._sync_vehicle_count()
             metrics = self._build_metrics(trainer.updates)
             # 推論が落ちて真値へ落ちたことがあるので、載せ替えのときだけでなく
             # ここでも取り直す（`model.inUse` は「いま実際に使っているか」）
@@ -963,6 +975,11 @@ class SimulationEngine:
         with self._lock:
             want_full = self._want_full_frame
             self._want_full_frame = False
+            delivered = self._frame_taken_seq == self._frame_seq
+
+        if delivered and self._unconfirmed_routes:
+            env.world.clear_route_dirty(self._unconfirmed_routes)
+            self._unconfirmed_routes = ()
 
         frame = (
             env.full_snapshot(self._tick, self._sim_time)
@@ -974,6 +991,7 @@ class SimulationEngine:
         with self._lock:
             self._latest_frame = frame
             self._frame_seq += 1
+        self._unconfirmed_routes = frame.routed_slots
 
     def _build_metrics(self, updates: int) -> MetricsSnapshot:
         episodes = list(self._episode_log)

@@ -542,6 +542,7 @@ class FrameSnapshot:
     signals: list[int] = field(default_factory=list)
     detections: dict[int, list[dict[str, Any]]] = field(default_factory=dict)
     weather: dict[str, float] | None = None
+    routed_slots: tuple[int, ...] = ()
 
     def to_wire(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -659,6 +660,8 @@ class StepResult:
     active: np.ndarray
 
     truncated: np.ndarray | None = None
+    #: 打ち切り（timeout）が起きたステップだけ、再スポーン前の観測が入る
+    final_obs: np.ndarray | None = None
     episodes: list[EpisodeResult] = field(default_factory=list)
 
 

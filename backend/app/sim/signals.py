@@ -29,6 +29,15 @@ DEFAULT_ALL_RED_SEC = config.SIGNAL_ALL_RED_SEC
 DEFAULT_GREEN_MIN_SEC = config.SIGNAL_GREEN_MIN_SEC
 
 
+def _scatter01(keys: np.ndarray) -> np.ndarray:
+    """交差点のキーを 0〜1 の実数へ散らす（splitmix64 の finalizer）。"""
+    z = keys.astype(np.uint64) + np.uint64(0x9E3779B97F4A7C15)
+    z = (z ^ (z >> np.uint64(30))) * np.uint64(0xBF58476D1CE4E5B9)
+    z = (z ^ (z >> np.uint64(27))) * np.uint64(0x94D049BB133111EB)
+    z = z ^ (z >> np.uint64(31))
+    return (z >> np.uint64(11)).astype(np.float64) / float(1 << 53)
+
+
 class SignalController:
     """信号機の集合に対して、時刻から灯色を決める。"""
 
@@ -70,8 +79,7 @@ class SignalController:
         self.max_cycle = float(self._cycles.max()) if self._count else self.cycle
 
         keys = np.array([s.phase_key for s in signals], dtype=np.int64)
-        periods = np.maximum(1, self._cycles.astype(np.int64))
-        self._offsets = ((keys * 7919) % periods).astype(np.float64)
+        self._offsets = _scatter01(keys) * self._cycles
 
         self._buffer = np.full(self._count, RED, dtype=np.uint8)
 

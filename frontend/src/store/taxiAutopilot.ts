@@ -1,5 +1,6 @@
 /** 配車を最初から最後まで自分で回す（`TaxiScreen` の隠し操作から入る）。 */
 
+import { pedestrian } from './pedestrian.ts'
 import type { MapNode, TaxiPhase, Vec2 } from '../types/protocol'
 
 /** 降車してから次を呼ぶまで [秒] */
@@ -96,5 +97,8 @@ export const taxiAutopilot = {
 export function resetTaxiAutopilot(now: number): void {
   taxiAutopilot.lastSentAt = now
   taxiAutopilot.lastPhase = 'idle'
+  // 自分が押していた足は必ず離す。`driveAutopilot` 側の `stopAutoWalk()` は
+  // `walking` が false だと何もしないので、ここで落とすと押しっぱなしになる
+  if (taxiAutopilot.walking) pedestrian.input.forward = false
   taxiAutopilot.walking = false
 }

@@ -33,9 +33,11 @@ import {
   VEHICLE_HALF_WIDTH,
   aimedVehicle,
   alightPosition,
+  alightSpot,
   buildBuildingIndex,
   isInsideBuilding,
   resolveMove,
+  touchesBuilding,
   touchesVehicle,
 } from '../src/scene/pedestrianCollision.ts'
 import type { MapBuilding } from '../src/types/protocol.ts'
@@ -272,6 +274,46 @@ check('2 棟目も引ける', isInsideBuilding(index, -30, -12) && !isInsideBuil
     `(${spot.x.toFixed(2)}, ${spot.y.toFixed(2)})`,
   )
   check('降車位置は車体と重ならない', !touchesVehicle(car, spot.x, spot.y))
+
+  // 歩道側が建物で塞がっている区画（道路際まで建物が迫っているとき）
+  const walls: MapBuilding[] = [
+    { id: 0, height: 9, outline: [[-8, 1.5], [8, 1.5], [8, 12], [-8, 12]] },
+  ]
+  const blocked = buildBuildingIndex(walls)
+  const away = alightSpot(car, blocked)
+  check(
+    '歩道側が建物なら反対側へ降ろす',
+    !touchesBuilding(blocked, away.x, away.y) && away.y < 0,
+    `(${away.x.toFixed(2)}, ${away.y.toFixed(2)})`,
+  )
+
+  const both: MapBuilding[] = [
+    { id: 0, height: 9, outline: [[-8, 1.5], [8, 1.5], [8, 12], [-8, 12]] },
+    { id: 1, height: 9, outline: [[-8, -12], [8, -12], [8, -1.5], [-8, -1.5]] },
+  ]
+  const narrow = buildBuildingIndex(both)
+  const behind = alightSpot(car, narrow)
+  check(
+    '左右とも建物なら車の後ろへ降ろす',
+    !touchesBuilding(narrow, behind.x, behind.y) && behind.x < -VEHICLE_HALF_LENGTH,
+    `(${behind.x.toFixed(2)}, ${behind.y.toFixed(2)})`,
+  )
+
+  const sealed = buildBuildingIndex([
+    { id: 0, height: 9, outline: [[-30, -30], [30, -30], [30, 30], [-30, 30]] },
+  ])
+  const last = alightSpot(car, sealed)
+  check(
+    '逃げ場が無ければ車の位置（建物の中には置かない）',
+    last.x === car.x && last.y === car.y,
+  )
+
+  // 建物が無ければ、歩道側に降ろす従来の位置と一致する
+  const plain = alightSpot(car, null)
+  check(
+    '建物が無ければ従来どおり歩道側',
+    Math.abs(plain.x - spot.x) < 1e-9 && Math.abs(plain.y - spot.y) < 1e-9,
+  )
 }
 
 console.log()

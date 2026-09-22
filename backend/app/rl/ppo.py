@@ -65,6 +65,8 @@ class _PendingUpdate:
     kls: list[float] = field(default_factory=list)
     grad_sums: dict[str, float] = field(default_factory=dict)
     grad_counts: dict[str, int] = field(default_factory=dict)
+    grad_totals: list[float] = field(default_factory=list)
+    grad_clipped: int = 0
 
 
 class PPOTrainer:
@@ -112,6 +114,8 @@ class PPOTrainer:
         self._pending: _PendingUpdate | None = None
 
         self._last_grad_norms: dict[str, float] = {}
+        self._last_grad_total: float = 0.0
+        self._last_grad_clip_rate: float = 0.0
         self._weights_before_update: dict[str, torch.Tensor] = {}
         self._last_delta_norms: dict[str, float] = {}
 
@@ -152,6 +156,7 @@ class PPOTrainer:
         dones: np.ndarray,
         active: np.ndarray,
         truncated: np.ndarray | None = None,
+        final_obs: np.ndarray | None = None,
     ) -> None:
         """1 ステップ分をバッファに積む。"""
         raw = self._last_raw_actions
@@ -162,8 +167,31 @@ class PPOTrainer:
             actions_arr = raw
         self._last_raw_actions = None
 
+        truncated_values: np.ndarray | None = None
+        if final_obs is not None and truncated is not None:
+            # 打ち切ったステップでしか作られない（`SimulationEnv.step`）ので、
+            # 評価は 200 秒に 1 度ほど。毎ステップの推論は増えない
+            with torch.no_grad():
+                t_obs = torch.from_numpy(
+                    np.ascontiguousarray(
+                        np.asarray(final_obs, dtype=np.float32).reshape(
+                            self.num_agents, self.obs_dim
+                        )
+                    )
+                )
+                _dist, final_values = self.policy.forward(t_obs)
+            truncated_values = final_values.numpy().astype(np.float32)
+
         self.buffer.add(
-            obs, actions_arr, log_probs, values, rewards, dones, active, truncated
+            obs,
+            actions_arr,
+            log_probs,
+            values,
+            rewards,
+            dones,
+            active,
+            truncated,
+            truncated_values,
         )
 
     def maybe_update(
@@ -265,9 +293,6 @@ class PPOTrainer:
 
             self.optimizer.zero_grad(set_to_none=True)
             loss.backward()
-            nn.utils.clip_grad_norm_(
-                self.policy.parameters(), float(config.PPO_MAX_GRAD_NORM)
-            )
             with torch.no_grad():
                 for name, prm in self.policy.named_parameters():
                     if prm.grad is None:
@@ -275,6 +300,13 @@ class PPOTrainer:
                     g = float(prm.grad.norm())
                     pending.grad_sums[name] = pending.grad_sums.get(name, 0.0) + g
                     pending.grad_counts[name] = pending.grad_counts.get(name, 0) + 1
+            max_grad_norm = float(config.PPO_MAX_GRAD_NORM)
+            total_norm = float(
+                nn.utils.clip_grad_norm_(self.policy.parameters(), max_grad_norm)
+            )
+            pending.grad_totals.append(total_norm)
+            if total_norm > max_grad_norm:
+                pending.grad_clipped += 1
             self.optimizer.step()
             self.policy.clamp_log_std()
 
@@ -295,6 +327,11 @@ class PPOTrainer:
             k: pending.grad_sums[k] / max(1, pending.grad_counts.get(k, 1))
             for k in pending.grad_sums
         }
+        batches = len(pending.grad_totals)
+        self._last_grad_total = (
+            float(np.mean(pending.grad_totals)) if batches else 0.0
+        )
+        self._last_grad_clip_rate = pending.grad_clipped / max(1, batches)
         with torch.no_grad():
             self._last_delta_norms = {
                 name: float((prm.detach() - before).norm())
@@ -346,6 +383,9 @@ class PPOTrainer:
             "actionStd": [float(x) for x in std],
             "logStdMin": float(config.PPO_LOG_STD_MIN),
             "logStdMax": float(config.PPO_LOG_STD_MAX),
+            "gradTotalNorm": float(self._last_grad_total),
+            "gradClipRate": float(self._last_grad_clip_rate),
+            "gradMaxNorm": float(config.PPO_MAX_GRAD_NORM),
         }
 
     def _drop_pending(self) -> None:
@@ -392,6 +432,8 @@ class PPOTrainer:
         self._last_raw_actions = None
         self._drop_pending()
         self._last_grad_norms = {}
+        self._last_grad_total = 0.0
+        self._last_grad_clip_rate = 0.0
         self._last_delta_norms = {}
         self._weights_before_update = {}
 

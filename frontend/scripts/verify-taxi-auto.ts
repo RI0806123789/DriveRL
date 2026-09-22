@@ -12,6 +12,7 @@ import {
   taxiAutopilot,
 } from '../src/store/taxiAutopilot.ts'
 import type { AutoAction, AutoInput } from '../src/store/taxiAutopilot.ts'
+import { pedestrian } from '../src/store/pedestrian.ts'
 import type { MapNode, TaxiPhase } from '../src/types/protocol.ts'
 
 let failures = 0
@@ -261,15 +262,29 @@ console.log('='.repeat(70))
 
 {
   // 代入したリテラルへ絞られないよう、宣言どおりの型で入れてから呼ぶ
-  const dirty: { phase: TaxiPhase; walking: boolean } = { phase: 'arrived', walking: true }
+  const dirty: { phase: TaxiPhase; walking: boolean; forward: boolean } = {
+    phase: 'arrived',
+    walking: true,
+    forward: true,
+  }
   taxiAutopilot.lastSentAt = 0
   taxiAutopilot.lastPhase = dirty.phase
   taxiAutopilot.walking = dirty.walking
+  pedestrian.input.forward = dirty.forward
   resetTaxiAutopilot(500)
   check('時計を入れ直す', taxiAutopilot.lastSentAt === 500)
   check('段階の記憶を戻す', taxiAutopilot.lastPhase === 'idle')
   // 足を止めないと、切ったあとも前進キーが押しっぱなしになる
   check('足を止める', taxiAutopilot.walking === false)
+  // 記憶だけ落とすと、`stopAutoWalk()` が素通りして前進キーが残る
+  check('前進キーも離す', pedestrian.input.forward === false)
+
+  // 自分で押していないときは、利用者が押した足を奪わない
+  taxiAutopilot.walking = false
+  pedestrian.input.forward = dirty.forward
+  resetTaxiAutopilot(600)
+  check('手で押している足は離さない', pedestrian.input.forward === true)
+  pedestrian.input.forward = false
   check(
     '入った直後はすぐ呼ばない',
     decideAutoAction(input({ now: 500, lastSentAt: taxiAutopilot.lastSentAt })) === 'none',

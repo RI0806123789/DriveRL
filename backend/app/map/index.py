@@ -345,7 +345,11 @@ class MapIndexImpl:
             line = LineString(pts)
             found = tree.query(line, predicate="dwithin", distance=float(max_lateral))
         except Exception:
-            logger.exception("経路の近傍検索に失敗しました。全件を候補にします")
+            _warn_once(
+                "near_route",
+                "経路の近傍検索に失敗しました。全件を候補にするため重くなります"
+                "（初回のみ記録）",
+            )
             return np.arange(int(tree.geometries.size), dtype=np.int64)
         return np.sort(np.asarray(found, dtype=np.int64).reshape(-1))
 

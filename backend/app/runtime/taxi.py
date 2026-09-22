@@ -129,7 +129,11 @@ class TaxiService:
         slot = self.vehicle_id
         world = env.world
         dropoff = self.status.dropoff
-        if dropoff is None or not world.fleet.active[slot]:
+        if (
+            dropoff is None
+            or not (0 <= slot < config.MAX_VEHICLES)
+            or not world.fleet.active[slot]
+        ):
             self.cancel(env, "配車が失われました")
             return "配車が失われました"
 

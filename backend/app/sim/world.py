@@ -232,12 +232,18 @@ class World:
         best_src = -1
         best_dst = -1
         best_clearance = -1.0
+        tried: set[tuple[int, int]] = set()
         for _ in range(SPAWN_ROUTE_TRIALS):
             src, dst = self.map_index.random_node_pair(
                 self.rng, ROUTE_MIN_DISTANCE_M, ROUTE_MAX_DISTANCE_M
             )
             if int(src) == int(dst):
                 continue
+            # 同じ組を引き直しても結果は変わらない（dijkstra を捨てるだけ）
+            key = (int(src), int(dst))
+            if key in tried:
+                continue
+            tried.add(key)
             # 経路を作る前に始点の空きを見る。経路生成は金沢で 1 本 25ms かかるので、
             # 作ってから捨てると再スポーン 1 回が 50ms の予算を超える
             clearance = (
@@ -288,12 +294,17 @@ class World:
                 far = np.flatnonzero(far_enough)
             if far.size == 0:
                 far = np.flatnonzero(dist2 > np.float32(1.0))
-            trials = min(DESTINATION_TRIALS, max(int(far.size), 1))
-            for _ in range(trials):
-                if far.size == 0:
+            # 引いた候補は末尾と入れ替えて外す。同じノードを引き直すと、
+            # 到達できる目的地が少ないマップ（金沢）ほど試行が無駄になる
+            pool = far
+            size = int(pool.size)
+            for _ in range(DESTINATION_TRIALS):
+                if size == 0:
                     break
-                pick = int(self.rng.integers(0, far.size))
-                dst = int(self._node_ids[far[pick]])
+                pick = int(self.rng.integers(0, size))
+                dst = int(self._node_ids[pool[pick]])
+                size -= 1
+                pool[pick] = pool[size]
                 if dst == src:
                     continue
                 route = self._route_from_nodes(src, dst)
@@ -1110,6 +1121,7 @@ class World:
     def snapshot(self, tick: int, sim_time: float, include_routes: bool) -> FrameSnapshot:
         """docs/protocol.md 2.3 の frame に対応するスナップショットを作る。"""
         vehicles: list[VehicleSnapshot] = []
+        routed: list[int] = []
         progress = self.route_progress_ratio()
         posted = self.posted_speed_limits()
         for slot in range(config.MAX_VEHICLES):
@@ -1119,7 +1131,7 @@ class World:
             if emit_route and state.route.shape[0] >= 2:
                 route = [(float(px), float(py)) for px, py in state.route]
             if emit_route:
-                state.route_dirty = False
+                routed.append(slot)
             vehicles.append(
                 VehicleSnapshot(
                     id=slot,
@@ -1154,4 +1166,10 @@ class World:
             vehicles=vehicles,
             obstacles=obstacles,
             pedestrians=self.crowd.snapshot(),
+            routed_slots=tuple(routed),
         )
+
+    def clear_route_dirty(self, slots: tuple[int, ...]) -> None:
+        """配信できたスロットの経路フラグを落とす。"""
+        for slot in slots:
+            self.slots[slot].route_dirty = False
