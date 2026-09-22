@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from dataclasses import replace
 from typing import Any, Callable
 
@@ -23,6 +24,10 @@ from app.percep.types import DEFAULT_CAMERA, PerceptionResult
 from app.percep.weather import Weather, auto_weather
 from app.sim.signals import GREEN, STOP_MARGIN_M, constrain_accel, stop_speed_limit
 from app.sim.world import World
+
+#: 1 ステップで再スポーンに使ってよい時間 [秒]。1 台ぶんは必ず処理するので、
+#: これを超えたら残りは次のステップへ回す（金沢は 1 台 9.9ms、銀座は 1.6ms）
+RESPAWN_BUDGET_SEC = 0.020
 
 logger = logging.getLogger("autoware_sim")
 
@@ -80,6 +85,9 @@ class SimulationEnv:
         # 実用モードの間は全車を経路追従で走らせる。**学習中は必ず False**
         # （PPO から見た環境が変わってしまう）
         self.autopilot_all: bool = False
+
+        # 再スポーン待ちのスロット。経路生成が重いマップで 1 ステップに寄せない
+        self._respawn_queue: list[int] = []
 
         self.latest_perception: dict[int, PerceptionResult] = {}
         self._camera_spec = DEFAULT_CAMERA
@@ -270,6 +278,7 @@ class SimulationEnv:
 
     def reset_all(self, *, relocate_walkers: bool = True) -> np.ndarray:
         """全アクティブスロットを再スポーンし、観測を返す。"""
+        self._respawn_queue.clear()
         for slot in range(config.MAX_VEHICLES):
             if self.world.fleet.active[slot]:
                 self.world.respawn(slot)
@@ -303,8 +312,25 @@ class SimulationEnv:
         """MapData.signals と同じ並びの灯色（0=青 / 1=黄 / 2=赤）。"""
         return self.world.signal_phases
 
+    def _drain_respawn_queue(self) -> None:
+        """再スポーン待ちを、時間の許すかぎり処理する（最低 1 台）。"""
+        if not self._respawn_queue:
+            return
+        started = time.perf_counter()
+        while self._respawn_queue:
+            slot = self._respawn_queue.pop(0)
+            if not self.world.activate(slot):
+                self.params.vehicle_count = self.world.active_count
+                logger.warning(
+                    "スロット %d の再スポーンに失敗しました（経路を作れず）。"
+                    "このスロットを非アクティブにします",
+                    slot,
+                )
+            if time.perf_counter() - started >= RESPAWN_BUDGET_SEC:
+                break
+
     def step(self, actions: np.ndarray) -> StepResult:
-        """1 ステップ進める。終了したスロットは同じ step の中で即座に respawn する。"""
+        """1 ステップ進める。終了したスロットは再スポーン待ちへ積む（`_drain_respawn_queue`）。"""
         n = config.MAX_VEHICLES
         act = np.asarray(actions, dtype=np.float32).reshape(n, config.ACTION_DIM)
         act = np.clip(np.nan_to_num(act, nan=0.0, posinf=1.0, neginf=-1.0), -1.0, 1.0)
@@ -434,15 +460,10 @@ class SimulationEnv:
                 )
             )
             self._reset_slot_stats(slot)
-            if not self.world.try_respawn(slot):
-                self.world.deactivate(slot)
-                self.params.vehicle_count = self.world.active_count
-                logger.warning(
-                    "スロット %d の再スポーンに失敗しました（経路を作れず）。"
-                    "このスロットを非アクティブにします",
-                    slot,
-                )
+            self._respawn_queue.append(slot)
+            self.world.deactivate(slot)
 
+        self._drain_respawn_queue()
         self.world.set_event_flags(collided, reached)
 
         self._obs = self._compute_observations()
@@ -466,6 +487,8 @@ class SimulationEnv:
         if walkers != int(self.world.crowd.count):
             self.world.set_pedestrian_count(walkers)
         if count_changed:
+            # 待ちを残すと、減らしたはずのスロットが後から起き上がる
+            self._respawn_queue.clear()
             active_before = self.world.fleet.active.copy()
             self.world.set_active_count(new_count)
             self._reset_stats_for_changed(active_before)
