@@ -54,10 +54,7 @@ const CURB_OFFSET_M = 3.2
 /** 実用モードに入ったとき、最寄り車両の後方に立つ距離 [m] */
 const SPAWN_BEHIND_M = 9
 
-/**
- * 位置をサーバーへ知らせる間隔 [ms]。**60fps で送らないこと**（frameBuffer と同じ作法で、
- * 20Hz のサーバーが読むのは 1 ステップに 1 回だけ）。
- */
+/** 位置をサーバーへ知らせる間隔 [ms]。 */
 const POSE_REPORT_MS = 100
 
 function isTypingTarget(target: EventTarget | null): boolean {
@@ -87,10 +84,7 @@ function routeHeadingAtEnd(route: Vec2[] | undefined): number {
   return Math.atan2(b[1] - a[1], b[0] - a[0])
 }
 
-/**
- * 乗車地点の歩道へ立たせる。**まだ街に立っていないときだけ呼ぶこと。**
- * 乗車地点は利用者の現在地なので、呼んだ瞬間に立たせ直すと自分がワープする。
- */
+/** 乗車地点の歩道へ立たせる。 */
 function placeAtPickup(taxi: { pickup: Vec2 | null; route?: Vec2[] }, index: BuildingIndex | null): void {
   if (!taxi.pickup) return
   const dir = routeHeadingAtEnd(taxi.route)
@@ -136,7 +130,7 @@ export function Pedestrian() {
     [],
   )
 
-  // ★ palette は `args` に渡さない（マテリアルごと作り直されると消える。code_review S-01）
+  // palette は `args` に渡さない（マテリアルごと作り直されると消える。code_review S-01）
   const resources = useMemo(() => {
     const head = makeHeadGeometry()
     const torso = makeTorsoGeometry()
@@ -170,7 +164,7 @@ export function Pedestrian() {
   }, [resources])
 
   // 実用モードを抜けるまで状態を持ち越す。
-  // ★ 抜けるときは**必ず街から消すこと**。残すと開発モードに戻ったあとも、
+  // 抜けるときは**必ず街から消すこと**。残すと開発モードに戻ったあとも、
   //   見えない人の前で車が止まり続ける（サーバー側の TTL では 1 秒かかる）
   useEffect(
     () => () => {
@@ -213,9 +207,6 @@ export function Pedestrian() {
       return
     }
 
-    // ★ 既に立っているなら動かさない。乗車地点は自分の現在地なので、
-    //   ここで立たせ直すと「呼んだ瞬間に自分が飛ぶ」ことになる。
-    //   立たせるのはリロード・再マウントで街から消えているときだけ
     if (phase === 'approaching' && !pedestrian.placed) placeAtPickup(taxi, index)
 
     // 停まったタクシーの方へ向き直す。**照準に入らないと [Enter] が効かない**ので、
@@ -337,9 +328,6 @@ export function Pedestrian() {
 
     const blockers = collectBlockers(scratch.blockers, scratch.pose)
 
-    // ★ 立たせるのは**走っている車が見えてから**。道路上だと保証できるのがそれだけで、
-    //   原点に置くと建物の中から始まることがある（画面が真っ白になる）。
-    //   配車の途中でリロードされたときは、待っていた乗車地点へ戻す
     if (!pedestrian.placed) {
       root.visible = false
       reportAway()
@@ -491,10 +479,7 @@ function stopAutoWalk(): void {
   taxiAutopilot.walking = false
 }
 
-/**
- * 配車を自分で回す。**入っていなければ何もしない。**
- * 判断は `store/taxiAutopilot.ts` の純粋関数が持ち、ここは実行だけを担う。
- */
+/** 配車を自分で回す。 */
 function driveAutopilot(blockers: readonly VehicleBlocker[]): void {
   const store = useSimStore.getState()
   if (!store.taxiAutoOn) {

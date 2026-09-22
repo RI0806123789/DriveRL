@@ -41,7 +41,7 @@ console.log('='.repeat(70))
 {
   check('街に立っていなければ何もしない', decideAutoAction(input({ placed: false })) === 'none')
   check('エリアが無ければ何もしない', decideAutoAction(input({ mapReady: false })) === 'none')
-  // ★ 呼べない状態で呼び続けると、断られる message でスマホ画面が埋まる
+  // 呼べない状態で呼び続けると、断られる message でスマホ画面が埋まる
   check(
     '立っていなければ段階を問わず何もしない',
     (['idle', 'approaching', 'waiting', 'riding', 'arrived'] as TaxiPhase[]).every(
@@ -63,7 +63,7 @@ console.log('='.repeat(70))
     IDLE_WAIT_SEC + ' 秒',
   )
 
-  // ★ 迎車の途中では乗らない（到着＝ waiting を待つ）
+  // 迎車の途中では乗らない（到着＝ waiting を待つ）
   check(
     '迎車中（approaching）は照準に入っていても乗らない',
     decideAutoAction(input({ phase: 'approaching', aimed: 3, lastSentAt: 0 })) === 'none',
@@ -77,7 +77,7 @@ console.log('='.repeat(70))
     'waiting で照準に入ったら乗る',
     decideAutoAction(input({ phase: 'waiting', aimed: 3, lastSentAt: 0 })) === 'board',
   )
-  // ★ 別の車を狙っているときに乗ろうとしない（断られ続ける）
+  // 別の車を狙っているときに乗ろうとしない（断られ続ける）
   check(
     '違う車に照準が合っていても乗らない',
     decideAutoAction(input({ phase: 'waiting', aimed: 5, lastSentAt: 0 })) === 'approach',
@@ -115,7 +115,7 @@ function resendCount(phase: TaxiPhase, aimed: number): number {
 }
 
 {
-  // ★ 断られた指令では段階が変わらないので、間隔を空けないと 60fps で送り続ける
+  // 断られた指令では段階が変わらないので、間隔を空けないと 60fps で送り続ける
   //   （スマホ画面が「いまは乗車できません」で埋まる）
   const calls = resendCount('idle', -1)
   check(
@@ -241,7 +241,7 @@ console.log('='.repeat(70))
     best >= TRIP_MIN_M,
     '最短 ' + best.toFixed(0) + 'm（下限 ' + TRIP_MIN_M + 'm）',
   )
-  // ★ 金沢は 12.3km 四方あるので、上限を外すと経路が作れない点ばかり引く
+  // 金沢は 12.3km 四方あるので、上限を外すと経路が作れない点ばかり引く
   check(
     '行き先は遠すぎない',
     worst <= TRIP_MAX_M,
@@ -268,7 +268,7 @@ console.log('='.repeat(70))
   resetTaxiAutopilot(500)
   check('時計を入れ直す', taxiAutopilot.lastSentAt === 500)
   check('段階の記憶を戻す', taxiAutopilot.lastPhase === 'idle')
-  // ★ 足を止めないと、切ったあとも前進キーが押しっぱなしになる
+  // 足を止めないと、切ったあとも前進キーが押しっぱなしになる
   check('足を止める', taxiAutopilot.walking === false)
   check(
     '入った直後はすぐ呼ばない',

@@ -3,18 +3,7 @@
 import * as THREE from 'three'
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 
-/**
- * 車両ローカル座標は **+X が前方・+Y が上・+Z が右**。
- * 右が +Z なのは `composeVehicleMatrix` が ENU の方位をそのまま three の Y 回転に
- * 入れており、three の z が ENU の -y だから（`cameraMath.DRIVER_RIGHT` も +Z 側）。
- * 日本車なので運転席は +Z 側に置く。
- *
- * ★ **運転席から前を見たときも、画面の右は +Z のまま。**
- * ここを「運転者から見ると +Z は左」と取り違えて、メーターの針を逆回りにし、
- * ウインカーの矢印を左右あべこべに置いた。
- * `verify:vehicles` は実際の運転席カメラへ投影して左右を決めており、
- * **思い込みを書かないこと**（`screenX()`）。
- */
+/** 車両ローカル座標は **+X が前方・+Y が上・+Z が右**。 */
 
 /** 外接寸法 [m]。**backend の `config.VEHICLE_*` と揃える。ここを越える部品を作らない** */
 export const VEHICLE_LENGTH = 4.4
@@ -27,12 +16,7 @@ const HALF_W = VEHICLE_WIDTH / 2
 /** 車輪の半径 [m]。転がり角の計算にも使う */
 export const WHEEL_RADIUS = 0.34
 
-/**
- * 各ジオメトリの外接箱の中心（車両ローカル）。**手で決めた値ではなく実測値**で、
- * `npm run verify:vehicles` が形を変えたときに気づくための控えとして置いてある。
- * ★ `Z` が 0 でなくなったら、左右非対称な部品が混ざった合図
- * （`mirrored()` に片側へ寄った形を渡すと起きる）。
- */
+/** 各ジオメトリの外接箱の中心（車両ローカル）。 */
 export const BODY_OFFSET: readonly [number, number, number] = [0, 0.815, 0]
 /** ボンネット先端の飾りの中心 */
 export const NOSE_OFFSET: readonly [number, number, number] = [1.94, 0.975, 0]
@@ -63,13 +47,7 @@ const BELT_Y = 0.98
 /** 外板の厚み（片側）[m]。車体を中空にするときの壁の厚さ */
 const BODY_SKIN = 0.06
 
-/**
- * 部品どうしを重ねるときの食い込み量 [m]。
- * ★ **面をぴったり合わせないこと。** 同じ深度に 2 つの面が来ると、どちらが手前か
- * 決まらず**フレームごとに色が入れ替わって点滅する**（Z ファイティング）。
- * 内装と外板、ダッシュボードとバルクヘッドなど、隣り合う部品はこの量だけ
- * 食い込ませて、境目の面が重ならないようにする。
- */
+/** 部品どうしを重ねるときの食い込み量 [m]。 */
 const OVERLAP = 0.04
 
 /** フロントガラスの下端・上端の X。寝かせるほど差が開く */
@@ -89,12 +67,7 @@ function box(
   return g
 }
 
-/**
- * 左右対称に 2 つ置く。`z` は右側（+Z）の値。
- * ★ **`make` は `z` を中心とした左右対称な形を返すこと。** 片側へ寄った形
- * （例: `z - 0.03` 〜 `z + 0.12`）を渡すと、符号を変えただけでは鏡像にならず、
- * 車体が左右非対称になる（重心の Z がずれるので verify が捕まえる）。
- */
+/** 左右対称に 2 つ置く。 */
 function mirrored(
   make: (z: number) => THREE.BufferGeometry,
   z: number,
@@ -102,10 +75,7 @@ function mirrored(
   return [make(z), make(-z)]
 }
 
-/**
- * 2 点を結ぶ板（ガラス・ピラーに使う）。XY 平面での傾きを持ち、Z 方向へ幅を持つ。
- * `thickness` は板の厚み。
- */
+/** 2 点を結ぶ板（ガラス・ピラーに使う）。 */
 function slab(
   from: readonly [number, number],
   to: readonly [number, number],
@@ -122,15 +92,9 @@ function slab(
   return g
 }
 
-/**
- * 車体（塗装される外板）。ロッカー・ドア・ボンネット・トランク・ルーフ・ピラー・
- * ドアミラーを 1 つへまとめる。**instancedMesh を部品ごとに増やさないため。**
- */
+/** 車体（塗装される外板）。 */
 export function makeBodyGeometry(): THREE.BufferGeometry {
   const parts: THREE.BufferGeometry[] = [
-    // ★ 車体は**中空の殻**にすること。中身の詰まった箱で作ると、その上面が
-    //   運転席の目の 0.24m 下に広がり、**室内の下半分を覆って何も見えなくなる**
-    //   （ハンドルの上端しか映らなかった原因がこれ）。外から見た形は変わらない。
     // 左右の側面（サイドシル〜ベルトライン）
     ...mirrored(
       (z) => box([-HALF_L + 0.06, 0.2, z - BODY_SKIN], [HALF_L - 0.06, BELT_Y, z + BODY_SKIN]),
@@ -149,7 +113,7 @@ export function makeBodyGeometry(): THREE.BufferGeometry {
     // ルーフ
     box([BACKLIGHT_TOP_X, ROOF_Y - 0.06, -0.8], [WINDSHIELD_TOP_X, ROOF_Y, 0.8]),
     // A ピラー（フロントガラスの左右端）。
-    // ★ 傾いた板は回転のぶん角が伸びるので、上端をルーフより下げておく
+    // 傾いた板は回転のぶん角が伸びるので、上端をルーフより下げておく
     ...mirrored(
       (z) =>
         slab(
@@ -199,10 +163,7 @@ export function makeCabinGeometry(): THREE.BufferGeometry {
   return box([BACKLIGHT_TOP_X, BELT_Y, -0.8], [WINDSHIELD_TOP_X, ROOF_Y, 0.8])
 }
 
-/**
- * 窓ガラス。フロント・リア・サイド 4 枚をまとめる。
- * **半透明で描くので、車体とは別の instancedMesh にすること。**
- */
+/** 窓ガラス。 */
 export function makeGlassGeometry(): THREE.BufferGeometry {
   const parts: THREE.BufferGeometry[] = [
     // フロントガラス
@@ -227,26 +188,14 @@ export function makeGlassGeometry(): THREE.BufferGeometry {
 
 /** ダッシュボード上面の高さ [m]。メーターとハンドルの位置はここから決める */
 const DASH_TOP_Y = 1.02
-/**
- * ダッシュボードの前端・後端 [m]。
- * ★ **後端をアイポイント（`cameraMath.DRIVER_FORWARD` = 0.35m）へ近づけすぎないこと。**
- * 近いほど運転席視点の下半分が壁で埋まる。実車は目からダッシュボードまで 0.5m 以上
- * 空いている（最初 0.52m に置いたら、目の 0.17m 先に壁が立って前が見えなくなった）。
- */
+/** ダッシュボードの前端・後端 [m]。 */
 const DASH_FRONT_X = 1.16
 export const DASH_REAR_X = 0.86
 
-/**
- * 前席を車両中心からどれだけ前に置くか [m]。
- * アイポイントは座面の少し前・上にあるので、**座席もそこへ合わせる**
- * （合わせないと運転者が後席に座っていることになる）。
- */
+/** 前席を車両中心からどれだけ前に置くか [m]。 */
 const FRONT_SEAT_X = 0.25
 
-/**
- * 内装の動かない部分（フロア・ダッシュボード・センターコンソール・シート・
- * ドアトリム・メーターの文字盤）。
- */
+/** 内装の動かない部分（フロア・ダッシュボード・センターコンソール・シート・ ドアトリム・メーターの文字盤）。 */
 export function makeInteriorGeometry(): THREE.BufferGeometry {
   const seat = (z: number, at: number): THREE.BufferGeometry[] => [
     // 座面（フロアへ食い込ませる。浮かせると面が一致して点滅する）
@@ -258,23 +207,17 @@ export function makeInteriorGeometry(): THREE.BufferGeometry {
   ]
 
   const parts: THREE.BufferGeometry[] = [
-    // ★ ここから下は**どの 2 つも面が一致しないように**置いてある。
-    //   合わせると境目が点滅する（Z ファイティング）。隣り合うものは OVERLAP ぶん
-    //   食い込ませ、内部に隠れた面が深度を奪い合わないようにする。
     // フロア。側壁と後ろの壁へ食い込ませる。
-    // ★ Z を外板の内面（0.78）に合わせないこと
+    // Z を外板の内面（0.78）に合わせないこと
     box([-1.74, FLOOR_Y - 0.04, -0.79], [DASH_FRONT_X + 0.02, FLOOR_Y, 0.79]),
     // ダッシュボード
     box([DASH_REAR_X, 0.7, -0.74], [DASH_FRONT_X, DASH_TOP_Y, 0.74]),
-    // ★ 前方の隔壁（バルクヘッド）。**これが無いと運転席から背景が透ける。**
-    //   外板は裏面が描かれないので、車内は内装だけで閉じておく必要がある。
-    //   ダッシュボードの中で終わらせて、上面と前面を一致させない
     box([DASH_FRONT_X - OVERLAP, FLOOR_Y - 0.08, -0.74], [DASH_FRONT_X + 0.06, DASH_TOP_Y - 0.05, 0.74]),
-    // ★ メーターの庇（フード）は**置かない**。目からメーターへの視線は
+    // メーターの庇（フード）は**置かない**。目からメーターへの視線は
     //   ダッシュボード上面のすぐ下を通るので、庇を立てるとそれ自体が視線を塞ぐ
     // センターコンソール（フロアへ食い込ませる）
     box([-0.35, FLOOR_Y - 0.02, -0.14], [0.5, 0.62, 0.14]),
-    // ★ 車内の側壁（ドア内張り）。**外板の内側へ食い込ませること。**
+    // 車内の側壁（ドア内張り）。**外板の内側へ食い込ませること。**
     //   外板と同じ Z に面を置くと、ドア一面が点滅する（実際にそうなった）
     ...mirrored(
       (z) =>
@@ -301,23 +244,14 @@ export function makeInteriorGeometry(): THREE.BufferGeometry {
   return merged
 }
 
-/**
- * メーターの種類。**並びは文字盤アトラスの段と同じ**（`gaugeTexture.ts`）。
- * EV なので回転計は持たず、出力と回生を 1 本の針で示すパワーメーターにする。
- */
+/** メーターの種類。 */
 export const GAUGE_KINDS = ['speed', 'power'] as const
 export type GaugeKind = (typeof GAUGE_KINDS)[number]
 
 /** 速度計の目盛りの上限 [km/h]。`maxSpeed` の設定上限（40 m/s = 144 km/h）を覆う */
 export const GAUGE_SPEED_MAX_KMH = 160
 
-/**
- * 文字盤アトラスの何段目を貼るかを、テクスチャ座標 v の段へ写す。
- * ★ **Canvas は上から順に描くが、v は下から数える**（`plateUvRow` と同じ罠）。
- * 素通しにすると速度計の枠に**パワーメーターの絵**が貼られ、針だけが速度で動く。
- * 停車中でもパワーメーターの針は中央（真上）を指すので、
- * **速度計が常に 80km/h を指しているように見える**という形で表に出た。
- */
+/** 文字盤アトラスの何段目を貼るかを、テクスチャ座標 v の段へ写す。 */
 export function gaugeUvRow(kindIndex: number, rows: number): number {
   return Math.max(0, rows - 1 - kindIndex)
 }
@@ -345,32 +279,19 @@ export function speedRatio(speedMps: number): number {
   return Math.max(0, Math.min(1, (speedMps * 3.6) / GAUGE_SPEED_MAX_KMH))
 }
 
-/**
- * 加速指令 -1..1 をパワーメーターの割合 0..1 へ。**0.5 が中央（出力も回生もゼロ）**。
- * 負が回生（CHARGE）、正が出力（POWER）で、`frame.vehicles[].throttle` をそのまま使う。
- */
+/** 加速指令 -1..1 をパワーメーターの割合 0..1 へ。 */
 export function powerRatio(throttle: number): number {
   return Math.max(0, Math.min(1, (throttle + 1) / 2))
 }
 
-/**
- * メーターの文字盤。法線を車両後方（運転者の側）へ向ける。
- * ★ **`rotateY` の前に UV を決めておくこと。** 回してから貼ると、文字盤の
- * 上下左右が入れ替わって目盛りと針がずれる。
- */
+/** メーターの文字盤。 */
 export function makeGaugeFaceGeometry(radius: number): THREE.BufferGeometry {
   const g = new THREE.CircleGeometry(radius, 48)
   g.rotateY(-Math.PI / 2)
   return g
 }
 
-/**
- * ウインカーのインジケーター。**2 つのメーターの間の上部**に、左右へ開いて並べる。
- * `side` は `frame.vehicles[].turnSignal` の符号に対応する（-1 が左）。
- * ★ **文字盤の円と重ならない高さに置くこと。** メーターは半径 75mm で上端が
- * ダッシュボード上面のすぐ下まで来るので、間の上部は隙間が狭い。
- * ここはハンドルのリングの内側だが、**スポークを下・左・右にしてあるので上は空いている**。
- */
+/** ウインカーのインジケーター。 */
 export const TURN_INDICATOR_SLOTS: ReadonlyArray<{
   readonly center: readonly [number, number, number]
   readonly side: -1 | 1
@@ -382,10 +303,7 @@ export const TURN_INDICATOR_SLOTS: ReadonlyArray<{
 /** インジケーターの大きさ [m]（三角形の高さ） */
 export const TURN_INDICATOR_SIZE = 0.017
 
-/**
- * ウインカーの矢印 1 個。平面 X=0 の上に、**+Z（運転者から見て右）を指す**三角形を作る。
- * 左側は行列側で X 軸まわりに反転させる。
- */
+/** ウインカーの矢印 1 個。 */
 export function makeTurnIndicatorGeometry(size: number): THREE.BufferGeometry {
   const g = new THREE.BufferGeometry()
   g.setAttribute(
@@ -404,20 +322,14 @@ export function makeTurnIndicatorGeometry(size: number): THREE.BufferGeometry {
   return g
 }
 
-/**
- * カーナビの画面（インパネ中央）。**運転席から見てハンドルのリムの外**に来る位置。
- * 中央（Z=0）なので運転席（Z=+0.36）からは右寄りに見える。
- */
+/** カーナビの画面（インパネ中央）。 */
 export const NAV_SCREEN = {
   center: [DASH_REAR_X - 0.01, 0.86, 0] as readonly [number, number, number],
   width: 0.19,
   height: 0.12,
 } as const
 
-/**
- * ナビが見せる範囲の幅 [m]。**停車で寄り、速度が上がるほど引く。**
- * 速い車ほど先を見せたいので、実車のナビと同じ振る舞いにしてある。
- */
+/** ナビが見せる範囲の幅 [m]。 */
 export const NAV_SPAN_MIN_M = 80
 export const NAV_SPAN_MAX_M = 320
 
@@ -436,13 +348,7 @@ export function makeNavScreenGeometry(width: number, height: number): THREE.Buff
 
 /** ステアリングコラムの傾き [rad]（前下がり）。ハンドル面はこれに垂直 */
 export const COLUMN_TILT = 0.42
-/**
- * ハンドルの中心。
- * ★ **低く置きすぎると運転席視点の画角から外れて見えなくなる。**
- * 運転席カメラの垂直画角は約 41 度（`DRIVER_FOV_DEG` 68 度を横長の画面で割ったもの）で、
- * その半分より下に外れると映らない。最初 `DASH_TOP_Y - 0.18` に置いたら
- * 目から 43 度下になり、ハンドルが一度も映らなかった。
- */
+/** ハンドルの中心。 */
 export const STEERING_CENTER: readonly [number, number, number] = [
   DASH_REAR_X - 0.06,
   DASH_TOP_Y - 0.14,
@@ -450,23 +356,16 @@ export const STEERING_CENTER: readonly [number, number, number] = [
 ]
 /** ハンドルの外径 [m]（実車の 370mm 級） */
 export const STEERING_RADIUS = 0.185
-/**
- * 舵角 [rad] からハンドルの回転角 [rad] を出す比。
- * 実車のステアリングギア比（最大舵角 0.55rad でおよそ 1.5 回転）に合わせる。
- */
+/** 舵角 [rad] からハンドルの回転角 [rad] を出す比。 */
 export const STEERING_RATIO = 17.0
 
-/**
- * ハンドル（リム・スポーク 3 本・ハブ）。
- * **軸を +X（車両前方）に向けて作る。** 傾きは行列側で掛けるので、
- * ここで傾けると二重に傾く。
- */
+/** ハンドル（リム・スポーク 3 本・ハブ）。 */
 export function makeSteeringGeometry(): THREE.BufferGeometry {
   const rim = new THREE.TorusGeometry(STEERING_RADIUS, 0.018, 8, 28)
   rim.rotateY(Math.PI / 2)
 
   const parts: THREE.BufferGeometry[] = [rim]
-  // ★ スポークは**下・左・右の 3 本**にして、上を空けること。
+  // スポークは**下・左・右の 3 本**にして、上を空けること。
   //   上に 1 本かかると、リングの中から覗くメーターをちょうど隠す
   for (const angle of [0, Math.PI / 2, -Math.PI / 2]) {
     const spoke = new THREE.BoxGeometry(0.02, STEERING_RADIUS * 0.82, 0.035)
@@ -505,24 +404,14 @@ export function makePedalGeometry(): THREE.BufferGeometry {
   return g
 }
 
-/**
- * メーターの針。**根元が原点**で、文字盤の面に沿って伸びる。
- * 文字盤に目盛りを焼く前は、幅 6mm だと暗い車内で判別できず 12mm まで太らせていた。
- * 目盛り入りの明るい文字盤になってコントラストが付いたので、実車に近い 1.7mm まで
- * 細くしてある。**これ以上細くすると、0.57m 先では 1 画素を割って消える。**
- */
+/** メーターの針。 */
 export function makeNeedleGeometry(radius: number): THREE.BufferGeometry {
   const g = new THREE.BoxGeometry(0.0017, radius * 0.86, 0.0023)
   g.translate(0, (radius * 0.86) / 2, 0)
   return g
 }
 
-/**
- * 針が振れる範囲 [rad]。**運転者から見て左下から右下へ（時計回りに）**回る。
- * ★ 針は X 軸まわりに角度 θ で回り、針先は `(0, L·cosθ, L·sinθ)`。
- * **運転者から見て +Z は右**なので θ が増えるほど右へ回る。つまり
- * **開始が負・振れ幅が正**で時計回り。逆にすると、速度が上がるほど針が左へ動く。
- */
+/** 針が振れる範囲 [rad]。 */
 export const NEEDLE_START = -2.2
 export const NEEDLE_SWEEP = 4.4
 
@@ -531,20 +420,17 @@ const WHEEL_WIDTH = 0.24
 /** ホイール（リム）の半径 [m]。タイヤの内側に見える金属部分 */
 const RIM_RADIUS = WHEEL_RADIUS * 0.62
 
-/**
- * 車輪。シリンダーの軸（+Y）を車体左右方向（+Z）へ向ける。
- * タイヤ・リム・スポークを 1 つへまとめる（部品ごとに instancedMesh を増やさない）。
- */
+/** 車輪。 */
 export function makeWheelGeometry(): THREE.BufferGeometry {
   const tyre = new THREE.CylinderGeometry(WHEEL_RADIUS, WHEEL_RADIUS, WHEEL_WIDTH, 18)
   const parts: THREE.BufferGeometry[] = [tyre]
 
-  // ★ リムとスポークは**タイヤの幅の中へ収める**。はみ出すと車輪が太くなり、
+  // リムとスポークは**タイヤの幅の中へ収める**。はみ出すと車輪が太くなり、
   //   外接寸法の検証が落ちる（見た目にもタイヤから金属が飛び出す）
   const rim = new THREE.CylinderGeometry(RIM_RADIUS, RIM_RADIUS, WHEEL_WIDTH * 0.92, 16)
   parts.push(rim)
 
-  // ★ スポークは**円盤の面（XZ 平面）**に並べること。CylinderGeometry の軸は Y なので、
+  // スポークは**円盤の面（XZ 平面）**に並べること。CylinderGeometry の軸は Y なので、
   //   XY 平面で放射状にすると、軸を寝かせたときに車輪の幅方向へ広がる
   for (let i = 0; i < 5; i++) {
     const spoke = new THREE.BoxGeometry(RIM_RADIUS * 0.9, WHEEL_WIDTH * 0.6, 0.035)
@@ -700,11 +586,7 @@ export function steeringAngle(steer: number): number {
   return steer * STEERING_RATIO
 }
 
-/**
- * ハンドルのワールド行列。
- * **コラムの傾きと、軸まわりの回転を分けて掛けること。** ジオメトリ側を傾けると、
- * 回転軸まで一緒に傾いて「斜めに首を振る」動きになる。
- */
+/** ハンドルのワールド行列。 */
 export function composeSteeringMatrix(
   scratch: TransformScratch,
   base: THREE.Matrix4,
@@ -760,7 +642,7 @@ export function composeNeedleMatrix(
 ): THREE.Matrix4 {
   const spec = GAUGE_SLOTS[index]
   const n = scratch.part
-  // ★ 針は文字盤の**手前**（目に近い側 = X が小さいほう）へ置くこと。
+  // 針は文字盤の**手前**（目に近い側 = X が小さいほう）へ置くこと。
   //   奥へ置くと文字盤に隠れる（+0.006 にしていて見えにくかった）
   n.position.set(spec.center[0] - 0.008, spec.center[1], spec.center[2])
   n.rotation.set(needleAngle(ratio), 0, 0)

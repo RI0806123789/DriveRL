@@ -93,19 +93,27 @@ const MOCK_PRESETS: MapPreset[] = [
     radiusM: 400,
   },
   {
+    id: 'umeda',
+    name: '大阪・梅田',
+    description: '阪急とJRの大阪駅に隣接する、大通りと商業ビルが集中する梅田',
+    centerLat: 34.7025,
+    centerLon: 135.4959,
+    radiusM: 400,
+  },
+  {
+    id: 'sakae',
+    name: '名古屋・栄',
+    description: '久屋大通と広小路通が交わる、碁盤の目状の街路が広がる名古屋・栄',
+    centerLat: 35.1681,
+    centerLon: 136.9083,
+    radiusM: 400,
+  },
+  {
     id: 'kanazawa',
     name: '石川・金沢（モックは縮小版）',
     description: '香林坊付近を模した合成マップ。実サーバーは市街地全域（12km 四方）',
     centerLat: 36.5606,
     centerLon: 136.6555,
-    radiusM: 400,
-  },
-  {
-    id: 'nonoichi',
-    name: '野々市・扇が丘',
-    description: '住宅と大学が混在する低層エリア',
-    centerLat: 36.5301,
-    centerLon: 136.6266,
     radiusM: 400,
   },
 ]
@@ -832,6 +840,10 @@ class MockServer {
     this.updates += 1
     const p = this.progress
     const noise = () => (this.rng() - 0.5) * 2
+    const collisions = Math.max(0, 0.55 * (1 - p) + noise() * 0.03)
+    // 歩行者との衝突は衝突率の一部。**別の式で出さないこと** — 独立に揺らすと
+    // 「衝突 0% / うち歩行者 1%」という、実サーバーでは起こりえない表示になる
+    const pedestrianShare = Math.min(1, Math.max(0, 0.33 + noise() * 0.05))
     const metrics: MetricsMessage = {
       type: 'metrics',
       tick: this.tick,
@@ -844,9 +856,8 @@ class MockServer {
       valueLoss: Math.max(0.01, 1.4 * (1 - p * 0.9) + Math.abs(noise()) * 0.08),
       entropy: Math.max(0.05, 1.35 - 0.85 * p + noise() * 0.03),
       approxKl: Math.max(0.0002, 0.014 * (1 - p * 0.6) + Math.abs(noise()) * 0.002),
-      collisionRate: Math.max(0, 0.55 * (1 - p) + noise() * 0.03),
-      // 学習が進むほど歩行者を轢かなくなる。衝突率の一部なので必ずそれ以下にする
-      pedestrianCollisionRate: Math.max(0, 0.18 * (1 - p) + noise() * 0.01),
+      collisionRate: collisions,
+      pedestrianCollisionRate: collisions * pedestrianShare,
       goalRate: Math.max(0, Math.min(1, 0.05 + 0.85 * p + noise() * 0.04)),
       stepsPerSec: SIM_HZ * this.params.simSpeed + noise() * 0.4,
       signalViolations: 0,
@@ -1009,10 +1020,7 @@ class MockServer {
     p.ty = ny
   }
 
-  /**
-   * どの車からも遠い歩行者を車の近くへ回す（実サーバーの `PedestrianCrowd.recycle`）。
-   * これが無いと、格子全体に散った人がいつまでも画に入らない。
-   */
+  /** どの車からも遠い歩行者を車の近くへ回す（実サーバーの `PedestrianCrowd.recycle`）。 */
   private recyclePedestrians(): void {
     const cars = this.vehicles.filter((v) => v.active)
     if (!cars.length) return
@@ -1072,10 +1080,7 @@ class MockServer {
     }
   }
 
-  /**
-   * 次の交差点で曲がるなら方向指示器を出す。-1=左 / 0=消灯 / +1=右。
-   * **モックの簡易判定**で、格子の目的地が横にずれていれば曲がるものとして扱う。
-   */
+  /** 次の交差点で曲がるなら方向指示器を出す。 */
   private turnSignalFor(v: MockVehicle): number {
     const rest = Math.hypot(nodeX(v.tx) - v.x, nodeY(v.ty) - v.y)
     if (rest > TURN_LOOKAHEAD_M) return 0
@@ -1137,9 +1142,6 @@ class MockServer {
     }
 
     // 実機と同じく「指令が減速側か」で決める（実測の加速度では見ない）。
-    // ★ ペダルの踏み込みも**同じ指令から**出す（別々にするとランプと足が食い違う）。
-    //   徒歩キャラで絞ったあとの `targetSpeed` を見るので、**人の前で止まるときも
-    //   ブレーキペダルが踏まれる**
     const demand = targetSpeed - v.speed
     v.throttle = Math.max(-1, Math.min(1, demand / 3))
     v.braking = targetSpeed < v.speed - 0.2
@@ -1281,6 +1283,7 @@ class MockServer {
     }
 
     for (const v of this.vehicles) this.stepVehicle(v, dt)
+    this.applyQueueing()
     for (const p of this.pedestrians) this.stepPedestrian(p, dt)
     if (this.tick % Math.round(SIM_HZ * 2) === 0) this.recyclePedestrians()
     this.detectCollisions()

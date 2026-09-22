@@ -50,7 +50,7 @@ export function Slider({
 
   // 同じ値を二度送らない。ただし**外から値が変わったら忘れる**
   // （サーバーが丸めた後に元の値へ戻す操作を落とさないため。code_review U-07 / E-09）。
-  // ★ ドラッグ中の onChange による value の変化で忘れてはいけないので、
+  // ドラッグ中の onChange による value の変化で忘れてはいけないので、
   //   「自分が最後に送った値」と違う値が外から来たときだけ無効化する
   const committed = useRef<number | null>(value)
   const lastSeen = useRef(value)

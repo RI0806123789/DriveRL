@@ -94,15 +94,17 @@ export function limbSwing(stride: number, intensity: number): LimbSwing {
   }
 }
 
-/**
- * NPC の服の色を散らす色相のずれ 0.0〜1.0。
- * 黄金角で回すので、隣り合うスロット番号でも色が似ない。
- */
+/** NPC の服の色を散らす色相のずれ 0.0〜1.0。 */
 export function npcHueOffset(id: number): number {
   return (id * 0.6180339887498949) % 1
 }
 
 /** 関節 1 つぶんの振り角を `LIMB_SWING` から引く */
+/** その関節を描く腕／脚インスタンスの列（0=左 / 1=右）。並び順に依存しない */
+export function limbSlot(index: number): number {
+  return LIMB_JOINTS[index].side < 0 ? 0 : 1
+}
+
 export function swingFor(index: number, swing: LimbSwing): number {
   const joint = LIMB_JOINTS[index]
   if (joint.kind === 'arm') return joint.side < 0 ? swing.armLeft : swing.armRight

@@ -33,34 +33,17 @@ export function startRipple(e: PointerLike): void {
   restartAnimation(el, 'is-rippling')
 }
 
-/** CSS アニメーションを頭から再生し直す（押した瞬間だけの演出用）。
- *
- * `void el.offsetWidth` は同期レイアウトを強制するが、これを呼ぶのは
- * `startRipple`（pointerdown のときだけ）なので 1 回ぶんは無視できる。
- * **毎フレーム・毎秒のように繰り返し呼ぶ経路からは使わないこと**
- * （`ValueFlash` 用には `restartValueFlash()` がある）。
- */
+/** CSS アニメーションを頭から再生し直す（押した瞬間だけの演出用）。 */
 export function restartAnimation(el: HTMLElement, className: string): void {
   el.classList.remove(className)
   void el.offsetWidth
   el.classList.add(className)
 }
 
-/** `.m3-valueflash.is-flash` が流すアニメーション名。**出典は global.css。**
- * ここを増減させたら CSS 側も直すこと（名前だけの重複なので、ずれても
- * 「光らなくなる」という見える形で出る）。 */
+/** `.m3-valueflash.is-flash` が流すアニメーション名。 */
 const VALUE_FLASH_ANIMATIONS = new Set(['m3-value-up', 'm3-value-down', 'm3-value-flat'])
 
-/** 数字の入れ替え演出を頭から流し直す。**毎秒のメトリクス更新ごとに呼ばれる。**
- *
- * ★ `restartAnimation()` を使わないこと。`ValueFlash` はパネル 1 枚に 9 個あり、
- * メトリクスは毎秒届くので、`void el.offsetWidth` だと毎秒 10〜15 回の強制リフローを
- * 3D と同じメインスレッドで踏む。
- * ★ クラスを外して `requestAnimationFrame` で付け直す形にもしないこと。
- * **タブが前面でないと rAF は回らないので、クラスが外れたまま戻らない。**
- * ★ 走っているアニメーションを名前で選ぶこと。`el.getAnimations()` はその要素の
- * アニメーションを全部返すので、名前を見ないと無関係なものまで巻き戻す。
- */
+/** 数字の入れ替え演出を頭から流し直す。 */
 export function restartValueFlash(el: HTMLElement, className: string): void {
   el.classList.add(className)
   for (const animation of el.getAnimations()) {

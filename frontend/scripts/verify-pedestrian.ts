@@ -19,7 +19,6 @@ import {
   makeLegGeometry,
   makeTorsoGeometry,
   npcHueOffset,
-  swingFor,
 } from '../src/scene/pedestrianGeometry.ts'
 import {
   TELEPORT_DISTANCE_M,
@@ -293,7 +292,7 @@ function npc(over: Partial<NpcPedestrianState>): NpcPedestrianState {
     `(${pose.x.toFixed(2)}, ${pose.y.toFixed(2)})`,
   )
 
-  // ★ 見えない場所の歩行者は車の近くへ回される（protocol.md 2.3）。
+  // 見えない場所の歩行者は車の近くへ回される（protocol.md 2.3）。
   //   跳んだ先まで線を引くと、街を横切る人が見える
   const jump = TELEPORT_DISTANCE_M + 5
   samplePedestrian(npc({ x: jump }), npc({ x: 0 }), 0.5, pose)

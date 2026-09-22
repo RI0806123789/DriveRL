@@ -56,6 +56,51 @@ console.log('='.repeat(70))
 }
 
 console.log('')
+console.log('歩行者用信号: 金沢の規模での組み立て（マップを読むたびに走る）')
+{
+  // 金沢は車両信号が 2,736 基あり、歩行者用はその 2 倍の灯器が立つ。
+  // **部品ごとに BufferGeometry を作って merge すると 269ms かかる**ので、
+  // 位置と向きだけ作って instancedMesh の行列に書くこと（実測 8.5ms）
+  const KANAZAWA_SIGNALS = 2736
+  const FRAME_MS = 1000 / 60
+
+  const many: Parameters<typeof buildPedestrianSignalPlacement>[0] = []
+  for (let i = 0; i < KANAZAWA_SIGNALS; i++) {
+    many.push({
+      nodeId: i,
+      x: (i % 120) * 90,
+      y: Math.floor(i / 120) * 90,
+      heading: (i % 4) * (Math.PI / 2),
+      roadWidth: 9.75,
+    })
+  }
+
+  let best = Infinity
+  let built = { placements: [] as unknown[], lamps: [] as unknown[] }
+  for (let i = 0; i < 3; i++) {
+    const t0 = performance.now()
+    built = buildPedestrianSignalPlacement(many) as typeof built
+    best = Math.min(best, performance.now() - t0)
+  }
+
+  check(
+    '灯器は車両信号の 2 基ぶん（横断歩道の両端）',
+    built.placements.length === KANAZAWA_SIGNALS * 2,
+    `${built.placements.length} 基`,
+  )
+  check(
+    '灯火は灯器 1 基につき 2 灯',
+    built.lamps.length === KANAZAWA_SIGNALS * 4,
+    `${built.lamps.length} 灯`,
+  )
+  check(
+    `組み立ては 60fps の 1 フレーム（${FRAME_MS.toFixed(1)}ms）以内`,
+    best < FRAME_MS,
+    `${best.toFixed(1)}ms`,
+  )
+}
+
+console.log('')
 console.log('='.repeat(70))
 console.log('2. 灯器が進入車両に正対しているか（4 方位で確認）')
 console.log('='.repeat(70))
@@ -121,6 +166,51 @@ for (const [name, heading] of HEADINGS) {
 }
 
 console.log('')
+console.log('歩行者用信号: 金沢の規模での組み立て（マップを読むたびに走る）')
+{
+  // 金沢は車両信号が 2,736 基あり、歩行者用はその 2 倍の灯器が立つ。
+  // **部品ごとに BufferGeometry を作って merge すると 269ms かかる**ので、
+  // 位置と向きだけ作って instancedMesh の行列に書くこと（実測 8.5ms）
+  const KANAZAWA_SIGNALS = 2736
+  const FRAME_MS = 1000 / 60
+
+  const many: Parameters<typeof buildPedestrianSignalPlacement>[0] = []
+  for (let i = 0; i < KANAZAWA_SIGNALS; i++) {
+    many.push({
+      nodeId: i,
+      x: (i % 120) * 90,
+      y: Math.floor(i / 120) * 90,
+      heading: (i % 4) * (Math.PI / 2),
+      roadWidth: 9.75,
+    })
+  }
+
+  let best = Infinity
+  let built = { placements: [] as unknown[], lamps: [] as unknown[] }
+  for (let i = 0; i < 3; i++) {
+    const t0 = performance.now()
+    built = buildPedestrianSignalPlacement(many) as typeof built
+    best = Math.min(best, performance.now() - t0)
+  }
+
+  check(
+    '灯器は車両信号の 2 基ぶん（横断歩道の両端）',
+    built.placements.length === KANAZAWA_SIGNALS * 2,
+    `${built.placements.length} 基`,
+  )
+  check(
+    '灯火は灯器 1 基につき 2 灯',
+    built.lamps.length === KANAZAWA_SIGNALS * 4,
+    `${built.lamps.length} 灯`,
+  )
+  check(
+    `組み立ては 60fps の 1 フレーム（${FRAME_MS.toFixed(1)}ms）以内`,
+    best < FRAME_MS,
+    `${best.toFixed(1)}ms`,
+  )
+}
+
+console.log('')
 console.log('='.repeat(70))
 console.log('3. 灯火の法線が実際に運転者の方を向くか（行列を組んで確認）')
 console.log('='.repeat(70))
@@ -149,13 +239,58 @@ for (const [name, heading] of HEADINGS) {
 }
 
 console.log('')
+console.log('歩行者用信号: 金沢の規模での組み立て（マップを読むたびに走る）')
+{
+  // 金沢は車両信号が 2,736 基あり、歩行者用はその 2 倍の灯器が立つ。
+  // **部品ごとに BufferGeometry を作って merge すると 269ms かかる**ので、
+  // 位置と向きだけ作って instancedMesh の行列に書くこと（実測 8.5ms）
+  const KANAZAWA_SIGNALS = 2736
+  const FRAME_MS = 1000 / 60
+
+  const many: Parameters<typeof buildPedestrianSignalPlacement>[0] = []
+  for (let i = 0; i < KANAZAWA_SIGNALS; i++) {
+    many.push({
+      nodeId: i,
+      x: (i % 120) * 90,
+      y: Math.floor(i / 120) * 90,
+      heading: (i % 4) * (Math.PI / 2),
+      roadWidth: 9.75,
+    })
+  }
+
+  let best = Infinity
+  let built = { placements: [] as unknown[], lamps: [] as unknown[] }
+  for (let i = 0; i < 3; i++) {
+    const t0 = performance.now()
+    built = buildPedestrianSignalPlacement(many) as typeof built
+    best = Math.min(best, performance.now() - t0)
+  }
+
+  check(
+    '灯器は車両信号の 2 基ぶん（横断歩道の両端）',
+    built.placements.length === KANAZAWA_SIGNALS * 2,
+    `${built.placements.length} 基`,
+  )
+  check(
+    '灯火は灯器 1 基につき 2 灯',
+    built.lamps.length === KANAZAWA_SIGNALS * 4,
+    `${built.lamps.length} 灯`,
+  )
+  check(
+    `組み立ては 60fps の 1 フレーム（${FRAME_MS.toFixed(1)}ms）以内`,
+    best < FRAME_MS,
+    `${best.toFixed(1)}ms`,
+  )
+}
+
+console.log('')
 console.log('='.repeat(70))
 console.log('4. 交差点の 4 方向を作っても破綻しないか')
 console.log('='.repeat(70))
 
 {
   const roadWidth = 14
-  const four = HEADINGS.map(([, h], i) => ({
+  const four = HEADINGS.map(([, h]) => ({
     nodeId: 0,
     x: -Math.cos(h) * 10,
     y: -Math.sin(h) * 10,
@@ -189,6 +324,51 @@ console.log('='.repeat(70))
 }
 
 console.log('')
+console.log('歩行者用信号: 金沢の規模での組み立て（マップを読むたびに走る）')
+{
+  // 金沢は車両信号が 2,736 基あり、歩行者用はその 2 倍の灯器が立つ。
+  // **部品ごとに BufferGeometry を作って merge すると 269ms かかる**ので、
+  // 位置と向きだけ作って instancedMesh の行列に書くこと（実測 8.5ms）
+  const KANAZAWA_SIGNALS = 2736
+  const FRAME_MS = 1000 / 60
+
+  const many: Parameters<typeof buildPedestrianSignalPlacement>[0] = []
+  for (let i = 0; i < KANAZAWA_SIGNALS; i++) {
+    many.push({
+      nodeId: i,
+      x: (i % 120) * 90,
+      y: Math.floor(i / 120) * 90,
+      heading: (i % 4) * (Math.PI / 2),
+      roadWidth: 9.75,
+    })
+  }
+
+  let best = Infinity
+  let built = { placements: [] as unknown[], lamps: [] as unknown[] }
+  for (let i = 0; i < 3; i++) {
+    const t0 = performance.now()
+    built = buildPedestrianSignalPlacement(many) as typeof built
+    best = Math.min(best, performance.now() - t0)
+  }
+
+  check(
+    '灯器は車両信号の 2 基ぶん（横断歩道の両端）',
+    built.placements.length === KANAZAWA_SIGNALS * 2,
+    `${built.placements.length} 基`,
+  )
+  check(
+    '灯火は灯器 1 基につき 2 灯',
+    built.lamps.length === KANAZAWA_SIGNALS * 4,
+    `${built.lamps.length} 灯`,
+  )
+  check(
+    `組み立ては 60fps の 1 フレーム（${FRAME_MS.toFixed(1)}ms）以内`,
+    best < FRAME_MS,
+    `${best.toFixed(1)}ms`,
+  )
+}
+
+console.log('')
 console.log('='.repeat(70))
 console.log('歩行者用信号（縦 2 灯・現示は車両信号の裏返し）')
 console.log('='.repeat(70))
@@ -196,7 +376,7 @@ console.log('='.repeat(70))
 {
   // 東を向いて進む車の信号。停止線は原点、道路幅 10m
   const signal = { nodeId: 1, x: 0, y: 0, heading: 0, roadWidth: 10 }
-  const { lamps, placements } = buildPedestrianSignalPlacement([signal], [{ id: 1, x: 0, y: 0 }])
+  const { lamps, placements } = buildPedestrianSignalPlacement([signal])
 
   check('1 基の車両信号に対して灯器が 2 基（横断歩道の両端）', placements.length === 2)
   check('灯器 1 基につき 2 灯（赤・青）', lamps.length === 4)
@@ -213,7 +393,7 @@ console.log('='.repeat(70))
     placements.every((p) => toEnu(p.x, p.z).x > 0),
   )
 
-  // ★ 渡ってくる人に正対すること。道路と同じ向きだと横からしか見えない
+  // 渡ってくる人に正対すること。道路と同じ向きだと横からしか見えない
   for (const p of placements) {
     const enu = toEnu(p.x, p.z)
     // 左側（ENU の +y）に立つ灯器は右（-y 方向）を向く
@@ -242,10 +422,55 @@ console.log('='.repeat(70))
 }
 
 {
-  // ★ 歩行者信号は車両信号の裏返し。ここがずれると、車が走っている横を渡らせてしまう
+  // 歩行者信号は車両信号の裏返し。ここがずれると、車が走っている横を渡らせてしまう
   check('車両が赤なら渡れる', pedestrianWalkable(2))
   check('車両が青なら渡れない', !pedestrianWalkable(0))
   check('車両が黄でも渡れない', !pedestrianWalkable(1))
+}
+
+console.log('')
+console.log('歩行者用信号: 金沢の規模での組み立て（マップを読むたびに走る）')
+{
+  // 金沢は車両信号が 2,736 基あり、歩行者用はその 2 倍の灯器が立つ。
+  // **部品ごとに BufferGeometry を作って merge すると 269ms かかる**ので、
+  // 位置と向きだけ作って instancedMesh の行列に書くこと（実測 8.5ms）
+  const KANAZAWA_SIGNALS = 2736
+  const FRAME_MS = 1000 / 60
+
+  const many: Parameters<typeof buildPedestrianSignalPlacement>[0] = []
+  for (let i = 0; i < KANAZAWA_SIGNALS; i++) {
+    many.push({
+      nodeId: i,
+      x: (i % 120) * 90,
+      y: Math.floor(i / 120) * 90,
+      heading: (i % 4) * (Math.PI / 2),
+      roadWidth: 9.75,
+    })
+  }
+
+  let best = Infinity
+  let built = { placements: [] as unknown[], lamps: [] as unknown[] }
+  for (let i = 0; i < 3; i++) {
+    const t0 = performance.now()
+    built = buildPedestrianSignalPlacement(many) as typeof built
+    best = Math.min(best, performance.now() - t0)
+  }
+
+  check(
+    '灯器は車両信号の 2 基ぶん（横断歩道の両端）',
+    built.placements.length === KANAZAWA_SIGNALS * 2,
+    `${built.placements.length} 基`,
+  )
+  check(
+    '灯火は灯器 1 基につき 2 灯',
+    built.lamps.length === KANAZAWA_SIGNALS * 4,
+    `${built.lamps.length} 灯`,
+  )
+  check(
+    `組み立ては 60fps の 1 フレーム（${FRAME_MS.toFixed(1)}ms）以内`,
+    best < FRAME_MS,
+    `${best.toFixed(1)}ms`,
+  )
 }
 
 console.log('')

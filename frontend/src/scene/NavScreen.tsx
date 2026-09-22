@@ -28,17 +28,11 @@ import {
   navSpanFor,
 } from './vehicleGeometry'
 
-/**
- * 画面の解像度 [px]。**上げすぎないこと** — 描き直しのたびに道路と建物を
- * なぞるので、広いマップ（金沢は 58,120 本）では解像度がそのまま負荷になる。
- */
+/** 画面の解像度 [px]。 */
 const TEX_W = 256
 const TEX_H = 160
 
-/**
- * 描き直す頻度。**60fps で描かないこと**（`TaxiCameraFeed` と同じ理由）。
- * 実車のナビも毎フレーム引き直してはいない。
- */
+/** 描き直す頻度。 */
 const NAV_FPS = 12
 
 /** 見え方が目標へ寄る速さ [1/秒]。加減速で縮尺が跳ねないよう、ゆっくり追う */
@@ -109,7 +103,17 @@ export function NavScreen() {
     mesh.matrix.copy(scratch.out)
     mesh.matrixWorldNeedsUpdate = true
 
-    // ★ 目標の見え方。**縮尺は速度で決める**（加速で引き、減速で寄る）
+    // 車内にしか無いので、運転席から見ていない間は中身を描き直さない（俯瞰・追従
+    // では見えない 256x160 のために、金沢なら道路 58,120 本・建物 35,607 棟を
+    // 12fps でなぞることになる）。車載カメラは運転席視点で撮るので、そちらも見る。
+    // **位置合わせは上で済ませること** — 止めると車だけ動いて画面が取り残される
+    if (store.cameraMode !== 'driver' && !store.taxiCameraOn) {
+      // 次に運転席へ戻ったとき、古い縮尺から寄り直さないよう捨てておく
+      view.current = null
+      return
+    }
+
+    // 目標の見え方。**縮尺は速度で決める**（加速で引き、減速で寄る）
     const span = navSpanFor(pose.speed, Math.max(0.1, store.params.maxSpeed))
     const spanZoom = spanToZoom(map.bounds, TEX_W, TEX_H, span)
     const want: MapView = {

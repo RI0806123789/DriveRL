@@ -131,6 +131,9 @@ class World:
         self.crowd = PedestrianCrowd(map_index, rng)
         #: 実用モードの徒歩キャラ (0, 2) か (1, 2)。**NPC 群衆とは別に持つ**
         self._player_xy = _NO_PLAYER
+        self._player_rev = 0
+        self._people_key: tuple[int, int] | None = None
+        self._people: np.ndarray = _NO_PLAYER
         self.obstacles: list[ObstacleState] = []
         self.slots: list[SlotState] = [SlotState() for _ in range(config.MAX_VEHICLES)]
 
@@ -205,12 +208,7 @@ class World:
         return self._start_clearance(route, exclude) >= SPAWN_CLEARANCE_M2
 
     def _random_route(self, exclude: int = -1) -> np.ndarray | None:
-        """ランダムな出発地・目的地の組から経路を作る。
-
-        ★ 空いている始点が見つからないときは、**いちばん空いている候補**を返すこと。
-        最初に作れた経路をそのまま返すと、他車の真上に湧いて出合い頭の事故になる
-        （金沢のように到達可能な組が少ないマップで起きる）。
-        """
+        """ランダムな出発地・目的地の組から経路を作る。"""
         best: np.ndarray | None = None
         best_clearance = -1.0
         for _ in range(SPAWN_ROUTE_TRIALS):
@@ -289,12 +287,7 @@ class World:
         return float(snap_x), float(snap_y)
 
     def snap_to_road_node(self, x: float, y: float) -> tuple[float, float] | None:
-        """指定座標を最寄りの道路ノードへ寄せる（決定 7）。
-
-        **道路中心線上の任意の点ではなくノードにすること。** 経路はノード間で作るので、
-        区間の途中を目的地にすると「そこを通り過ぎて次の交差点まで行き、折り返して戻る」
-        経路になる。停車は経路の終点で掛けるため、車は目的地の前を減速せず通過する。
-        """
+        """指定座標を最寄りの道路ノードへ寄せる（決定 7）。"""
         if self._node_xy.shape[0] == 0:
             return None
         dx = self._node_xy[:, 0] - np.float32(x)
@@ -303,12 +296,7 @@ class World:
         return float(self._node_xy[i, 0]), float(self._node_xy[i, 1])
 
     def _forward_node(self, x: float, y: float, heading: float) -> int | None:
-        """進行方向の前方にあるノード。
-
-        **背後のノードを選ぶと逆走経路になり、真横や足元のノードを選ぶと
-        経路がその場から直角に始まる。** 後者は車が曲がりきれずに膨らみ、
-        対向車線や建物へ出て事故になる（旋回半径は最大舵角でも 4.4m ある）。
-        """
+        """進行方向の前方にあるノード。"""
         if self._node_xy.shape[0] == 0:
             return None
         dx = self._node_xy[:, 0] - np.float32(x)
@@ -328,12 +316,7 @@ class World:
 
     @staticmethod
     def _trim_tail(route: np.ndarray, dst: tuple[float, float]) -> np.ndarray:
-        """目的地にいちばん近い点より先を捨てる。
-
-        ノード間の経路は目的地の先の交差点まで伸びているので、切らずに目的地を
-        足すと**「目的地を通り過ぎてから折り返す」経路**になる。停車は経路の終点で
-        掛けるため、車は目的地の前を減速せずに通過してしまう。
-        """
+        """目的地にいちばん近い点より先を捨てる。"""
         if route.shape[0] < 3:
             return route
         dx = route[:, 0] - np.float32(dst[0])
@@ -364,11 +347,7 @@ class World:
         *,
         heading: float | None = None,
     ) -> np.ndarray | None:
-        """出発地を道路へ、目的地を道路ノードへ寄せて走行経路を作る（決定 7・12）。
-
-        **目的地だけノードに合わせる**のは、経路がノード間で作られるため。
-        区間の途中に置くと、そこを通り過ぎてから折り返す経路になる。
-        """
+        """出発地を道路へ、目的地を道路ノードへ寄せて走行経路を作る（決定 7・12）。"""
         src_snap = self.snap_to_road(*src)
         dst_snap = self.snap_to_road_node(*dst)
         if src_snap is None or dst_snap is None:
@@ -388,14 +367,14 @@ class World:
         route = self._route_from_nodes(src_node, dst_node)
         if route is None:
             return None
-        # ★ 別の道路から目的ノードへ入る経路もあるので、念のため折り返しを切り落とす
+        # 別の道路から目的ノードへ入る経路もあるので、念のため折り返しを切り落とす
         return self._with_endpoints(self._trim_tail(route, dst_snap), src_snap, dst_snap)
 
     def advance_time(self, dt: float) -> None:
         """シミュレーション内時刻を進め、信号の現示と歩行者を更新する。"""
         self.sim_time += float(dt)
         self.signal_phases = self.signals.phases(self.sim_time)
-        # ★ 現示を作り直した**あと**に渡すこと。1 ステップ古い色で渡らせない
+        # 現示を作り直した**あと**に渡すこと。1 ステップ古い色で渡らせない
         self.crowd.step(float(dt), self.signal_phases)
         if self.sim_time - self._recycled_at >= PEDESTRIAN_RECYCLE_SEC:
             self._recycled_at = self.sim_time
@@ -420,6 +399,7 @@ class World:
 
     def set_player(self, at: tuple[float, float] | None) -> None:
         """実用モードの徒歩キャラの位置を差し替える（None で消す）。"""
+        self._player_rev += 1
         if at is None:
             self._player_xy = _NO_PLAYER
             return
@@ -427,7 +407,9 @@ class World:
         if not (math.isfinite(x) and math.isfinite(y)):
             self._player_xy = _NO_PLAYER
             return
-        self._player_xy = np.array([[x, y]], dtype=np.float64)
+        player = np.array([[x, y]], dtype=np.float64)
+        player.flags.writeable = False
+        self._player_xy = player
 
     @property
     def has_player(self) -> bool:
@@ -436,18 +418,21 @@ class World:
 
     @property
     def pedestrian_xy(self) -> np.ndarray:
-        """いる歩行者の座標 (K, 2) float64。擬似カメラ・正解ラベル・衝突判定が使う。
-
-        NPC 群衆に**実用モードの徒歩キャラを連結して**返す。ここが唯一の出典なので、
-        混ぜるだけで擬似カメラ・正解ラベル・観測・車間・衝突判定の 5 つが同時に
-        利用者を見るようになる（別々に足すと、どれかを足し忘れて気づけない）。
-        """
+        """いる歩行者の座標 (K, 2) float64。"""
+        key = (self.crowd.revision, self._player_rev)
+        if self._people_key == key:
+            return self._people
         people = self.crowd.positions
         if self._player_xy.shape[0] == 0:
-            return people
-        if people.shape[0] == 0:
-            return self._player_xy.copy()
-        return np.vstack((people, self._player_xy))
+            out = people
+        elif people.shape[0] == 0:
+            out = self._player_xy
+        else:
+            out = np.vstack((people, self._player_xy))
+            out.flags.writeable = False
+        self._people_key = key
+        self._people = out
+        return out
 
     def next_signal(self, slot: int) -> tuple[float, int]:
         """そのスロットの前方にある直近の信号を (停止線までの距離 [m], 灯色) で返す。"""
@@ -679,10 +664,7 @@ class World:
     def _install_route(
         self, slot: int, route: np.ndarray, *, keep_pose: bool = False
     ) -> bool:
-        """経路をスロットに設定し、車両を経路始点に配置する。
-
-        `keep_pose` のときは車体を動かさず経路だけ差し替える（実用モードの迎車・乗車後）。
-        """
+        """経路をスロットに設定し、車両を経路始点に配置する。"""
         if route is None or route.shape[0] < 2:
             return False
         state = self.slots[slot]
@@ -988,23 +970,13 @@ class World:
                 self.slots[slot].steps += 1
 
     def set_braking(self, accel_cmd: np.ndarray) -> None:
-        """制動指令が出ているスロットと、その踏み込み量を記録する。
-
-        **加速度の実測ではなく指令を見る。** エンジンブレーキや空気抵抗で減速しても
-        実車のブレーキランプは点かない。ペダルの踏み込み（`throttle`）も同じ指令から
-        出す。**別々の出どころにしないこと** — ブレーキランプが点いているのに
-        ブレーキペダルが戻っている、という食い違いが起きる。
-        """
+        """制動指令が出ているスロットと、その踏み込み量を記録する。"""
         cmd = np.asarray(accel_cmd, dtype=np.float32)
         self.braking = (cmd < np.float32(BRAKE_COMMAND_THRESHOLD)) & self.fleet.active
         self.throttle = np.where(self.fleet.active, cmd, np.float32(0.0)).astype(np.float32)
 
     def update_turn_signals(self) -> None:
-        """経路の先を見て方向指示器を出す。**`project_all()` の後に呼ぶこと**。
-
-        道交法施行令 21 条にならい、右左折の 30m 手前から出す。**ヒステリシスが要る**
-        （出すしきい値だけだと、緩いカーブを曲がっている間じゅう点いたり消えたりする）。
-        """
+        """経路の先を見て方向指示器を出す。"""
         offsets = np.array(
             [TURN_LOOKAHEAD_M - TURN_TANGENT_SPAN_M, TURN_LOOKAHEAD_M + TURN_TANGENT_SPAN_M],
             dtype=np.float32,
@@ -1034,10 +1006,7 @@ class World:
         self.reached_flags = np.asarray(reached, dtype=bool).copy()
 
     def check_collisions(self) -> np.ndarray:
-        """建物・車両同士・障害物・歩行者の 4 種類をまとめて判定する。shape (N,) bool。
-
-        歩行者との接触だけは `pedestrian_hits` にも残す（学習タブで分けて出すため）。
-        """
+        """建物・車両同士・障害物・歩行者の 4 種類をまとめて判定する。"""
         n = config.MAX_VEHICLES
         hit = np.zeros(n, dtype=bool)
         self.pedestrian_hits = np.zeros(n, dtype=bool)

@@ -210,10 +210,7 @@ export function scenePalette(theme: ThemeName): ScenePalette {
 /** 信号の灯火（0=青 / 1=黄 / 2=赤）。日本の LED 信号機の見え方に寄せている */
 export const SIGNAL_LAMP_COLORS = ['#00b06e', '#f2b700', '#e8302a'] as const
 
-/**
- * 車両のライトの色。**信号の灯火と同じく昼夜で変えない**（実際の灯体の色なので）。
- * 並びは `scene/vehicleLights.ts` の `LIGHT_HEAD` / `LIGHT_TAIL` / `LIGHT_TURN`。
- */
+/** 車両のライトの色。 */
 export const VEHICLE_LIGHT_COLORS = ['#fff3d4', '#e8241c', '#ff9a1f'] as const
 
 /** 消えているときの灯体の色（黒い穴にならないよう、少し明るいグレー） */

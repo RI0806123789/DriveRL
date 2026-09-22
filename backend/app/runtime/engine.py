@@ -563,11 +563,7 @@ class SimulationEngine:
         )
 
     def _apply_player_pose(self, at: tuple[float, float] | None) -> None:
-        """徒歩キャラの位置を env へ渡す。
-
-        ★ **乗車中と開発モードでは必ず消すこと。** 乗せたまま渡すと、自分を乗せた
-        車が車内の乗客を歩行者として見て永久に止まる。
-        """
+        """徒歩キャラの位置を env へ渡す。"""
         if at is not None:
             with self._lock:
                 practical = self._practical_mode
@@ -735,7 +731,7 @@ class SimulationEngine:
             logger.exception("モデルの読み込みで例外が発生しました")
             ticket.error = f"モデルの読み込みに失敗しました: {exc}"
         finally:
-            # ★ アップロードを消すのは**読み終えたこちら側**（code_review E-05）。
+            # アップロードを消すのは**読み終えたこちら側**（code_review E-05）。
             #   HTTP 側の finally で消すと、504 の後にエンジンが読みにいって失敗する
             try:
                 ticket.path.unlink(missing_ok=True)

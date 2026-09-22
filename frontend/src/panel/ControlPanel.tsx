@@ -75,9 +75,6 @@ export function ControlPanel() {
     send({ type: 'set_app_mode', mode: next })
   }
 
-  // ★ 退場中のバナーは**同時に複数ありうる**ので、id ごとに持つこと。
-  //    1 つの ref で使い回すと、180ms 以内に 2 つ閉じたときに先の削除が
-  //    キャンセルされ、1 つ目が is-leaving を外されたまま画面に残る。
   const [leaving, setLeaving] = useState<ReadonlySet<number>>(() => new Set())
   const leaveTimers = useRef(new Map<number, number>())
   useEffect(

@@ -156,14 +156,8 @@ def scatter_obstacles(
             )
 
 
-def scatter_pedestrians(
-    env: "SimulationEnv", rng: np.random.Generator, *, focus: DetClass | None = None
-) -> None:
-    """歩行者を車両の周りへ散らす。置かないと PEDESTRIAN の教師が 0 件になる。
-
-    ★ **街へ一様に撒かないこと。** 金沢は 12.3km 四方なので、64 人を一様に散らすと
-    1 枚の画に 1 人も写らない。走っている車の周りへ寄せて初めて教師になる。
-    """
+def scatter_pedestrians(env: "SimulationEnv", *, focus: DetClass | None = None) -> None:
+    """歩行者を車両の周りへ散らす。"""
     world = env.world
     slots = np.flatnonzero(world.fleet.active)
     if slots.size == 0:
@@ -182,13 +176,9 @@ def scatter_pedestrians(
 def scatter_props(
     env: "SimulationEnv", rng: np.random.Generator, *, focus: DetClass | None = None
 ) -> None:
-    """パイロンと歩行者を置き直す。**必ずこの 1 本から呼ぶこと。**
-
-    別々に呼べるようにしておくと、片方だけ呼ぶ経路がいつか生まれ、狙ったクラスが
-    薄いまま集まる（実測で 600 ステップ中 278 ステップが薄いままだった）。
-    """
+    """パイロンと歩行者を置き直す。"""
     scatter_obstacles(env, rng, focus=focus)
-    scatter_pedestrians(env, rng, focus=focus)
+    scatter_pedestrians(env, focus=focus)
 
 
 FACE_TOLERANCE = math.cos(math.radians(55.0))
@@ -205,11 +195,7 @@ def _place_facing(
     positions: np.ndarray,
     headings: np.ndarray,
 ) -> None:
-    """物体の手前へ、その物体に正対する向きで車両を置き直す。
-
-    `_route_from_point` が作る経路の向きは選べないので、置いてから向きを見て
-    合わなければ引き直す。合わせられなければ通常の再配置に落とす。
-    """
+    """物体の手前へ、その物体に正対する向きで車両を置き直す。"""
     if positions.shape[0] == 0:
         cluster_vehicles(env, rng)
         return
@@ -259,11 +245,7 @@ def _sign_approaches(env: "SimulationEnv") -> tuple[np.ndarray, np.ndarray]:
 def arrange_scene(
     env: "SimulationEnv", rng: np.random.Generator, focus: DetClass | None
 ) -> None:
-    """狙うクラスに応じて車両とパイロンを置き直す。
-
-    ★ 車両を動かしたらパイロンも必ず置き直すこと（別々の周期に任せると、
-    片方を変えたときに黙って崩れる）。
-    """
+    """狙うクラスに応じて車両とパイロンを置き直す。"""
     if focus is DetClass.TRAFFIC_LIGHT:
         _place_facing(env, rng, *_signal_approaches(env))
     elif focus is DetClass.SPEED_SIGN:
@@ -339,12 +321,7 @@ def collect_dataset(
     skies: list[np.ndarray] = []
 
     def pick_focus() -> DetClass | None:
-        """狙うクラスを選ぶ。**弱点が渡されていなければ狙わない（None）。**
-
-        一様に選んでしまうと、信号・標識狙いの寄せ（`_place_facing`）が毎回
-        1/5 で走り、似た構図ばかりになって過学習する（実測: 銀座 1,600 枚 8
-        エポックで val_loss が学習損失の 50 倍、検出率 9.3%）。
-        """
+        """狙うクラスを選ぶ。"""
         return _weighted_choice(rng, classes, class_focus) if class_focus else None
 
     focus = pick_focus()
@@ -387,7 +364,9 @@ def collect_dataset(
         env.step(action)
         step += 1
         if reset_every > 0 and step % reset_every == 0:
-            env.reset_all()
+            # 歩行者は直後の `arrange_scene` → `scatter_props` が車の周りへ
+            # 寄せ直すので、ここで街へ撒き直さない
+            env.reset_all(relocate_walkers=False)
             focus = pick_focus()
             arrange_scene(env, rng, focus)
         elif step % SCATTER_EVERY == 0:

@@ -10,7 +10,14 @@ import numpy as np
 
 from app import config
 from app.contracts import SimParams
-from app.percep.types import DEFAULT_CAMERA, CameraSpec, DetClass, Detection, PerceptionResult
+from app.percep.types import (
+    DEFAULT_CAMERA,
+    CameraSpec,
+    DetClass,
+    Detection,
+    PerceptionResult,
+    estimate_distance,
+)
 
 if TYPE_CHECKING:
     from app.sim.world import World
@@ -55,15 +62,6 @@ _FREESPACE_ANGLES = np.linspace(
 )
 _FREESPACE_HALF = float(math.pi / max(config.OBS_FREESPACE_DIM - 1, 1)) * 0.5
 
-_ASSUMED_WIDTH_M: dict[DetClass, float] = {
-    DetClass.TRAFFIC_LIGHT: 1.2,
-    DetClass.SPEED_SIGN: float(config.SPEED_SIGN_DIAMETER),
-    DetClass.VEHICLE: float(config.VEHICLE_WIDTH),
-    DetClass.OBSTACLE: float(config.OBSTACLE_RADIUS) * 2.0,
-    DetClass.PEDESTRIAN: float(config.PEDESTRIAN_WIDTH),
-}
-
-
 def _finite(value: float | None) -> float | None:
     """有限な値だけを通す。NaN/inf は「無かった」ことにする。"""
     if value is None:
@@ -73,14 +71,29 @@ def _finite(value: float | None) -> float | None:
 
 
 def _iter_class(result: PerceptionResult, cls: DetClass) -> Iterator[Detection]:
-    """そのクラスの検出を信頼度の降順（＝格納順）で返す。"""
+    """そのクラスの検出を格納順で返す（並びの約束は `pack_by_class_quota`）。"""
     for det in result.detections:
         if det.cls == cls:
             yield det
 
 
-def _best(result: PerceptionResult, cls: DetClass) -> Detection | None:
+def _first(result: PerceptionResult, cls: DetClass) -> Detection | None:
+    """格納順の先頭。車線のように距離で選べないクラスに使う。"""
     return next(_iter_class(result, cls), None)
+
+
+def _nearest(
+    result: PerceptionResult, cls: DetClass, spec: CameraSpec
+) -> Detection | None:
+    """いちばん手前の検出。"""
+    best: Detection | None = None
+    best_dist = math.inf
+    for det in _iter_class(result, cls):
+        dist = _distance(det, spec)
+        if dist < best_dist:
+            best = det
+            best_dist = dist
+    return best
 
 
 def _bearing(det: Detection, spec: CameraSpec) -> float:
@@ -92,16 +105,8 @@ def _bearing(det: Detection, spec: CameraSpec) -> float:
 
 
 def _distance(det: Detection, spec: CameraSpec) -> float:
-    """検出までの推定距離 [m]。`near`〜`far` に収める。"""
-    given = _finite(det.distance)
-    if given is not None and given > 0.0:
-        return min(max(given, float(spec.near)), float(spec.far))
-
-    real = _ASSUMED_WIDTH_M.get(det.cls)
-    width_px = (float(det.x1) - float(det.x0)) * spec.width
-    if real is None or not math.isfinite(width_px) or width_px <= 1e-3:
-        return float(spec.far)
-    return min(max(spec.focal_px * real / width_px, float(spec.near)), float(spec.far))
+    """検出までの推定距離 [m]。式は `percep/types.estimate_distance` が唯一の出典。"""
+    return estimate_distance(det, spec)
 
 
 def _confidence(det: Detection) -> float:
@@ -121,17 +126,14 @@ def _local_xy(det: Detection, spec: CameraSpec) -> tuple[float, float, float]:
 def _pick(
     result: PerceptionResult, cls: DetClass, limit: int, spec: CameraSpec, max_range: float
 ) -> list[tuple[float, Detection]]:
-    """観測に載せる検出を選ぶ。戻り値は (距離, 検出) の**距離昇順**。"""
-    picked: list[tuple[float, Detection]] = []
-    for det in _iter_class(result, cls):
-        dist = _distance(det, spec)
-        if dist > max_range:
-            continue
-        picked.append((dist, det))
-        if len(picked) >= limit:
-            break
+    """観測に載せる検出を近い順に最大 `limit` 件返す。"""
+    picked = [
+        (dist, det)
+        for det in _iter_class(result, cls)
+        if (dist := _distance(det, spec)) <= max_range
+    ]
     picked.sort(key=lambda item: item[0])
-    return picked
+    return picked[:limit]
 
 
 def _freespace_bins(det: Detection, spec: CameraSpec) -> np.ndarray:
@@ -177,7 +179,7 @@ def _encode_camera(
         )
         return
 
-    lane = _best(result, DetClass.LANE)
+    lane = _first(result, DetClass.LANE)
     if lane is not None:
         lateral_raw = _finite(lane.lateral)
         lateral = 0.0 if lateral_raw is None else lateral_raw
@@ -189,7 +191,7 @@ def _encode_camera(
         row[_OFF_LANE + 2] = math.cos(head_err)
         row[_OFF_LANE + 3] = _confidence(lane)
 
-    signal = _best(result, DetClass.TRAFFIC_LIGHT)
+    signal = _nearest(result, DetClass.TRAFFIC_LIGHT, spec)
     if signal is not None:
         dist = _distance(signal, spec)
         row[_OFF_SIGNAL + 0] = min(dist / float(config.OBS_SIGNAL_RANGE), 1.0)
@@ -198,7 +200,7 @@ def _encode_camera(
             row[_OFF_SIGNAL + 1 + int(phase)] = 1.0
         row[_OFF_SIGNAL + 4] = _confidence(signal)
 
-    sign = _best(result, DetClass.SPEED_SIGN)
+    sign = _nearest(result, DetClass.SPEED_SIGN, spec)
     if sign is not None:
         limit = _finite(sign.speed_limit)
         if limit is not None and limit > 0.0:

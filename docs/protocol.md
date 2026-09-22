@@ -307,8 +307,11 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
 - 非アクティブな車両はキーに含まれない。1 台もアクティブな車両がいない、または
   認識パイプラインが結果を返せなかったフレームでは `detections` 自体が省略される
 - 配列内はクラスごとの枠を守った優先度つきラウンドロビン順
-  （車線 → 信号 → 標識 → 歩行者 → 車両 → 障害物、各クラス内は信頼度の降順）。
+  （車線 → 信号 → 標識 → 歩行者 → 車両 → 障害物）。
   `config.PERCEP_MAX_DETECTIONS`（15 件）で切り詰めても内訳が欠けないようにするため
+- **各クラス内は距離の昇順**（手前が先）。車線だけは面なので信頼度の降順。
+  並びの出典は `backend/app/percep/types.py` の `pack_by_class_quota` 1 か所で、
+  真値（`groundtruth`）と CNN（`detector`）のどちらから来ても同じ約束になる
 - **全スロット分を送るが、通常は追従中の 1 台分しか使われない。**
   バックエンドは追従対象（フロント専用の概念）を知らないため、
   絞るには追従対象を伝えるメッセージが要る。代表的な 1 台 8 件で 639B、
@@ -457,7 +460,7 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
 {
   "type": "network",
   "updates": 1234,
-  "obsDim": 57,
+  "obsDim": 66,
   "actionDim": 2,
   "hiddenSizes": [128, 128],
   "layers": [
@@ -895,7 +898,7 @@ TorchScript や Keras 形式を渡した場合は、その旨を説明する `40
   "sizeBytes": 578601,
   "checkpoint": {
     "updates": 585,
-    "obsDim": 57,
+    "obsDim": 66,
     "actionDim": 2,
     "hiddenSizes": [128, 128],
     "hasOptimizer": true,          // false だと学習の立ち上がりが鈍る

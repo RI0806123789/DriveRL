@@ -86,7 +86,7 @@ class TaxiService:
             return "すでに配車中です。降車してからもう一度呼んでください"
 
         world = env.world
-        # ★ 乗降地点は**道路ノード**へ寄せる（決定 7）。区間の途中に置くと、
+        # 乗降地点は**道路ノード**へ寄せる（決定 7）。区間の途中に置くと、
         #   経路がそこを通り過ぎてから折り返す形になり、目的地の前で止まらない
         pick = world.snap_to_road_node(*pickup)
         drop = world.snap_to_road_node(*dropoff)
@@ -122,12 +122,7 @@ class TaxiService:
         return None
 
     def board(self, env: "SimulationEnv") -> str | None:
-        """乗車する。降車地点への経路へ差し替える。
-
-        **迎車の途中でも乗れる。** 乗車地点は利用者が地図上で押した点でしかないので、
-        そこまで来るのを待たせる理由がない（近くで拾えたならそれでよい）。
-        経路は必ず**いまいる場所から**作り直すので、途中で乗せても矛盾しない。
-        """
+        """乗車する。"""
         if self.status.phase not in (TAXI_PHASE_WAITING, TAXI_PHASE_APPROACHING):
             return "いまは乗車できません"
 
@@ -172,7 +167,10 @@ class TaxiService:
         if not self.busy:
             return
         slot = self.vehicle_id
-        logger.info("配車を終了します（車両 #%d、%s）", slot, reason)
+        if 0 <= slot < config.MAX_VEHICLES:
+            logger.info("配車を終了します（車両 #%d、%s）", slot, reason)
+        else:
+            logger.info("配車を終了します（%s）", reason)
         if env is not None and halt and 0 <= slot < config.MAX_VEHICLES:
             env.world.fleet.speed[slot] = np.float32(0.0)
             env.world.fleet.steer[slot] = np.float32(0.0)
@@ -214,10 +212,7 @@ class TaxiService:
             self.status.message = "目的地に到着しました。[Enter] で降車できます"
 
     def _failed(self, env: "SimulationEnv", reason: str, *, halt: bool = False) -> None:
-        """迎車に失敗した。**まだ乗せていないなら別の車へ引き継ぐ。**
-
-        乗車後（riding / arrived）は車内に人がいるので引き継げない。従来どおり打ち切る。
-        """
+        """迎車に失敗した。"""
         pending = self.status.phase in (TAXI_PHASE_APPROACHING, TAXI_PHASE_WAITING)
         if pending and self._handovers < MAX_HANDOVERS and self._handover(env, halt=halt):
             return
@@ -230,30 +225,26 @@ class TaxiService:
         self.cancel(env, f"{reason}配車を打ち切りました", halt=halt)
 
     def _handover(self, env: "SimulationEnv", *, halt: bool) -> bool:
-        """いまの車を手放し、別の車へ迎車を引き継ぐ。成功したら True。
-
-        ★ **段階は畳まずに `approaching` へ戻す。** 一度でも `idle` を挟むと、
-        フロントは配車が終わったものとして扱う（歩行者を降ろす・画面を初期化する）。
-        乗る側から見れば配車は途切れていないので、車両番号だけ差し替える。
-        """
+        """いまの車を手放し、別の車へ迎車を引き継ぐ。"""
         pickup = self.status.pickup
         if pickup is None:
             return False
 
         old = self.vehicle_id
         world = env.world
+        slot, route = self._assign(world, pickup, exclude=self._tried)
+        if slot < 0 or route is None:
+            return False
+
         if halt and 0 <= old < config.MAX_VEHICLES:
             world.fleet.speed[old] = np.float32(0.0)
             world.fleet.steer[old] = np.float32(0.0)
         self._release(env)
 
-        slot, route = self._assign(world, pickup, exclude=self._tried)
-        if slot < 0 or route is None:
-            return False
-
         env.commandeer_vehicle(slot)
+        self.status.vehicle_id = slot
         if not world.install_route(slot, route, keep_pose=True):
-            env.release_vehicle(slot)
+            self._release(env)
             return False
         world.set_stop_target(slot, float(world.route_total[slot]))
 
@@ -280,17 +271,7 @@ class TaxiService:
         self._stall_best = float("inf")
 
     def _stalled(self, env: "SimulationEnv") -> bool:
-        """乗車地点へ近づけない時間が続いているか。
-
-        事故（`collided_flags`）は当たった瞬間しか立たないので、**当たらずに
-        詰まって動けない**場合はこちらでしか拾えない。交差点で対向車と睨み合う、
-        塞がれた道の先に乗車地点がある、といった形で実際に起きる。
-
-        ★ **「詰まっている」と「待たされている」は別物。** 赤信号・前走車・歩行者に
-        止められている間と、動けている間は時計を進めない（`env.traffic_hold`）。
-        待たされたまま流れない渋滞は、進捗そのものを見る `STALL_HELD_TIMEOUT_SEC`
-        が拾う（こちらは待たされている間も進む）。
-        """
+        """乗車地点へ近づけない時間が続いているか。"""
         if self.status.phase != TAXI_PHASE_APPROACHING:
             return False
         now = float(env.sim_time)
@@ -320,13 +301,7 @@ class TaxiService:
         *,
         exclude: "set[int] | frozenset[int]" = frozenset(),
     ) -> tuple[int, np.ndarray | None]:
-        """乗車地点に最も近く、かつそこへ来られる車両を選ぶ（決定 1）。
-
-        ★ **事故った車と、一度あきらめた車は選ばない。** 前者を選ぶと次のステップで
-        また `collided_flags` を見て引き継ぎ、上限を一瞬で使い切る。後者を選ばないのは、
-        **手放した車の事故フラグが `release_vehicle()` の経路差し替えで消える**ため。
-        除外しないと 2 台のあいだを往復する（実測で #1 → #5 → #1 → #5）。
-        """
+        """乗車地点に最も近く、かつそこへ来られる車両を選ぶ（決定 1）。"""
         fleet = world.fleet
         usable = fleet.active & ~world.collided_flags
         for slot in exclude:
@@ -351,10 +326,13 @@ class TaxiService:
         return -1, None
 
     def _release(self, env: "SimulationEnv | None") -> None:
+        """徴用を解く。**手放した車はもう自分のものではない**ので番号も落とす。"""
         slot = self.vehicle_id
-        if env is None or not (0 <= slot < config.MAX_VEHICLES):
+        if not (0 <= slot < config.MAX_VEHICLES):
             return
-        env.release_vehicle(slot)
+        self.status.vehicle_id = -1
+        if env is not None:
+            env.release_vehicle(slot)
 
     @staticmethod
     def _halt_here(world, slot: int) -> None:

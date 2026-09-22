@@ -69,10 +69,7 @@ const PEDALS_PER_VEHICLE = PEDAL_SLOTS.length
 const GAUGES_PER_VEHICLE = GAUGE_SLOTS.length
 const INDICATORS_PER_VEHICLE = TURN_INDICATOR_SLOTS.length
 
-/**
- * メーターの針が指す割合 0..1。
- * **EV なので回転計は持たない**（速度計とパワーメーターの 2 つ）。
- */
+/** メーターの針が指す割合 0..1。 */
 function gaugeRatio(kind: (typeof GAUGE_KINDS)[number], speed: number, throttle: number): number {
   return kind === 'speed' ? speedRatio(speed) : powerRatio(throttle)
 }
@@ -119,10 +116,7 @@ function attachInstanceEmissive(material: THREE.MeshStandardMaterial): void {
   material.customProgramCacheKey = () => 'instanceEmissive'
 }
 
-/**
- * 1 枚のアトラスから「そのインスタンスの段」だけを貼る。
- * **instancedMesh は 1 つのテクスチャしか持てない**ので、8 台ぶんを縦に並べて UV をずらす。
- */
+/** 1 枚のアトラスから「そのインスタンスの段」だけを貼る。 */
 function attachPlateAtlas(material: THREE.MeshStandardMaterial, count: number): void {
   const rows = Math.max(1, count).toFixed(1)
   material.onBeforeCompile = (shader) => {
@@ -142,10 +136,7 @@ function attachPlateAtlas(material: THREE.MeshStandardMaterial, count: number): 
   material.customProgramCacheKey = () => `plateAtlas:${rows}`
 }
 
-/**
- * 文字盤のアトラスから「その段」だけを貼る。プレートと同じ仕掛けだが、
- * 段は**車両ではなくメーターの種類**で決まる（全車で共通）。
- */
+/** 文字盤のアトラスから「その段」だけを貼る。 */
 function attachGaugeAtlas(material: THREE.MeshStandardMaterial, rows: number): void {
   const total = Math.max(1, rows).toFixed(1)
   material.onBeforeCompile = (shader) => {
@@ -258,7 +249,7 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
     })
     attachInstanceEmissive(bodyMaterial)
 
-    // ★ ガラスは**両面**で描く。片面だと運転席から外が見えるかわりに、
+    // ガラスは**両面**で描く。片面だと運転席から外が見えるかわりに、
     //   内側から見たとき窓が消えて「屋根が無い車」になる
     const glassMaterial = new THREE.MeshStandardMaterial({
       color: palette.vehicleGlass,
@@ -287,7 +278,7 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
       roughness: 0.4,
       metalness: 0.0,
       side: THREE.DoubleSide,
-      // ★ 発光は **emissiveMap**（同じテクスチャ）に従わせること。`emissive` だけを
+      // 発光は **emissiveMap**（同じテクスチャ）に従わせること。`emissive` だけを
       //   与えると文字盤が一様に光って白く飛び、目盛りも数字も見えなくなる
       emissive: new THREE.Color('#ffffff'),
       emissiveIntensity: 0.9,
@@ -296,7 +287,7 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
     attachGaugeAtlas(gaugeMaterial, GAUGE_KINDS.length)
     // ウインカー表示。消灯時は沈んだ緑、点灯時は `instanceEmissive` で光らせる
     // （車外の灯火と**同じ仕掛け**にして、明るさの出どころを 1 つにする）
-    // ★ 消灯時は**色を沈ませる**こと（車外の灯体と同じ作り）。明るい緑のまま置くと、
+    // 消灯時は**色を沈ませる**こと（車外の灯体と同じ作り）。明るい緑のまま置くと、
     //   点いていないのに点いて見えて、左右どちらを出しているのか分からなくなる
     const indicatorMaterial = new THREE.MeshStandardMaterial({
       color: new THREE.Color(VEHICLE_LIGHT_OFF).lerp(
@@ -311,7 +302,7 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
     attachInstanceEmissive(indicatorMaterial)
 
     // 針は暗い車内でも読めるよう自己発光させる（実車の照明の代わり）。
-    // ★ 車内には光源が届かないので、**発光を落とすと夜はまったく見えない**
+    // 車内には光源が届かないので、**発光を落とすと夜はまったく見えない**
     const needleMaterial = new THREE.MeshStandardMaterial({
       color: palette.vehicleNeedle,
       emissive: new THREE.Color(palette.vehicleNeedle),
@@ -418,7 +409,7 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
     }
     resources.plateRows.needsUpdate = true
     // 文字盤の段はメーターの種類で決まる（車両によらない）。
-    // ★ ナンバープレートと同じく **`gaugeUvRow()` で v の向きへ直すこと**
+    // ナンバープレートと同じく **`gaugeUvRow()` で v の向きへ直すこと**
     for (let id = 0; id < count; id++) {
       for (let k = 0; k < GAUGES_PER_VEHICLE; k++) {
         const row = gaugeUvRow(GAUGE_KINDS.indexOf(GAUGE_SLOTS[k].kind), GAUGE_KINDS.length)
@@ -437,9 +428,9 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
     }
   }, [count, resources])
 
-  // ★ テクスチャは resources とは別に持つ。プリセットだけが変わったときに
+  // テクスチャは resources とは別に持つ。プリセットだけが変わったときに
     //   ジオメトリごと作り直すと、instancedMesh が count=0 に戻って車が消える
-  // ★ 文字盤は走る街に依らないので、`resources` の寿命に合わせて 1 度だけ作る
+  // 文字盤は走る街に依らないので、`resources` の寿命に合わせて 1 度だけ作る
   useEffect(() => {
     const atlas = createGaugeAtlas()
     resources.gaugeMaterial.map = atlas
@@ -462,7 +453,7 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
     }
   }, [resources, count, presetId])
 
-  // ★ 色だけ差し替える。マテリアルを作り直すと `args` が変わり、
+  // 色だけ差し替える。マテリアルを作り直すと `args` が変わり、
   //   instancedMesh が count=0 に戻って車が消える（code_review S-01）
   useEffect(() => {
     resources.glassMaterial.color.set(palette.vehicleGlass)
@@ -475,7 +466,11 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
     resources.indicatorMaterial.color
       .set(VEHICLE_LIGHT_OFF)
       .lerp(new THREE.Color(palette.vehicleIndicator), 0.3)
+    // 覚えているのは明るさだけなので、色が変わったら**全部**塗り直させる
+    // （落とすと、昼夜で配色を変えた瞬間に灯火とメーターだけ前の色で残る）
     lastState.current.fill(-1)
+    lastLights.current.fill(-1)
+    lastIndicators.current.fill(-1)
   }, [resources, palette])
 
   useEffect(() => {
@@ -542,7 +537,6 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
     const paused = store.status.renderPaused
     const alpha = computeAlpha(performance.now(), paused)
     const followTarget = store.followTarget
-    const maxSpeed = Math.max(0.1, store.params.maxSpeed)
 
     const now = performance.now()
     const flash = 0.5 + 0.5 * Math.sin(now * 0.018)
@@ -562,7 +556,7 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
 
     for (let id = 0; id < count; id++) {
       const ok = sampleVehicle(id, alpha, pose)
-      // ★ 運転席視点でも自車を消さない。外板は裏面が描かれないので視界を塞がず、
+      // 運転席視点でも自車を消さない。外板は裏面が描かれないので視界を塞がず、
       //   内装とハンドルだけが見える（消すと運転席に何も無い画になる）
       if (!ok) {
         body.setMatrixAt(id, scratch.hidden)
@@ -672,7 +666,7 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
         resources.lightEmissive.array[e + 2] = scratch.light.b
       }
 
-      // ★ 車外の方向指示器と**同じ `lightState`** から明るさを決める。
+      // 車外の方向指示器と**同じ `lightState`** から明るさを決める。
       //   別に計算すると、メーターだけ点いている（消えている）食い違いが起きる
       for (let k = 0; k < INDICATORS_PER_VEHICLE; k++) {
         const index = id * INDICATORS_PER_VEHICLE + k
@@ -779,8 +773,7 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
         args={[resources.noseGeometry, resources.bodyMaterial, count]}
         frustumCulled={false}
       />
-      {/* ★ 内装はガラスより先に描く。半透明のガラスは depthWrite を切ってあるので、
-          後から描くと中身が見えなくなる */}
+      {/* 内装はガラスより先に描く（ガラスは depthWrite を切ってある） */}
       <instancedMesh
         key={`interior-${count}`}
         ref={interiorRef}

@@ -352,7 +352,8 @@ def evaluate_detector(
         env.step(action)
         step += 1
         if step % 12 == 0:
-            env.reset_all()
+            # 収集と同じく、直後の `scatter_props` が寄せ直すので撒き直さない
+            env.reset_all(relocate_walkers=False)
             cluster_vehicles(env, rng)
             scatter_props(env, rng)
 

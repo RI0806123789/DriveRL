@@ -10,7 +10,7 @@ import { taxiCamera } from '../store/taxiCamera'
 import { DET_LANE, type Detection } from '../types/protocol'
 import { DRIVER_FOV_DEG, driverEye, driverLookAt } from './cameraMath'
 import { detectionColor, detectionLabel } from './detectionLabels'
-import { projectBox } from './detectionProjection'
+import { detectorViewport, projectBox } from './detectionProjection'
 import { computeAlpha, createPose, sampleVehicle } from './interpolation'
 import type { VehiclePose } from './interpolation'
 
@@ -35,9 +35,6 @@ interface Rig {
 }
 
 function makeRig(width: number, height: number): Rig {
-  // ★ 既定のレンダーターゲットは MSAA 無し・linear のままなので、
-  //   メインの画（antialias: true / sRGB 出力）と揃える。揃えないと
-  //   ギザギザのまま、色も暗く沈んで「荒い映像」になる
   const target = new THREE.WebGLRenderTarget(width, height, { samples: FEED_SAMPLES })
   target.texture.colorSpace = THREE.SRGBColorSpace
   target.texture.minFilter = THREE.LinearFilter
@@ -102,7 +99,7 @@ export function TaxiCameraFeed() {
     r.camera.position.set(eye.x, eye.y, eye.z)
     r.camera.lookAt(look.x, look.y, look.z)
 
-    // ★ オフスクリーンへ描く。画面の一部を借りて描くと、そこを元の視点で
+    // オフスクリーンへ描く。画面の一部を借りて描くと、そこを元の視点で
     //   描き直すためにシーンをもう一度走査することになる
     const prev = gl.getRenderTarget()
     gl.setRenderTarget(r.target)
@@ -114,6 +111,7 @@ export function TaxiCameraFeed() {
     const ctx = canvas.getContext('2d')
     if (!ctx) return
     ctx.putImageData(r.image, 0, 0)
+    drawScope(ctx, width, height)
     drawDetections(ctx, vehicleId, width, height)
     taxiCamera.live = true
   })
@@ -136,10 +134,24 @@ function flipInto(
   }
 }
 
-/**
- * 認識結果の枠を重ねる。**投影は `DetectionOverlay` と同じ `projectBox()`** で、
- * 擬似カメラの正規化座標を表示面へ写す（カメラの位置には依らない）。
- */
+/** 認識器が見ている範囲を薄い破線で示す。 */
+function drawScope(ctx: CanvasRenderingContext2D, width: number, height: number): void {
+  const scope = detectorViewport(width / height)
+  const scale = height / 360
+  ctx.save()
+  ctx.setLineDash([5 * scale, 4 * scale])
+  ctx.lineWidth = Math.max(1, 1.1 * scale)
+  ctx.strokeStyle = 'rgba(226, 232, 240, 0.34)'
+  ctx.strokeRect(
+    scope.left * width,
+    scope.top * height,
+    scope.width * width,
+    scope.height * height,
+  )
+  ctx.restore()
+}
+
+/** 認識結果の枠を重ねる。 */
 function drawDetections(
   ctx: CanvasRenderingContext2D,
   vehicleId: number,

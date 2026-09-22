@@ -13,6 +13,7 @@ import {
   composeLimbMatrix,
   composePedestrianMatrix,
   createPedestrianScratch,
+  limbSlot,
   limbSwing,
   makeArmGeometry,
   makeHeadGeometry,
@@ -77,7 +78,7 @@ export function NpcPedestrians({ castShadow }: NpcPedestriansProps) {
     [],
   )
 
-  // ★ palette は `args` に渡さない（マテリアルごと作り直されると物体が消える。code_review S-01）
+  // palette は `args` に渡さない（マテリアルごと作り直されると物体が消える。code_review S-01）
   const resources = useMemo(() => {
     const white = () =>
       new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.74, metalness: 0.05 })
@@ -182,8 +183,7 @@ export function NpcPedestrians({ castShadow }: NpcPedestriansProps) {
       for (let k = 0; k < LIMB_JOINTS.length; k++) {
         composeLimbMatrix(scratch.transform, scratch.base, k, swingFor(k, swing), scratch.out)
         const target = LIMB_JOINTS[k].kind === 'arm' ? arm : leg
-        const slot = i * LIMBS_PER_SIDE + (k % LIMBS_PER_SIDE)
-        target.setMatrixAt(slot, scratch.out)
+        target.setMatrixAt(i * LIMBS_PER_SIDE + limbSlot(k), scratch.out)
       }
     }
 

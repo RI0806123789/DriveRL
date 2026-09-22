@@ -5,10 +5,7 @@ import { buildChart, VIEW_W, xForIndex } from './metricsChartMath'
 
 export interface MetricsChartProps {
   title: string
-  /**
-   * 値の列。**その場で追記される配列を渡してよい**（code_review E-03）。
-   * その場合は `revision` を一緒に渡して、再計算の契機にすること。
-   */
+  /** 値の列。 */
   values: readonly number[]
   /** `values` を書き換えたときに増やす番号。省略時は配列の同一性で判断する */
   revision?: number

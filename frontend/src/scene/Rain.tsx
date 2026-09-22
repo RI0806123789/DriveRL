@@ -6,14 +6,7 @@ import * as THREE from 'three'
 import { usePalette } from './usePalette'
 import { displayedWeather, weatherLook } from './weatherView'
 
-/**
- * ★ 3D 空間に雨粒を撒く形にしないこと。
- *
- * 俯瞰カメラは 300m 上空にいるので、カメラの周りに箱を置いて降らせても
- * 雨粒が小さすぎて 1 画素にも満たない（実際に作って見えなかった）。
- * 箱を俯瞰の高さに合わせて広げると、同じ密度を保つのに本数が 2 桁増える。
- * カメラに貼り付けた板なら、俯瞰でも運転席でも同じように見えて、板は 1 枚で済む。
- */
+/** 雨は板 1 枚へシェーダーで描く（3D 空間に粒を撒くと俯瞰では見えない）。 */
 const VERTEX_SHADER = /* glsl */ `
   varying vec2 vUv;
   void main() {
@@ -33,10 +26,7 @@ const FRAGMENT_SHADER = /* glsl */ `
 
   float hash(float n) { return fract(sin(n * 91.3458) * 47453.5453); }
 
-  /**
-   * 1 層ぶんの雨。列ごとに速度・長さ・位相をずらす。
-   * 手前の層ほど太く長く、ゆっくり流れて見える（視差）。
-   */
+  /** 1 層ぶんの雨。 */
   float sheet(vec2 uv, float columns, float speed, float seed, float width, float len) {
     vec2 p = uv;
     p.x += p.y * uSlant;
