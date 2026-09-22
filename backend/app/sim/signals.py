@@ -26,6 +26,7 @@ RED = 2
 DEFAULT_GREEN_SEC = config.SIGNAL_GREEN_SEC
 DEFAULT_YELLOW_SEC = config.SIGNAL_YELLOW_SEC
 DEFAULT_ALL_RED_SEC = config.SIGNAL_ALL_RED_SEC
+DEFAULT_GREEN_MIN_SEC = config.SIGNAL_GREEN_MIN_SEC
 
 
 class SignalController:
@@ -38,21 +39,39 @@ class SignalController:
         green_sec: float = DEFAULT_GREEN_SEC,
         yellow_sec: float = DEFAULT_YELLOW_SEC,
         all_red_sec: float = DEFAULT_ALL_RED_SEC,
+        green_min_sec: float = DEFAULT_GREEN_MIN_SEC,
     ) -> None:
         self.green = float(green_sec)
         self.yellow = float(yellow_sec)
         self.all_red = float(all_red_sec)
-        self.half_cycle = self.green + self.yellow + self.all_red
-        self.cycle = self.half_cycle * 2.0
+        self.green_min = float(green_min_sec)
+        self.cycle = (self.green + self.yellow + self.all_red) * 2.0
 
         self._count = len(signals)
-        self._groups = np.array([s.group for s in signals], dtype=np.int8)
+        groups = np.array([s.group for s in signals], dtype=np.float64)
 
-        offsets = np.array(
-            [(s.phase_key * 7919) % max(1, int(self.cycle)) for s in signals],
-            dtype=np.float64,
+        phase_count: dict[int, int] = {}
+        for s in signals:
+            key = int(s.phase_key)
+            phase_count[key] = max(phase_count.get(key, 1), int(s.group) + 1)
+        counts = np.maximum(
+            2.0,
+            np.array([phase_count[int(s.phase_key)] for s in signals], dtype=np.float64),
         )
-        self._offsets = offsets
+        self.max_groups = int(counts.max()) if self._count else 0
+
+        self._green = np.maximum(
+            self.green_min, self.cycle / counts - self.yellow - self.all_red
+        )
+        slots = self._green + self.yellow + self.all_red
+        self._cycles = slots * counts
+        self._shift = slots * groups
+        self._yellow_end = self._green + self.yellow
+        self.max_cycle = float(self._cycles.max()) if self._count else self.cycle
+
+        keys = np.array([s.phase_key for s in signals], dtype=np.int64)
+        periods = np.maximum(1, self._cycles.astype(np.int64))
+        self._offsets = ((keys * 7919) % periods).astype(np.float64)
 
         self._buffer = np.full(self._count, RED, dtype=np.uint8)
 
@@ -68,24 +87,22 @@ class SignalController:
         if self._count == 0:
             return []
 
-        t = (float(sim_time) + self._offsets) % self.cycle
-        local = np.where(self._groups == 0, t, (t + self.half_cycle) % self.cycle)
+        local = (float(sim_time) + self._offsets + self._shift) % self._cycles
 
         out = self._buffer
         out.fill(RED)
-        out[local < self.green] = GREEN
-        np.putmask(
-            out,
-            (local >= self.green) & (local < self.green + self.yellow),
-            YELLOW,
-        )
+        out[local < self._green] = GREEN
+        np.putmask(out, (local >= self._green) & (local < self._yellow_end), YELLOW)
         return out.tolist()
 
     def describe(self) -> str:
         """ログ用の説明。"""
+        if self._count == 0:
+            return "信号 0 基"
         return (
             f"信号 {self._count} 基 / サイクル {self.cycle:.0f} 秒"
-            f"（青 {self.green:.0f} + 黄 {self.yellow:.0f} + 全赤 {self.all_red:.0f}）"
+            f"（現示は最大 {self.max_groups} 通り・青 {self._green.min():.0f}〜"
+            f"{self._green.max():.0f} + 黄 {self.yellow:.0f} + 全赤 {self.all_red:.0f}）"
         )
 
 
