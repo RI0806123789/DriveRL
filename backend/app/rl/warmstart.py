@@ -61,16 +61,7 @@ class WarmstartResult:
 
 
 def collect_expert(env, steps: int = DEFAULT_STEPS, *, gamma: float | None = None) -> ExpertData:
-    """経路追従で走らせながら、そのときの観測・操作・リターンを集める。
-
-    ★ **観測は `step()` の前に取ること。** 教師の操作も同じ時点の状態から出すので、
-    ずらすと「1 ステップ先の状況に対する操作」を教えることになる。
-
-    ★ **リターンも一緒に集めること。** 方策だけ差し替えて価値関数を置き去りにすると、
-    走り出した瞬間に予測と実測が食い違って advantage が暴れ、**最初の 1〜2 更新で
-    方策が吹き飛びます**（実測: ウォームスタート直後 4621 → 4623 更新で、
-    アクセル指令が +0.75 から -0.81 へ戻った）。
-    """
+    """経路追従で走らせながら、そのときの観測・操作・リターンを集める。"""
     discount = float(env.params.gamma if gamma is None else gamma)
     restore = env.autopilot_all
     env.autopilot_all = True
@@ -116,7 +107,7 @@ def collect_expert(env, steps: int = DEFAULT_STEPS, *, gamma: float | None = Non
         ends = np.asarray(end_seq[slot], dtype=bool)
         returns = np.zeros_like(rewards)
         running = 0.0
-        # ★ 末尾は「この先いくらもらえるか」を知らないまま 0 から積むので、
+        # 末尾は「この先いくらもらえるか」を知らないまま 0 から積むので、
         #   後ろほど実力より低く出る。捨てずに使うと価値関数が悲観側へ寄る
         for t in range(rewards.shape[0] - 1, -1, -1):
             running = float(rewards[t]) + (0.0 if ends[t] else discount * running)

@@ -4,10 +4,7 @@
 export const PLATE_W = 0.33
 export const PLATE_H = 0.165
 
-/**
- * 取り付け位置。車両ローカル（前方 +X / 上 +Y / 右 +Z）で、
- * `vehicleGeometry.ts` の車体（4.4 × 0.72 × 1.86、中心 y=0.62）に合わせてある。
- */
+/** 取り付け位置。 */
 export const PLATE_SLOTS: ReadonlyArray<{
   readonly position: readonly [number, number, number]
   /** 板の向き [rad]。前は車の前方、後ろは真後ろを向く */
@@ -45,10 +42,7 @@ export function plateRegion(presetId: string | null | undefined): string {
   return REGIONS[presetId] ?? DEFAULT_REGION
 }
 
-/**
- * 一連指定番号を日本の様式で組み立てる。
- * **上位の桁は中黒で埋め、4 桁のときだけハイフンを挟む**（実際のプレートと同じ）。
- */
+/** 一連指定番号を日本の様式で組み立てる。 */
 export function plateSerial(value: number): string {
   const n = Math.max(0, Math.floor(value))
   const digits = String(n % 10000)
@@ -77,22 +71,13 @@ export function plateTextFor(vehicleId: number, presetId: string | null | undefi
   }
 }
 
-/**
- * プレートに書かれているとおりの 1 行表記（「品川 300 さ ・・・0」）。
- * **実用モードの画面はこれで車を指す**（開発モードの一覧は番号のまま）。
- */
+/** プレートに書かれているとおりの 1 行表記（「品川 300 さ ・・・0」）。 */
 export function plateLabel(vehicleId: number, presetId: string | null | undefined): string {
   const t = plateTextFor(vehicleId, presetId)
   return `${t.region} ${t.classNumber} ${t.kana} ${t.serial}`
 }
 
-/**
- * サーバーが作った文言の「車両 #N」をプレートの表記へ置き換える。
- *
- * ★ **番号を文中に持つのはサーバー側**（引き継ぎの文言は「どの車からどの車へ」を
- * 知っている側でしか作れない）。地名の対応表はここにしか無いので、
- * 差し替えはクライアントで行う。`docs/protocol.md` 2.10 に書式を書いてある。
- */
+/** サーバーが作った文言の「車両 #N」をプレートの表記へ置き換える。 */
 export function withPlateNames(
   message: string,
   presetId: string | null | undefined,
@@ -106,10 +91,7 @@ export function withPlateNames(
 export const CELL_W = 512
 export const CELL_H = 256
 
-/**
- * アトラスの何段目を使うかを、テクスチャ座標の v に写す係数。
- * Canvas は**上から順に**車両 0, 1, 2 … を描くので、下から数える v とは向きが逆になる。
- */
+/** アトラスの何段目を使うかを、テクスチャ座標の v に写す係数。 */
 export function plateUvRow(vehicleId: number, count: number): number {
   return Math.max(0, count - 1 - vehicleId)
 }

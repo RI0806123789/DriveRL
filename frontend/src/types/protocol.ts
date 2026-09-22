@@ -513,10 +513,7 @@ export function isBoardablePhase(phase: TaxiPhase): boolean {
   return phase === 'approaching' || phase === 'waiting'
 }
 
-/**
- * その段階で利用者を待っているか（ハザードを出す段階）。
- * **段階から「いま何ができるか」を導くのはこの並びだけ**（`code_review` T-01）。
- */
+/** その段階で利用者を待っているか（ハザードを出す段階）。 */
 export function isWaitingPhase(phase: TaxiPhase): boolean {
   return phase === 'waiting' || phase === 'arrived'
 }
@@ -540,10 +537,7 @@ export interface TaxiMessage {
   message: string
 }
 
-/**
- * `docs/protocol.md` のエラーコード表が唯一の出典。**介入の失敗はここに足さない**
- * （`status.message` で返す約束。code_review E-14）。
- */
+/** `docs/protocol.md` のエラーコード表が唯一の出典。 */
 export type ErrorCode =
   | 'MAP_LOAD_FAILED'
   | 'INVALID_MESSAGE'

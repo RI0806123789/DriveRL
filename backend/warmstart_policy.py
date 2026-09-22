@@ -1,8 +1,4 @@
-"""経路追従の走りを教師にして、方策を「とりあえず走る」状態へ初期化する。
-
-使い方（backend/ から）:
-    .venv\\Scripts\\python.exe warmstart_policy.py --preset ginza
-"""
+"""経路追従の走りを教師にして、方策を「とりあえず走る」状態へ初期化する。"""
 
 from __future__ import annotations
 
@@ -115,7 +111,7 @@ def main() -> int:
     )
     print(f"  損失 {fitted.first_loss:.5f} → {fitted.last_loss:.5f}")
 
-    # ★ 価値関数も必ず合わせること。方策だけ差し替えると、走り出した瞬間に
+    # 価値関数も必ず合わせること。方策だけ差し替えると、走り出した瞬間に
     #   予測と実測が食い違って advantage が暴れ、1〜2 更新で方策が吹き飛ぶ
     print("\n価値関数を回帰します")
     valued = fit_value(
@@ -131,7 +127,7 @@ def main() -> int:
         std = set_exploration(trainer, float(args.std))
         print(f"\n探索ノイズを {std:.3f} に揃えました")
 
-    # ★ 集めた分の経験は方策と食い違うので必ず捨てる（PPO は方策オン）
+    # 集めた分の経験は方策と食い違うので必ず捨てる（PPO は方策オン）
     trainer.reset_rollout()
     trainer.save(config.CHECKPOINT_PATH)
     print(f"  {config.CHECKPOINT_PATH.name} へ保存しました")

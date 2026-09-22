@@ -21,21 +21,12 @@ const LABEL_INK = '#cfd6df'
 const CHARGE_INK = '#3ad2a0'
 const POWER_INK = '#ff9c3d'
 
-/**
- * 割合 0..1 を文字盤上の角度 [rad] へ写す。
- * **針（`needleAngle`）と同じ式でなければ、目盛りと針がずれる。**
- */
+/** 割合 0..1 を文字盤上の角度 [rad] へ写す。 */
 function faceAngle(ratio: number): number {
   return NEEDLE_START + ratio * NEEDLE_SWEEP
 }
 
-/**
- * 文字盤の角度を、キャンバス上の向きへ直す。
- * 針先は `(0, L·cosθ, L·sinθ)` で、**運転者から見て +Z が右・+Y が上**。
- * 文字盤の UV は u が +Z・v が +Y に増えるので、キャンバスは鏡にならない。
- * キャンバスの y は下向きなので、θ から 90 度戻すだけで針と重なる。
- * ★ **ここで符号を反転すると、目盛りだけが左右逆**に焼かれて針と合わなくなる。
- */
+/** 文字盤の角度を、キャンバス上の向きへ直す。 */
 function canvasAngle(ratio: number): number {
   return faceAngle(ratio) - Math.PI / 2
 }
@@ -107,10 +98,7 @@ function drawSpeedFace(ctx: CanvasRenderingContext2D): void {
   ctx.fillText('km/h', CELL / 2, CELL * 0.72)
 }
 
-/**
- * パワーメーター（EV）。中央が 0 で、左が回生（CHARGE）、右が出力（POWER）。
- * **数字は入れない**（実車の同種のメーターと同じ）。
- */
+/** パワーメーター（EV）。 */
 function drawPowerFace(ctx: CanvasRenderingContext2D): void {
   drawFace(ctx)
 
@@ -154,10 +142,7 @@ function drawPowerFace(ctx: CanvasRenderingContext2D): void {
   ctx.fillText('0', CELL / 2, CELL * 0.19)
 }
 
-/**
- * 文字盤のアトラスを作る。段の並びは `GAUGE_KINDS` と同じ順。
- * **呼んだ側が `dispose()` すること。**
- */
+/** 文字盤のアトラスを作る。 */
 export function createGaugeAtlas(): THREE.CanvasTexture {
   const canvas = document.createElement('canvas')
   canvas.width = CELL

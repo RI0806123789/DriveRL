@@ -165,7 +165,7 @@ console.log('='.repeat(70))
   check('approach は dt を大きくすると目標へ寄る', approach(0, 1, 100, 1.6) > 0.99)
   check('approach の tau=0 は即座に目標', approach(0, 1, 0.016, 0) === 1)
 
-  // ★ displayedWeather はモジュールの状態なので、ここは最後に動かす
+  // displayedWeather はモジュールの状態なので、ここは最後に動かす
   const dt = 1 / 60
   const rainy = { rain: 1, fog: 0, visibility: FAR_M }
   for (let i = 0; i < 60 * 6; i += 1) advanceWeather(rainy, dt)

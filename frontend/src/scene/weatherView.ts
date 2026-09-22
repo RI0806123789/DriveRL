@@ -17,13 +17,7 @@ const FOG_NEAR_RATIO = 0.06
 /** 濃霧でも最低これだけは見える [m]。真っ白で何も分からない画を避ける */
 const FOG_FAR_MIN_M = 9
 
-/**
- * 視点がこの高さ [m] を超えたら、超えたぶんだけ霧を薄く見せる。
- *
- * 視程は**運転席から前を見たときの距離**なので、300m 上空の俯瞰へそのまま
- * 適用すると地面が完全に霧へ沈み、街が 1 つも見えなくなる（実際にそうなった）。
- * 運転席・追従（数 m）では視程どおり、俯瞰では「遠くが霞む」程度に留める。
- */
+/** 視点がこの高さ [m] を超えたら、超えたぶんだけ霧を薄く見せる。 */
 const FOG_EYE_REF_M = 12
 
 /** 雨・霧でどこまで暗くするか（1.0 = 変化なし）*/
@@ -48,12 +42,7 @@ export interface WeatherLook {
   wetness: number
 }
 
-/** 濡れた路面の粗さ・金属感・暗さ（乾いた状態からの行き先）。
- *
- * ★ `metalness` を上げすぎないこと。環境マップを置いていないので、上げても
- * 映り込む先が無く**ただ黒くなるだけ**で光沢にはならない（0.3 で試して暗いだけだった）。
- * 濡れは「粗さを落として日差しの反射を残し、暗くして、空の色をわずかに映す」で作る。
- */
+/** 濡れた路面の粗さ・金属感・暗さ（乾いた状態からの行き先）。 */
 export const WET_ROUGHNESS = 0.26
 export const WET_METALNESS = 0.1
 export const WET_DARKEN = 0.66
@@ -77,14 +66,7 @@ export function approach(current: number, target: number, dt: number, tau: numbe
   return current + (target - current) * (1 - Math.exp(-Math.max(dt, 0) / tau))
 }
 
-/**
- * 画面に出ている天候。**目標値（`frameBuffer.weather`）へ追いつく途中の値。**
- *
- * プリセットを押した瞬間に空と路面が切り替わると作り物に見えるので、
- * 1〜2 秒かけて寄せる。路面はさらに遅く乾かす（雨がやんだ直後はまだ濡れている）。
- * ★ 進めるのは `SceneAtmosphere` の 1 か所だけ（`useFrame` の priority を
- * 一番若くしてある）。読む側は進めないこと。
- */
+/** 画面に出ている天候。 */
 export const displayedWeather = { rain: 0, fog: 0, visibility: 120, wet: 0 }
 
 /** 表示用の天候を 1 フレーム進める。戻り値は `displayedWeather` そのもの。 */
@@ -107,13 +89,7 @@ export function smoothstep(t: number): number {
   return x * x * (3 - 2 * x)
 }
 
-/**
- * 晴れの値と霧の値を**幾何補間**する。
- *
- * 晴れのフォグは遠景を溶かすための数 km、霧のフォグは視程の数十 m と桁が
- * 違うので、線形に混ぜると霧が濃くなるまでほとんど効かない（fog=0.5 でも
- * まだ数百 m 先まで見える）。対数の上で混ぜると、薄い霧から素直に効く。
- */
+/** 晴れの値と霧の値を**幾何補間**する。 */
 export function blendDistance(clear: number, foggy: number, t: number): number {
   if (t <= 0) return clear
   if (t >= 1) return foggy

@@ -10,9 +10,11 @@ const LIVE_POLL_MS = 250
 export interface TaxiCameraViewProps {
   on: boolean
   vehicleId: number
+  /** 画面に出す車の呼び名。**番号ではなくナンバープレート**（同じ画面で揃える） */
+  plate: string
 }
 
-export function TaxiCameraView({ on, vehicleId }: TaxiCameraViewProps) {
+export function TaxiCameraView({ on, vehicleId, plate }: TaxiCameraViewProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const [live, setLive] = useState(false)
 
@@ -25,7 +27,7 @@ export function TaxiCameraView({ on, vehicleId }: TaxiCameraViewProps) {
     taxiCamera.canvas = el
     taxiCamera.vehicleId = vehicleId
 
-    // ★ 描く解像度は**表示の実寸 × dpr**。固定にすると拡大されて荒く見える
+    // 描く解像度は**表示の実寸 × dpr**。固定にすると拡大されて荒く見える
     const measure = () => {
       const rect = el.getBoundingClientRect()
       if (rect.width < 1 || rect.height < 1) return
@@ -69,7 +71,7 @@ export function TaxiCameraView({ on, vehicleId }: TaxiCameraViewProps) {
         <div className="taxi-camera-bar">
           <span className="taxi-camera-rec" data-live={live ? 'true' : 'false'} />
           <span>車載カメラ</span>
-          {vehicleId >= 0 && <span className="taxi-camera-id">#{vehicleId}</span>}
+          {vehicleId >= 0 && <span className="taxi-camera-id">{plate}</span>}
         </div>
         {!live && <div className="taxi-camera-wait">映像を待っています…</div>}
       </div>

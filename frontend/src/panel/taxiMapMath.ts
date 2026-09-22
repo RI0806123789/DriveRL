@@ -28,11 +28,7 @@ export interface MapProjection {
 }
 
 export const ZOOM_MIN = 1
-/**
- * 倍率の上限。**マップの一辺に対する比なので、広いエリアほど大きな値が要る**
- * （金沢は 12.3km 四方あり、40 倍では 300m 幅までしか寄れなかった）。
- * 120 なら銀座で 7m 幅、金沢で 102m 幅まで寄れる。
- */
+/** 倍率の上限。 */
 export const ZOOM_MAX = 120
 
 /** 倍率 1（マップ全体が収まる状態）の 1m あたりピクセル数。 */
@@ -94,13 +90,7 @@ export function boundsCenter(bounds: MapBounds): Vec2 {
   return [(bounds.minX + bounds.maxX) / 2, (bounds.minY + bounds.maxY) / 2]
 }
 
-/**
- * ENU の点をキャンバス座標へ。
- *
- * ★ **回転が入ると x と y は独立に変換できない**ので、軸ごとの
- * `toCanvasX()` / `toCanvasY()` は廃止した（片方だけ呼ぶと北向きの値が返り、
- * 回っていることに気づけないまま座標がずれる）。
- */
+/** ENU の点をキャンバス座標へ。 */
 export function toCanvas(p: MapProjection, x: number, y: number): Vec2 {
   const dx = x - p.centerX
   const dy = y - p.centerY
@@ -158,10 +148,7 @@ export function clampCenter(view: MapView, bounds: MapBounds): MapView {
 /** 自動で寄るときに、最低これだけの範囲は見せる [m]（1 点だけのとき近づきすぎない） */
 export const FIT_MIN_SPAN_M = 150
 
-/**
- * 指定した点が全部入る見え方を作る（配車の段階に合わせた自動ズーム）。
- * 点が無ければマップ全体へ戻す。**枠は回転後の向きで測る。**
- */
+/** 指定した点が全部入る見え方を作る（配車の段階に合わせた自動ズーム）。 */
 export function fitView(
   bounds: MapBounds,
   points: readonly Vec2[],
@@ -210,13 +197,7 @@ export function fitView(
   )
 }
 
-/**
- * 見え方を補間する。**倍率は対数で混ぜる**（線形だと桁の違いで寄り方が跳ねる。
- * 天候のフォグ距離と同じ理由）。**向きは近いほうへ回す。**
- *
- * `tRotation` を分けられるのは、向きだけゆっくり追わせるため（車の方位は
- * 交差点で一気に変わるので、寄り引きと同じ速さで回すと画面が振られる）。
- */
+/** 見え方を補間する。 */
 export function lerpView(from: MapView, to: MapView, t: number, tRotation = t): MapView {
   const k = Math.max(0, Math.min(1, t))
   const logFrom = Math.log(clampZoom(from.zoom))
@@ -255,18 +236,7 @@ export interface LayerTransform {
   scale: number
 }
 
-/**
- * 別の見え方で描いたレイヤを、いまの見え方へ貼るときの変換。
- * **道路と建物を毎フレーム描き直さないため**にある（金沢は 58,120 本ある）。
- *
- * 回転が入ると平行移動と拡大だけでは貼れないので、`drawImage` の引数ではなく
- * 変換（移動・回転・拡大）を返す。貼る側は次の順で使う:
- *
- * ```
- * ctx.translate(t.x, t.y); ctx.rotate(t.angle); ctx.scale(t.scale, t.scale)
- * ctx.drawImage(layer, -w / 2, -h / 2, w, h)
- * ```
- */
+/** 別の見え方で描いたレイヤを、いまの見え方へ貼るときの変換。 */
 export function layerTransform(
   layer: MapProjection,
   current: MapProjection,
@@ -280,10 +250,7 @@ export function layerTransform(
   }
 }
 
-/**
- * レイヤ画像上の画素が、`layerTransform` で貼ったあとキャンバスのどこに来るか。
- * **検証用**（貼り替えても地物が同じ画素に乗ることを数値で確かめる）。
- */
+/** レイヤ画像上の画素が、`layerTransform` で貼ったあとキャンバスのどこに来るか。 */
 export function applyLayerTransform(
   t: LayerTransform,
   layerWidth: number,
@@ -323,11 +290,7 @@ export function zoomAround(
   )
 }
 
-/**
- * 道路。**見えない区間と、縮尺に対して短すぎる区間は引かない**。
- * 金沢は 58,120 本あり、全体表示で全部なぞると 1 フレームを使い切る。
- * 引いた本数を返す（測るときの手がかり）。
- */
+/** 道路。 */
 export function drawRoads(
   ctx: CanvasRenderingContext2D,
   p: MapProjection,
@@ -503,10 +466,7 @@ export function northAngle(p: MapProjection): number {
   return p.rotation
 }
 
-/**
- * 北を示す針。**地図を回している間だけ出す**（`opacity` が 0 なら描かない）。
- * 北向きに戻りきると消えるので、回していないときに画面の要素が増えない。
- */
+/** 北を示す針。 */
 export function drawCompass(
   ctx: CanvasRenderingContext2D,
   p: MapProjection,

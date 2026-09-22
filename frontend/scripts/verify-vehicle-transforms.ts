@@ -129,12 +129,7 @@ function legacyWorld(
   return leaf.matrixWorld.clone()
 }
 
-/**
- * 車両ローカル座標の点を、**実際の運転席カメラ**で投影したときの画面 x（-1..1）。
- * ★ 「運転者から見て +Z は左か右か」を**手で書かないため**の道具。
- * 一度その思い込みを検証にも書いてしまい、
- * メーターの針が逆回り・ウインカーが左右あべこべなまま OK が並んだ。
- */
+/** 車両ローカル座標の点を、**実際の運転席カメラ**で投影したときの画面 x（-1..1）。 */
 function screenX(local: readonly [number, number, number]): number {
   const cam = new THREE.PerspectiveCamera(DRIVER_FOV_DEG, 16 / 9, 0.1, 100)
   const eye = driverEye(0, 0, 0)
@@ -360,7 +355,7 @@ console.log('='.repeat(70))
 }
 
 {
-  // ★ 後ろのプレートが前を向いていると、真後ろから見て裏面（無地）しか見えない
+  // 後ろのプレートが前を向いていると、真後ろから見て裏面（無地）しか見えない
   const scratch = createTransformScratch()
   const base = new THREE.Matrix4()
   const out = new THREE.Matrix4()
@@ -401,7 +396,7 @@ console.log('='.repeat(70))
 }
 
 {
-  // ★ Canvas は上から 0,1,2… と描くが、テクスチャの v は下から数える
+  // Canvas は上から 0,1,2… と描くが、テクスチャの v は下から数える
   const count = 8
   const rows = Array.from({ length: count }, (_, i) => plateUvRow(i, count))
   check('段は 0〜count-1 に収まる', rows.every((r) => r >= 0 && r < count))
@@ -410,7 +405,7 @@ console.log('='.repeat(70))
 }
 
 {
-  // ★ 実用モードの画面は、サーバーの文言中の「車両 #N」をプレート表記へ差し替える
+  // 実用モードの画面は、サーバーの文言中の「車両 #N」をプレート表記へ差し替える
   //   （地名の対応表はクライアントにしか無い）。書式は docs/protocol.md 2.10
   check(
     'プレートの 1 行表記',
@@ -478,7 +473,7 @@ function state(over: Partial<Parameters<typeof lightStateFor>[0]>) {
 }
 
 {
-  // ★ 左のウインカーが右側に出ると、外から見て曲がる向きが逆になる
+  // 左のウインカーが右側に出ると、外から見て曲がる向きが逆になる
   const scratch = createTransformScratch()
   const base = new THREE.Matrix4()
   const out = new THREE.Matrix4()
@@ -523,7 +518,7 @@ function state(over: Partial<Parameters<typeof lightStateFor>[0]>) {
   const off = state({ turnSignal: -1, blink: false })
   check('点滅の消灯位相では消える', !off.left && !off.right)
 
-  // ★ 乗降を待っている間はハザード。方向指示器より優先する
+  // 乗降を待っている間はハザード。方向指示器より優先する
   const hazard = state({ hazard: true, turnSignal: 1 })
   check('ハザードは左右同時に点く（方向指示器より優先）', hazard.left && hazard.right)
 }
@@ -550,9 +545,6 @@ function boundsOf(g: THREE.BufferGeometry): THREE.Box3 {
 }
 
 {
-  // ★ ここが一番大事。外接寸法は backend の `config.VEHICLE_*` と揃っていて、
-  //   衝突判定と擬似カメラの検出枠がこれを前提にしている。はみ出すと
-  //   「当たっていないのに当たる」「枠から車がはみ出す」が起きる
   const limitX = VEHICLE_LENGTH / 2
   const limitZ = VEHICLE_WIDTH / 2
   const pieces: Array<[string, THREE.BufferGeometry]> = [
@@ -615,7 +607,7 @@ function boundsOf(g: THREE.BufferGeometry): THREE.Box3 {
     DRIVER_EYE_HEIGHT > STEERING_CENTER[1],
     '目 ' + DRIVER_EYE_HEIGHT.toFixed(2) + 'm / ハンドル ' + STEERING_CENTER[1].toFixed(2) + 'm',
   )
-  // ★ ダッシュボードを目へ近づけすぎると、運転席視点の下半分が壁で埋まる。
+  // ダッシュボードを目へ近づけすぎると、運転席視点の下半分が壁で埋まる。
   //   最初 0.52m に置いて、目の 0.17m 先が壁になり前が見えなくなった
   const legroom = DASH_REAR_X - DRIVER_FORWARD
   check(
@@ -647,7 +639,7 @@ console.log('='.repeat(70))
   composeVehicleMatrix(scratch, 0, 0, 0, base)
   const centre = new THREE.Vector3(STEERING_CENTER[0], STEERING_CENTER[1], STEERING_CENTER[2])
 
-  // ★ 回しても中心が動かないこと。ジオメトリ側を傾けていると回転軸まで傾き、
+  // 回しても中心が動かないこと。ジオメトリ側を傾けていると回転軸まで傾き、
   //   「斜めに首を振る」動きになる
   let worst = 0
   for (const steer of [-0.5, -0.2, 0, 0.2, 0.5]) {
@@ -738,7 +730,7 @@ console.log('='.repeat(70))
     Math.abs(NEEDLE_SWEEP) > 0 && Math.abs(NEEDLE_SWEEP) < Math.PI * 2,
     Math.abs((NEEDLE_SWEEP * 180) / Math.PI).toFixed(0) + ' 度',
   )
-  // ★ 運転者から見て時計回りに振れること。**符号を手で決めない**（`screenX`）
+  // 運転者から見て時計回りに振れること。**符号を手で決めない**（`screenX`）
   const nx0 = needleScreenX(0, 0)
   const nxHalf = needleScreenX(0, 0.5)
   const nx1 = needleScreenX(0, 1)
@@ -819,11 +811,7 @@ console.log('運転席から室内が見えるか（画角と遮蔽）')
 console.log('='.repeat(70))
 
 {
-  /**
-   * ★ 室内を作り込んでも、**運転席カメラの画角に入らなければ映らない。**
-   * 実際にアクセル・ブレーキが画角の 12 度下に外れていて、内装の隙間を
-   * 塞ぐ方向で直そうとして遠回りした。角度で検査する。
-   */
+  /** 運転席カメラの画角に入っているか（入らなければ室内を作り込んでも映らない）。 */
   const eyeX = DRIVER_FORWARD
   const eyeY = DRIVER_EYE_HEIGHT
   /** 視線の俯角 [度]（下向きが正） */
@@ -855,7 +843,7 @@ console.log('='.repeat(70))
     )
   }
 
-  // ★ メーターはハンドルの「リングの中」から覗く。ハブに重なると隠れる
+  // メーターはハンドルの「リングの中」から覗く。ハブに重なると隠れる
   //    （実際にハブとちょうど同じ高さにあって見えなかった）
   const hubRadius = 0.052
   for (let k = 0; k < GAUGE_SLOTS.length; k++) {
@@ -901,9 +889,6 @@ console.log('='.repeat(70))
     GAUGE_SLOTS.every((g, i) => g.kind === GAUGE_KINDS[i]),
   )
 
-  // ★ プレートと同じ罠。Canvas は上から 'speed', 'power' と描くが、v は下から数える。
-  //   素通しにすると速度計の枠にパワーメーターの絵が貼られ、停車中でも
-  //   針が真上（＝ 80km/h に見える）を指したまま動かなくなる
   {
     const n = GAUGE_KINDS.length
     const rows = GAUGE_KINDS.map((_, i) => gaugeUvRow(i, n))
@@ -982,7 +967,7 @@ console.log('='.repeat(70))
     '左が -1・右が +1（frame の turnSignal と同じ符号）',
     TURN_INDICATOR_SLOTS[0].side === -1 && TURN_INDICATOR_SLOTS[1].side === 1,
   )
-  // ★ どちらが画面の左かは**投影で決める**（+Z が左か右かを手で書かない）
+  // どちらが画面の左かは**投影で決める**（+Z が左か右かを手で書かない）
   const leftX = screenX(TURN_INDICATOR_SLOTS[0].center)
   const rightX = screenX(TURN_INDICATOR_SLOTS[1].center)
   check(
@@ -1011,7 +996,7 @@ console.log('='.repeat(70))
     )
   }
 
-  // ★ メーターの円と重ならないこと（間は狭いので、上へ逃がしてある）
+  // メーターの円と重ならないこと（間は狭いので、上へ逃がしてある）
   for (let k = 0; k < TURN_INDICATOR_SLOTS.length; k++) {
     const c = TURN_INDICATOR_SLOTS[k].center
     let worst = Infinity
@@ -1025,7 +1010,7 @@ console.log('='.repeat(70))
     )
   }
 
-  // ★ ハンドルのリングの内側から覗く位置なので、**ハブとスポークを外すこと**。
+  // ハンドルのリングの内側から覗く位置なので、**ハブとスポークを外すこと**。
   //   スポークは下・左・右の 3 本なので、視線がハンドル中心より「上」を通れば当たらない
   const eyeX = DRIVER_FORWARD
   const eyeY = DRIVER_EYE_HEIGHT
@@ -1054,7 +1039,7 @@ console.log('='.repeat(70))
     )
   }
 
-  // ★ 矢印の向きも投影で確かめる。左の矢印は画面の左を指すこと
+  // 矢印の向きも投影で確かめる。左の矢印は画面の左を指すこと
   {
     const cam = new THREE.PerspectiveCamera(DRIVER_FOV_DEG, 16 / 9, 0.1, 100)
     const eye = driverEye(0, 0, 0)
@@ -1079,7 +1064,7 @@ console.log('='.repeat(70))
     }
   }
 
-  // ★ 点灯は車外の方向指示器と同じ `lightStateFor` から取ること
+  // 点灯は車外の方向指示器と同じ `lightStateFor` から取ること
   const left = lightStateFor({ braking: false, turnSignal: -1, hazard: false, headlights: false, blink: true })
   check('左を出すと左だけ点く', left.left && !left.right)
   const right = lightStateFor({ braking: false, turnSignal: 1, hazard: false, headlights: false, blink: true })
@@ -1127,7 +1112,7 @@ console.log('='.repeat(70))
     '俯角 ' + down.toFixed(1) + ' 度 / 下端 ' + (lookDown + DRIVER_FOV_DEG / 2).toFixed(1) + ' 度',
   )
 
-  // ★ ハンドルのリムに隠れないこと（中央にあるので、リムの外を通るはず）
+  // ハンドルのリムに隠れないこと（中央にあるので、リムの外を通るはず）
   const t = (STEERING_CENTER[0] - eyeX) / (c[0] - eyeX)
   const crossY = eyeY + (c[1] - eyeY) * t
   const crossZ = eyeZ + (c[2] - eyeZ) * t
@@ -1190,15 +1175,7 @@ console.log('面の重なり（Z ファイティングの種）')
 console.log('='.repeat(70))
 
 {
-  /**
-   * ★ 別々のメッシュの面が**同じ深度**に来ると、どちらが手前か決まらず
-   * フレームごとに色が入れ替わって点滅する。実際に内装のドアと車体の外板、
-   * バルクヘッドとダッシュボードで起きた。
-   *
-   * ここでは「軸に平行な平面」を数え、車体・内装・ガラスのあいだで
-   * **同じ座標に面が来ていないか**を見る。左右対称で同じ値が出るのは正常なので、
-   * 比べるのは**別のメッシュどうし**だけ。
-   */
+  /** 別々のメッシュが同じ深度に面を持っていないか（Z ファイティングの検査）。 */
   const EPS = 1e-4
 
   /** 軸ごとに、頂点が乗っている平面の座標を集める */
@@ -1217,7 +1194,7 @@ console.log('='.repeat(70))
   const interior = makeInteriorGeometry()
   const glass = makeGlassGeometry()
 
-  // ★ 窓ガラスは `transparent` + `depthWrite: false` で描くので**深度を書かない**。
+  // 窓ガラスは `transparent` + `depthWrite: false` で描くので**深度を書かない**。
   //   面が重なってもファイティングは起きないため、比べるのは不透明どうしだけ。
   const pairs: Array<[string, THREE.BufferGeometry, THREE.BufferGeometry]> = [
     ['車体と内装', body, interior],
@@ -1251,10 +1228,7 @@ console.log('描画コスト（台数によらず一定であること）')
 console.log('='.repeat(70))
 
 {
-  /**
-   * 1 台あたりの部品と個数。**instancedMesh の数 = ドローコールの数**なので、
-   * 部品を増やすほどここが伸びる。
-   */
+  /** 1 台あたりの部品と個数。 */
   const parts: Array<[string, () => THREE.BufferGeometry, number]> = [
     ['車体', makeBodyGeometry, 1],
     ['ボンネットの飾り', makeNoseGeometry, 1],

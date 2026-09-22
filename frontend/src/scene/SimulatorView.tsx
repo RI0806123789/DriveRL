@@ -48,8 +48,7 @@ function mapSpan(bounds: MapBounds | null): number {
   return Math.max(bounds.maxX - bounds.minX, bounds.maxY - bounds.minY)
 }
 
-/** 天候を進める useFrame の優先度。**負にして他より先に走らせる**
- *  （正にすると R3F が自動レンダリングをやめてしまうので 0 より下で分ける）。 */
+/** 天候を進める useFrame の優先度。 */
 const WEATHER_PRIORITY = -1
 
 /** カメラの far 面 [m]。 */
@@ -105,11 +104,7 @@ export function SimulatorView() {
             />
           )}
           {map && view.signals && (
-            <PedestrianSignals
-              signals={map.signals ?? []}
-              nodes={map.nodes}
-              castShadow={view.shadows}
-            />
+            <PedestrianSignals signals={map.signals ?? []} castShadow={view.shadows} />
           )}
           <SpeedSigns />
           {map && view.buildings && (
@@ -127,8 +122,7 @@ export function SimulatorView() {
           />
           <LaneDetectionOverlay />
           <Vehicles maxVehicles={maxVehicles} castShadow={view.shadows} />
-          {/* ★ カーナビは**見ている 1 台にだけ**出す（車ごとに中身が違うので
-              instancedMesh の 1 枚テクスチャでは賄えない） */}
+          {/* カーナビは見ている 1 台にだけ出す */}
           <NavScreen />
           <Obstacles castShadow={view.shadows} />
           <NpcPedestrians castShadow={view.shadows} />
@@ -219,9 +213,6 @@ function SceneAtmosphere({ span }: { span: number }) {
     applied.current.theme = ''
   }, [palette, k])
 
-  // ★ 天候は 20Hz の frame で届くので zustand ではなく frameBuffer から読む。
-  //   表示用の値を進めるのは**ここだけ**（priority を若くして最初に走らせる）。
-  //   色と距離の差し替えは変わったときだけ（毎フレーム set すると無駄に重い）
   useFrame((_, delta) => {
     const weather = advanceWeather(frameBuffer.weather, delta)
     const last = applied.current

@@ -147,7 +147,7 @@ export const CameraRig = memo(function CameraRig({ bounds }: CameraRigProps) {
       currentLook.copy(desiredLook)
       initialised.current = true
     } else {
-      // ★ 運転席は rate 0（車体に固定）。遅れて追わせると加減速で車内が前後に滑る
+      // 運転席は rate 0（車体に固定）。遅れて追わせると加減速で車内が前後に滑る
       const rate = mode === 'driver' ? DRIVER_FOLLOW_RATE : FOLLOW_FOLLOW_RATE
       const t = followLerpFactor(rate, delta)
       camera.position.lerp(desiredPos, t)

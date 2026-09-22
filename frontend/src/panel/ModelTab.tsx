@@ -1,6 +1,6 @@
 /** 「モデル作成」タブ。**画像認識の CNN（認識器）をここから学習する。** */
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { send } from '../store/connection'
 import { formatBytes } from '../store/exportModel'
 import { useSimStore } from '../store/simStore'
@@ -512,7 +512,9 @@ export function ModelTab() {
                   <span
                     className="m3-bar-fill"
                     style={{
-                      width: `${Math.round(c.recall * 100)}%`,
+                      ['--m3-bar-value' as string]: String(
+                        Math.max(0, Math.min(1, c.recall)),
+                      ),
                       background:
                         c.recall < 0.5 ? 'var(--m3-error)' : 'var(--m3-primary)',
                     }}

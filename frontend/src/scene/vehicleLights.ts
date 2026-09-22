@@ -5,10 +5,7 @@ export const LIGHT_HEAD = 0
 export const LIGHT_TAIL = 1
 export const LIGHT_TURN = 2
 
-/**
- * 1 台ぶんのライト。位置は車両ローカル（前方 +X / 上 +Y / **右 +Z**）。
- * 並びは `vehicleGeometry.ts` の車体（4.4 × 0.72 × 1.86、中心 y=0.62）に合わせてある。
- */
+/** 1 台ぶんのライト。 */
 export const LIGHT_SLOTS: ReadonlyArray<{
   readonly position: readonly [number, number, number]
   readonly kind: number
@@ -31,10 +28,7 @@ export const LIGHTS_PER_VEHICLE = LIGHT_SLOTS.length
 /** 灯体の大きさ [m]（幅 × 高さ × 奥行き相当） */
 export const LIGHT_SIZE: readonly [number, number, number] = [0.12, 0.17, 0.2]
 
-/**
- * 方向指示器の点滅周期 [Hz]。
- * 道路運送車両の保安基準では毎分 60〜120 回（＝ 1〜2Hz）と決まっている。
- */
+/** 方向指示器の点滅周期 [Hz]。 */
 export const BLINK_HZ = 1.5
 
 /** 前照灯を点ける天候のしきい値。小雨（rain 0.35）から点く */
@@ -46,11 +40,7 @@ export function blinkOn(nowMs: number): boolean {
   return ((nowMs * BLINK_HZ) / 1000) % 1 < 0.5
 }
 
-/**
- * 前照灯を点けるか。**夜と、視界が悪い天候で点ける**（道交法 52 条）。
- * 昼夜はフロント側にしか無い（`store/themeClock.ts` の日の出・日の入り）ので、
- * 天候とあわせてここで決める。
- */
+/** 前照灯を点けるか。 */
 export function headlightsOn(rain: number, fog: number, night: boolean): boolean {
   return night || rain >= HEADLIGHT_RAIN || fog >= HEADLIGHT_FOG
 }

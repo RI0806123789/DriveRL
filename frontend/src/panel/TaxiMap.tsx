@@ -81,7 +81,7 @@ export function TaxiMap({
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const [size, setSize] = useState({ width: 300, height: 300 })
 
-  // ★ 見え方は state に置かない。毎フレーム寄せるので、state にすると
+  // 見え方は state に置かない。毎フレーム寄せるので、state にすると
   //   60Hz でパネルごと再レンダリングされる（`frameBuffer` と同じ理由）
   const viewRef = useRef<MapView>({ zoom: ZOOM_MIN, centerX: 0, centerY: 0, rotation: 0 })
   /** 自動で追いかけるのをやめているか（利用者が自分で動かしたあと） */
@@ -134,12 +134,7 @@ export function TaxiMap({
     [map, size.width, size.height],
   )
 
-  /**
-   * 配車の段階に合わせて「収めたいもの」と「向き」を決める（自動ズームの目標）。
-   *
-   * ★ 進行方向へ向けるのは**乗車中（`riding`）だけ**。迎車中は乗る側が街の中で
-   * 自分の居場所を掴めるよう北で固定し、到着（`arrived`）したら北へ戻し始める。
-   */
+  /** 配車の段階に合わせて「収めたいもの」と「向き」を決める（自動ズームの目標）。 */
   const targetView = useCallback((): MapView | null => {
     if (!map) return null
     const taxi = useSimStore.getState().taxi
@@ -168,9 +163,6 @@ export function TaxiMap({
   const ensureStaticLayer = useCallback(
     (p: MapProjection, settled: boolean): HTMLCanvasElement | null => {
       if (!map) return null
-      // ★ レイヤは**画面の対角を一辺とする正方形**で描く。回した角度に関わらず
-      //   画面を覆えるので、**向きが変わっても引き直さずに貼り替えだけで済む**
-      //   （金沢の 58,120 本を回転のたびに引き直すと 1 フレームを使い切る）。
       const side = layerSizeFor(p.width, p.height, true)
       const key = [map.presetId, side, palette.roadSurface, palette.buildingLow].join('|')
       const at = staticAt.current
@@ -237,7 +229,7 @@ export function TaxiMap({
       const layer = ensureStaticLayer(p, settled)
       const at = staticAt.current
       if (layer && at) {
-        // ★ 寄っている途中も回っている途中も、レイヤは貼り替えるだけにする。
+        // 寄っている途中も回っている途中も、レイヤは貼り替えるだけにする。
         //   金沢の 58,120 本を毎フレーム引き直すと、パネルだけで 1 フレームを使い切る
         const t = layerTransform(at, p)
         ctx.save()
@@ -307,7 +299,7 @@ export function TaxiMap({
     [projectionFor, ensureStaticLayer, palette, draftDropoff],
   )
 
-  // ★ パネルが閉じている間はループごと止める（code_review F-10）
+  // パネルが閉じている間はループごと止める（code_review F-10）
   useEffect(() => {
     if (!panelOpen || !map) return
     let raf = 0
@@ -398,11 +390,7 @@ export function TaxiMap({
     if (point) onPick(point)
   }
 
-  /**
-   * ホイールの拡大縮小。**`passive: false` で自前に登録して `preventDefault()` する**
-   * （React の `onWheel` は passive なので止められず、Ctrl+ホイールでページごと
-   * 拡大されて地図が読めなくなる）。
-   */
+  /** ホイールの拡大縮小。 */
   useEffect(() => {
     const canvas = canvasRef.current
     if (!canvas || !map) return

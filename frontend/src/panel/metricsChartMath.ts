@@ -38,9 +38,7 @@ export interface ChartOptions {
 }
 
 /** 値の列から SVG のパスと目盛りを作る。 */
-/**
- * 添字 `i` のバケツ中心の x。マップ切替の目印を線と同じ位置へ置くのに使う。
- */
+/** 添字 `i` のバケツ中心の x。 */
 export function xForIndex(i: number, n: number): number {
   if (n <= 1) return 0
   const buckets = Math.min(MAX_BUCKETS, n)
@@ -48,10 +46,7 @@ export function xForIndex(i: number, n: number): number {
   return b * (VIEW_W / (buckets - 1))
 }
 
-/**
- * 値の列から SVG のパスと目盛りを作る。
- * 有限値が 2 点に満たなければ null（グラフとして意味が無い）。
- */
+/** 値の列から SVG のパスと目盛りを作る。 */
 export function buildChart(
   values: readonly number[],
   { height, showZero = false }: ChartOptions,

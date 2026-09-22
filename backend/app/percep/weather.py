@@ -64,11 +64,7 @@ class Weather:
         return self.fog > 1e-3
 
     def visibility_m(self, far: float) -> float:
-        """この天候での有効視程 [m]。**描画とラベルはこの値を共有する。**
-
-        指数を 2 乗しているのは、視程が「透過率が 5% に落ちる距離」で決まるため
-        `fog` に線形で効かせると、弱い霧でも近くが白く沈むため。
-        """
+        """この天候での有効視程 [m]。"""
         if self.fog <= 1e-3:
             return float(far)
         ratio = max(MIN_VISIBILITY_M / max(float(far), 1e-6), 1e-6)
@@ -108,11 +104,7 @@ _streak_cache: dict[tuple[int, int], list[_StreakFrame]] = {}
 
 
 def _streak_bank(height: int, width: int) -> list[_StreakFrame]:
-    """雨の筋を数枚ぶん、(行, 列, 強さ) の疎な形で作る。
-
-    密な (H, W) マスクで持って全画素に掛けると、ほとんどが 0 なのに
-    1 枚あたり 7ms を使う。触るのは数千画素だけなので添字で持つ。
-    """
+    """雨の筋を数枚ぶん、(行, 列, 強さ) の疎な形で作る。"""
     key = (int(height), int(width))
     cached = _streak_cache.get(key)
     if cached is not None:

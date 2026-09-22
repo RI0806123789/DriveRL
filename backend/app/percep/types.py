@@ -37,6 +37,7 @@ __all__ = [
     "SIGN_BOARD_Z",
     "SIGN_BOTTOM_HEIGHT",
     "SIGN_RADIUS",
+    "estimate_distance",
     "facing_viewer",
     "pack_by_class_quota",
 ]
@@ -182,13 +183,6 @@ class PerceptionResult:
     def by_class(self, cls: DetClass) -> list[Detection]:
         return [d for d in self.detections if d.cls == cls]
 
-    def best(self, cls: DetClass) -> Detection | None:
-        """そのクラスで最も信頼度の高いもの。無ければ None。"""
-        for det in self.detections:
-            if det.cls == cls:
-                return det
-        return None
-
     def to_wire(self) -> list[dict[str, Any]]:
         return [d.to_wire() for d in self.detections]
 
@@ -256,10 +250,53 @@ CLASS_PRIORITY: tuple[DetClass, ...] = (
 )
 
 
+#: 距離が「手前を優先する」意味を持つクラス。車線だけは面なので信頼度で選ぶ
+DISTANCE_ORDERED: frozenset[DetClass] = frozenset(
+    {
+        DetClass.TRAFFIC_LIGHT,
+        DetClass.SPEED_SIGN,
+        DetClass.VEHICLE,
+        DetClass.OBSTACLE,
+        DetClass.PEDESTRIAN,
+    }
+)
+
+_ASSUMED_WIDTH_M: dict[DetClass, float] = {
+    DetClass.TRAFFIC_LIGHT: 1.2,
+    DetClass.SPEED_SIGN: float(config.SPEED_SIGN_DIAMETER),
+    DetClass.VEHICLE: float(config.VEHICLE_WIDTH),
+    DetClass.OBSTACLE: float(config.OBSTACLE_RADIUS) * 2.0,
+    DetClass.PEDESTRIAN: float(config.PEDESTRIAN_WIDTH),
+}
+
+
+def estimate_distance(det: Detection, spec: CameraSpec = DEFAULT_CAMERA) -> float:
+    """検出までの推定距離 [m]。`near`〜`far` に収める。"""
+    given = det.distance
+    if given is not None:
+        value = float(given)
+        if math.isfinite(value) and value > 0.0:
+            return min(max(value, float(spec.near)), float(spec.far))
+
+    real = _ASSUMED_WIDTH_M.get(det.cls)
+    width_px = (float(det.x1) - float(det.x0)) * spec.width
+    if real is None or not math.isfinite(width_px) or width_px <= 1e-3:
+        return float(spec.far)
+    return min(max(spec.focal_px * real / width_px, float(spec.near)), float(spec.far))
+
+
 def pack_by_class_quota(
-    per_class: dict[DetClass, list[Detection]], limit: int
+    per_class: dict[DetClass, list[Detection]], limit: int, spec: CameraSpec = DEFAULT_CAMERA
 ) -> list[Detection]:
     """クラス枠つきの優先度ラウンドロビンで `limit` 件へ詰める。"""
+    per_class = {
+        cls: (
+            sorted(items, key=lambda det: estimate_distance(det, spec))
+            if cls in DISTANCE_ORDERED
+            else list(items)
+        )
+        for cls, items in per_class.items()
+    }
     cursor: dict[DetClass, int] = {cls: 0 for cls in CLASS_PRIORITY}
     picked: list[Detection] = []
     while len(picked) < limit:

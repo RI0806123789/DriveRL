@@ -90,7 +90,7 @@ export function TaxiScreen() {
     setPicking('dropoff')
   }
 
-  // ★ 乗車地点は**呼ぶ瞬間の現在地**。60fps で動くので state には置かず、
+  // 乗車地点は**呼ぶ瞬間の現在地**。60fps で動くので state には置かず、
   //   ここで `pedestrian` から直に読む（`frameBuffer` と同じ作法）
   const callTaxi = () => {
     if (!draftDropoff) return
@@ -135,11 +135,11 @@ export function TaxiScreen() {
         </div>
 
         <TaxiMap picking={picking} onPick={handlePick} draftDropoff={draftDropoff}>
-          <TaxiCameraView on={cameraOn} vehicleId={taxi.vehicleId} />
+          <TaxiCameraView on={cameraOn} vehicleId={taxi.vehicleId} plate={plate} />
         </TaxiMap>
 
         <div className="taxi-phone-body">
-          {/* ★ key は「段階」で切る。ETA を含めると毎秒アニメーションして落ち着かない */}
+          {/* key は「段階」で切る（ETA を含めると毎秒アニメーションが走り直す） */}
           <div
             className="taxi-headline"
             key={`${taxi.phase}:${picking ?? '-'}:${ready}`}

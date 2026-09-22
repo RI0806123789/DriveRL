@@ -2,7 +2,7 @@
 
 import * as THREE from 'three'
 
-import type { NodePosition, SignalPlacementInput } from './signalGeometry'
+import type { SignalPlacementInput } from './signalGeometry'
 
 /** 灯火径。歩行者用は車両用（300mm）より小さい 250mm */
 export const PED_LAMP_DIAMETER = 0.25
@@ -21,10 +21,7 @@ export const PED_POLE_RADIUS = 0.055
 export const PED_ROLE_RED = 0
 export const PED_ROLE_GREEN = 1
 
-/**
- * 歩行者用信号は**車両信号の裏返し**。車が赤で止まっていれば渡ってよい。
- * `frame.signals` の現示（0=青 / 1=黄 / 2=赤）を受けて、渡れるかどうかを返す。
- */
+/** 歩行者用信号は**車両信号の裏返し**。 */
 export function pedestrianWalkable(vehiclePhase: number): boolean {
   return vehiclePhase === 2
 }
@@ -46,31 +43,23 @@ export interface PedestrianLampSlot {
 }
 
 export interface PedestrianSignalResult {
-  /** 支柱と筐体を 1 つに統合するための部品 */
-  parts: THREE.BufferGeometry[]
   lamps: PedestrianLampSlot[]
-  /** 検証用: 灯器ごとの位置と向き */
+  /** 灯器ごとの位置と向き。支柱と筐体はこれを instancedMesh の行列にする */
   placements: Array<{ x: number; z: number; facing: number; signalIndex: number }>
 }
 
-/**
- * 車両信号 1 基につき、その停止線の先にある横断歩道の**両端**へ灯器を 1 基ずつ立てる。
- * 渡ってくる人に正対させるので、左端の灯器は右を、右端の灯器は左を向く。
- */
+/** 支柱の高さ [m]。灯器の上端まで伸ばす */
+export const PED_POLE_HEIGHT = PED_MOUNT_HEIGHT + PED_HOUSING_H / 2
+
+/** 車両信号 1 基につき、その停止線の先にある横断歩道の**両端**へ灯器を 1 基ずつ立てる。 */
 export function buildPedestrianSignalPlacement(
   signals: SignalPlacementInput[],
-  nodes: NodePosition[],
 ): PedestrianSignalResult {
-  const nodeById = new Map<number, NodePosition>()
-  for (const n of nodes) nodeById.set(n.id, n)
-
-  const parts: THREE.BufferGeometry[] = []
   const lamps: PedestrianLampSlot[] = []
   const placements: PedestrianSignalResult['placements'] = []
 
   for (let si = 0; si < signals.length; si++) {
     const sg = signals[si]
-    const node = nodeById.get(sg.nodeId)
     const cos = Math.cos(sg.heading)
     const sin = Math.sin(sg.heading)
     // 停止線（信号の座標）から交差点側へ少し入ったところが横断歩道
@@ -90,21 +79,6 @@ export function buildPedestrianSignalPlacement(
 
       placements.push({ x, z, facing, signalIndex: si })
 
-      const poleHeight = PED_MOUNT_HEIGHT + PED_HOUSING_H / 2
-      const pole = new THREE.CylinderGeometry(
-        PED_POLE_RADIUS,
-        PED_POLE_RADIUS * 1.25,
-        poleHeight,
-        7,
-      )
-      pole.translate(x, poleHeight / 2, z)
-      parts.push(pole)
-
-      const housing = new THREE.BoxGeometry(PED_HOUSING_D, PED_HOUSING_H, PED_HOUSING_W)
-      housing.rotateY(facing)
-      housing.translate(x, PED_MOUNT_HEIGHT, z)
-      parts.push(housing)
-
       const frontX = Math.cos(facing)
       const frontZ = -Math.sin(facing)
       for (const role of [PED_ROLE_RED, PED_ROLE_GREEN]) {
@@ -123,7 +97,24 @@ export function buildPedestrianSignalPlacement(
     }
   }
 
-  return { parts, lamps, placements }
+  return { lamps, placements }
+}
+
+/** 支柱。原点は地面で、instance には位置だけ入れる */
+export function createPedestrianPoleGeometry(): THREE.BufferGeometry {
+  const g = new THREE.CylinderGeometry(
+    PED_POLE_RADIUS,
+    PED_POLE_RADIUS * 1.25,
+    PED_POLE_HEIGHT,
+    7,
+  )
+  g.translate(0, PED_POLE_HEIGHT / 2, 0)
+  return g
+}
+
+/** 灯器の筐体。原点は灯器の中心で、instance の rotation.y に facing を入れる */
+export function createPedestrianHousingGeometry(): THREE.BufferGeometry {
+  return new THREE.BoxGeometry(PED_HOUSING_D, PED_HOUSING_H, PED_HOUSING_W)
 }
 
 /** 灯火に使う角板。法線を +X に向けてある（rotation.y にそのまま方位を入れられる） */

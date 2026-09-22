@@ -382,7 +382,9 @@ export function SimulationTab() {
               <div
                 className="m3-bar-fill"
                 style={{
-                  width: `${Math.max(0, Math.min(100, tracked.progress * 100))}%`,
+                  ['--m3-bar-value' as string]: String(
+                    Math.max(0, Math.min(1, tracked.progress)),
+                  ),
                   background: vehicleColor(tracked.id),
                 }}
               />

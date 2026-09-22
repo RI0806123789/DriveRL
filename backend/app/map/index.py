@@ -273,10 +273,6 @@ class MapIndexImpl:
         ]
         out.sort(key=lambda item: item[0])
 
-        # ★ 同じ交差点の灯器が二重に拾われることがある（近接した別ノードに灯器が
-        #   立っている）。前方の信号すべてに停止線を引くので、まとめないと同じ
-        #   交差点で二度止まる。現示は `MapSignal.phase_key` が揃えているので、
-        #   どちらが残っても色は同じ。
         merged: list[tuple[float, int]] = []
         for arc, idx in out:
             if merged and arc - merged[-1][0] < SIGNAL_MERGE_M:

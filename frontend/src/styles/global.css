@@ -273,6 +273,28 @@ p {
   pointer-events: none;
 }
 
+/* 認識器が見ている範囲（擬似カメラの画いっぱい）。運転席カメラのほうが画角が
+   広いので、検出枠はこの内側にしか出ない */
+.detection-scope {
+  position: absolute;
+  border: 1px dashed color-mix(in srgb, var(--m3-on-surface) 34%, transparent);
+  border-radius: var(--m3-shape-xs);
+}
+
+.detection-scope-label {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 2px);
+  padding: 1px 6px;
+  border-radius: var(--m3-shape-xs);
+  background: color-mix(in srgb, var(--m3-surface-container-lowest) 62%, transparent);
+  color: color-mix(in srgb, var(--m3-on-surface) 62%, transparent);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
 .detection-box {
   position: absolute;
   border: 2px solid var(--m3-on-surface);
@@ -816,8 +838,7 @@ p {
     background-color var(--m3-dur-medium) var(--m3-ease-emphasized),
     color var(--m3-dur-medium) var(--m3-ease-emphasized),
     border-radius var(--m3-dur-medium) var(--m3-ease-spring),
-    transform var(--m3-dur-short) var(--m3-ease-emphasized),
-    flex-grow var(--m3-dur-long) var(--m3-ease-emphasized);
+    transform var(--m3-dur-short) var(--m3-ease-emphasized);
 }
 .m3-tab:hover:not(:disabled):not([aria-selected='true']) {
   background: color-mix(in srgb, var(--m3-on-surface) 8%, transparent);
@@ -917,9 +938,6 @@ p {
   border-radius: var(--m3-shape-full);
   background: var(--m3-primary);
   border: 2px solid var(--m3-surface-container-low);
-  transition:
-    width var(--m3-dur-short) var(--m3-ease-spring),
-    height var(--m3-dur-short) var(--m3-ease-spring);
 }
 
 .m3-slider-input:hover:not(:disabled)::-webkit-slider-thumb {
@@ -1006,8 +1024,6 @@ p {
   transform: translate(0, -50%);
   transition:
     transform var(--m3-dur-medium) var(--m3-ease-spring),
-    width var(--m3-dur-medium) var(--m3-ease-spring),
-    height var(--m3-dur-medium) var(--m3-ease-spring),
     background-color var(--m3-dur-medium) var(--m3-ease-emphasized);
 }
 .m3-switch input:checked + .m3-switch-track {
@@ -1040,9 +1056,6 @@ p {
 .m3-switch-thumb {
   transition:
     transform var(--m3-dur-medium) var(--m3-ease-spring),
-    width var(--m3-dur-medium) var(--m3-ease-spring),
-    height var(--m3-dur-medium) var(--m3-ease-spring),
-    box-shadow var(--m3-dur-short) var(--m3-ease-standard),
     background-color var(--m3-dur-medium) var(--m3-ease-emphasized);
 }
 
@@ -1483,9 +1496,11 @@ button.m3-chip:active:not(:disabled) {
 }
 
 .m3-progress--determinate::before {
-  width: calc(var(--m3-progress-value, 0) * 100%);
+  width: 100%;
+  transform-origin: left center;
+  transform: scaleX(var(--m3-progress-value, 0));
   animation: none;
-  transition: width var(--m3-dur-medium) var(--m3-ease-standard);
+  transition: transform var(--m3-dur-medium) var(--m3-ease-standard);
 }
 .m3-progress--determinate::after {
   content: none;
@@ -1909,10 +1924,13 @@ button.m3-chip:active:not(:disabled) {
   overflow: hidden;
 }
 .m3-bar-fill {
+  width: 100%;
   height: 100%;
   border-radius: var(--m3-shape-full);
+  transform-origin: left center;
+  transform: scaleX(var(--m3-bar-value, 0));
 
-  transition: width 220ms var(--m3-ease-standard);
+  transition: transform 220ms var(--m3-ease-standard);
 }
 
 @supports (animation-timeline: scroll()) {

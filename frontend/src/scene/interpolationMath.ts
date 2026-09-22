@@ -35,10 +35,7 @@ export function createPedestrianPose(): PedestrianPose {
   return { x: 0, y: 0, heading: 0, stride: 0, crossing: false }
 }
 
-/**
- * NPC 歩行者を補間して out に書き込む。
- * **大きく跳んだら補間しない**（誰にも見えていない歩行者は車の近くへ回されるため）。
- */
+/** NPC 歩行者を補間して out に書き込む。 */
 export function samplePedestrian(
   curr: NpcPedestrianState,
   prev: NpcPedestrianState | undefined,

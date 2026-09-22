@@ -284,7 +284,7 @@ def decode_detections(
         out.append(
             PerceptionResult(
                 slot=int(slot),
-                detections=pack_by_class_quota(per_class, max_detections),
+                detections=pack_by_class_quota(per_class, max_detections, spec),
             )
         )
     return out

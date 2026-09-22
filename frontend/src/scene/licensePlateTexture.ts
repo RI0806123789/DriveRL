@@ -15,10 +15,7 @@ const BORDER = 10
 /** ボルト穴の半径 */
 const BOLT_R = 7
 
-/**
- * 一連指定番号を描く。**中黒は数字より小さく、詰めて描く**（実物と同じ）。
- * 等幅のまま並べると「・ ・ ・ 0」と間延びして日本のプレートに見えない。
- */
+/** 一連指定番号を描く。 */
 function drawSerial(ctx: CanvasRenderingContext2D, serial: string, top: number): void {
   const dots = serial.length - serial.replace(/・/g, '').length
   const rest = serial.slice(dots)
@@ -79,10 +76,7 @@ function drawPlate(
   }
 }
 
-/**
- * 車両 `count` 台ぶんのプレートを縦に並べたテクスチャを作る。
- * **Canvas は上から順に車両 0, 1, 2 … を描く**（`plateUvRow()` が v へ写す）。
- */
+/** 車両 `count` 台ぶんのプレートを縦に並べたテクスチャを作る。 */
 export function createPlateAtlas(
   count: number,
   presetId: string | null | undefined,

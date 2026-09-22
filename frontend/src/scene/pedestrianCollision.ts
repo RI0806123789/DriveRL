@@ -173,10 +173,7 @@ export interface MoveResult {
   blocked: boolean
 }
 
-/**
- * 移動を軸ごとに試して、当たった軸だけ捨てる（壁沿いに滑らせるための定石）。
- * まとめて判定すると、壁に少し触れただけで完全に動けなくなる。
- */
+/** 移動を軸ごとに試して、当たった軸だけ捨てる（壁沿いに滑らせるための定石）。 */
 export function resolveMove(
   index: BuildingIndex | null,
   fromX: number,
@@ -213,10 +210,7 @@ export function resolveMove(
 export const AIM_DISTANCE_M = 9
 export const AIM_ANGLE_RAD = 0.5
 
-/**
- * 照準（体の向き）の先にいる車両のスロット番号。いなければ -1。
- * **背後の車両を拾わないよう、角度差で足切りしてから最寄りを採る。**
- */
+/** 照準（体の向き）の先にいる車両のスロット番号。 */
 export function aimedVehicle(
   x: number,
   y: number,

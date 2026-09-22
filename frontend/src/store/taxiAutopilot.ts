@@ -34,9 +34,7 @@ export interface AutoInput {
   lastSentAt: number
 }
 
-/**
- * いま何をすべきかを決める。**送信も歩行もしない**（呼んだ側が実行する）。
- */
+/** いま何をすべきかを決める。 */
 export function decideAutoAction(input: AutoInput): AutoAction {
   if (!input.mapReady || !input.placed) return 'none'
   const since = input.now - input.lastSentAt
@@ -58,9 +56,7 @@ export function decideAutoAction(input: AutoInput): AutoAction {
   }
 }
 
-/**
- * 行き先にする道路ノードを選ぶ。近すぎ・遠すぎを避け、見つからなければ最も近い候補を返す。
- */
+/** 行き先にする道路ノードを選ぶ。 */
 export function pickDropoff(
   nodes: readonly MapNode[],
   fromX: number,

@@ -45,19 +45,23 @@ class SidewalkNetwork:
             self.start[1:] = np.cumsum(counts)[:-1]
         self.point_count = counts
         self.points = (
-            np.concatenate([np.asarray(e.polyline, dtype=np.float64) for e in edges], axis=0)
+            np.asarray(
+                [v for e in edges for pt in e.polyline for v in pt], dtype=np.float64
+            ).reshape(-1, 2)
             if self.count
             else np.zeros((0, 2), dtype=np.float64)
         )
 
-        cum = np.zeros(self.points.shape[0], dtype=np.float64)
-        length = np.zeros(self.count, dtype=np.float64)
-        for i in range(self.count):
-            lo = int(self.start[i])
-            hi = lo + int(counts[i])
-            seg = np.linalg.norm(np.diff(self.points[lo:hi], axis=0), axis=1)
-            cum[lo + 1 : hi] = np.cumsum(seg)
-            length[i] = float(cum[hi - 1])
+        total_points = int(self.points.shape[0])
+        cum = np.zeros(total_points, dtype=np.float64)
+        if self.count:
+            seg = np.linalg.norm(np.diff(self.points, axis=0), axis=1)
+            seg[self.start[1:] - 1] = 0.0
+            running = np.concatenate(([0.0], np.cumsum(seg)))
+            cum = running - np.repeat(running[self.start], counts)
+            length = cum[self.start + counts - 1]
+        else:
+            length = np.zeros(0, dtype=np.float64)
         self.length = length
 
         self.offset = np.zeros(self.count, dtype=np.float64)
@@ -79,17 +83,7 @@ class SidewalkNetwork:
         self._build_signal_table(data, edges)
 
     def _build_signal_table(self, data: MapData, edges: list) -> None:
-        """エッジの端ごとに「そこへ入る車両を規制する信号」を引けるようにする。
-
-        ★ 歩行者用の信号は**車両信号の裏返し**として扱う（`docs/protocol.md` 2.3）。
-        エッジを横断する歩行者にとって危ないのはそのエッジを走る車なので、
-        その車が赤で止まっていれば渡ってよい。
-
-        ★ 灯器は進入路 1 本につき 1 基作られるので、**`MapSignal.edge_id` で引くこと。**
-        向きの近さで選ぶと、同じ交差点の別の進入路の灯器（＝別の群）を掴むことがある。
-        一方通行の出口側にはその基が無いので、**同じ軸の基**で代える（群が同じなら
-        現示も同じ。軸が違う基しか無ければ信号の無い交差点として扱う）。
-        """
+        """エッジの端ごとに「そこへ入る車両を規制する信号」を引けるようにする。"""
         self.signal_fwd = np.full(self.count, -1, dtype=np.int32)
         self.signal_bwd = np.full(self.count, -1, dtype=np.int32)
         signals = list(getattr(data, "signals", []) or [])
@@ -104,20 +98,30 @@ class SidewalkNetwork:
             by_node.setdefault(int(sig.node_id), []).append((i, float(sig.heading)))
 
         for e in range(self.count):
+            node_v = int(self.node_v[e])
+            node_u = int(self.node_u[e])
+            near_v = by_node.get(node_v)
+            near_u = by_node.get(node_u)
+            if near_v is None and near_u is None:
+                continue
             edge_id = int(edges[e].id)
             lo = int(self.start[e])
             hi = lo + int(self.point_count[e])
             pts = self.points[lo:hi]
-            head_in = math.atan2(pts[-1, 1] - pts[-2, 1], pts[-1, 0] - pts[-2, 0])
-            head_out = math.atan2(pts[0, 1] - pts[1, 1], pts[0, 0] - pts[1, 0])
-            node_v = int(self.node_v[e])
-            node_u = int(self.node_u[e])
-            self.signal_fwd[e] = by_approach.get(
-                (edge_id, node_v), _same_axis_signal(by_node.get(node_v), head_in)
-            )
-            self.signal_bwd[e] = by_approach.get(
-                (edge_id, node_u), _same_axis_signal(by_node.get(node_u), head_out)
-            )
+            if near_v is not None:
+                hit = by_approach.get((edge_id, node_v))
+                if hit is None:
+                    head_in = math.atan2(
+                        pts[-1, 1] - pts[-2, 1], pts[-1, 0] - pts[-2, 0]
+                    )
+                    hit = _same_axis_signal(near_v, head_in)
+                self.signal_fwd[e] = hit
+            if near_u is not None:
+                hit = by_approach.get((edge_id, node_u))
+                if hit is None:
+                    head_out = math.atan2(pts[0, 1] - pts[1, 1], pts[0, 0] - pts[1, 0])
+                    hit = _same_axis_signal(near_u, head_out)
+                self.signal_bwd[e] = hit
 
     def signal_at(self, edge: int, forward: bool) -> int:
         """エッジの端にある車両信号の添字。無ければ -1。"""
@@ -180,11 +184,7 @@ class SidewalkNetwork:
         return x, y, d[:, 0] / seg_len, d[:, 1] / seg_len
 
     def arc_of(self, edge: int, x: float, y: float) -> float:
-        """エッジ上（の近く）の点を、そのエッジの弧長位置へ落とす。
-
-        ★ `MapIndex.nearest_road_point()` が返す 4 番目は**接線方位であって弧長ではない**。
-        そのまま弧長として使うと、置いたつもりの場所とまったく違う所に立つ。
-        """
+        """エッジ上（の近く）の点を、そのエッジの弧長位置へ落とす。"""
         lo = int(self.start[edge])
         hi = lo + int(self.point_count[edge])
         pts = self.points[lo:hi]
@@ -235,11 +235,7 @@ def build_sidewalk_network(data: MapData) -> SidewalkNetwork:
 
 
 class PedestrianCrowd:
-    """NPC 歩行者の集合。位置は全員まとめて numpy で進める。
-
-    ★ 状態は「どのエッジの歩道を、どちら向きに、左右どちら側を歩いているか」で持つ。
-    座標を直接積分すると建物へめり込むし、道路から離れていく。
-    """
+    """NPC 歩行者の集合。"""
 
     def __init__(self, map_index: MapIndex, rng: np.random.Generator) -> None:
         self.map_index = map_index
@@ -267,6 +263,14 @@ class PedestrianCrowd:
         self.y = np.zeros(n, dtype=np.float64)
         self.heading = np.zeros(n, dtype=np.float64)
 
+        #: 位置が変わるたびに増える。`World.pedestrian_xy` のキャッシュ鍵
+        self.revision = 0
+        self._positions: np.ndarray | None = None
+
+    def _invalidate_positions(self) -> None:
+        self._positions = None
+        self.revision += 1
+
     @property
     def walkable(self) -> bool:
         """歩ける道路があるか。無いマップでは歩行者を出せない。"""
@@ -281,6 +285,7 @@ class PedestrianCrowd:
         want = int(np.clip(int(count), 0, config.MAX_PEDESTRIANS))
         if not self.walkable:
             self.active[:] = False
+            self._invalidate_positions()
             return
         current = int(np.count_nonzero(self.active))
         if want == current:
@@ -288,6 +293,7 @@ class PedestrianCrowd:
         if want < current:
             alive = np.flatnonzero(self.active)
             self.active[alive[want:]] = False
+            self._invalidate_positions()
             return
         free = np.flatnonzero(~self.active)[: want - current]
         for slot in free:
@@ -329,11 +335,7 @@ class PedestrianCrowd:
         )
 
     def may_cross(self, edge: int, forward: bool, phases: Sequence[int]) -> bool:
-        """その端の横断歩道を渡ってよいか。
-
-        ★ 歩行者用の信号は**車両信号の裏返し**。そのエッジを走る車が赤で止まって
-        いれば渡ってよい。信号の無い交差点では従来どおり自由に渡る。
-        """
+        """その端の横断歩道を渡ってよいか。"""
         index = self.net.signal_at(int(edge), bool(forward))
         if index < 0 or index >= len(phases):
             return True
@@ -400,7 +402,7 @@ class PedestrianCrowd:
                 self.cross[slot] = 0.0
                 self.cross_to[slot] = -self.side[slot]
                 self.dir[slot] = -self.dir[slot]
-                # ★ 渡り**始める**ときだけ信号を見る。渡っている最中に変わっても
+                # 渡り**始める**ときだけ信号を見る。渡っている最中に変わっても
                 #   引き返させない（実際の歩行者と同じく渡り切る）
                 if self.may_cross(edge, forward, phases):
                     self.crossing[slot] = True
@@ -425,6 +427,7 @@ class PedestrianCrowd:
 
     def _refresh_pose(self) -> None:
         """エッジ上の状態から world 座標と向きを作り直す。"""
+        self._invalidate_positions()
         idx = np.flatnonzero(self.active)
         if idx.size == 0:
             return
@@ -449,12 +452,7 @@ class PedestrianCrowd:
         self.heading[idx] = np.where(facing_across, cross_heading, walk_heading)
 
     def recycle(self, vehicle_xy: np.ndarray) -> int:
-        """どの車からも遠い歩行者を、車の近くの歩道へ回す。回した人数を返す。
-
-        ★ これが無いと**広いマップでは 1 人も画に写らない**。金沢は 12.3km 四方
-        なので、64 人を一様に撒くと 0.42 人/km² にしかならず、実測で真値 0 件だった。
-        誰にも見えていない人だけを動かすので、画面上でワープして見えることはない。
-        """
+        """どの車からも遠い歩行者を、車の近くの歩道へ回す。"""
         idx = np.flatnonzero(self.active)
         if idx.size == 0 or vehicle_xy is None or vehicle_xy.shape[0] == 0:
             return 0
@@ -495,11 +493,7 @@ class PedestrianCrowd:
         reach: float = 26.0,
         ahead_only: bool = True,
     ) -> None:
-        """車両の周りへ寄せ集める（教師データを集めるとき）。
-
-        道路網の上で位置を決めるので、寄せても歩道から外れない。
-        `ahead_only` が True なら車両の前方の錐の中だけに置く（狙って集めるとき）。
-        """
+        """車両の周りへ寄せ集める（教師データを集めるとき）。"""
         idx = np.flatnonzero(self.active)
         if idx.size == 0 or anchors_x.size == 0 or not self.walkable:
             return
@@ -558,8 +552,16 @@ class PedestrianCrowd:
 
     @property
     def positions(self) -> np.ndarray:
-        """アクティブな歩行者の座標 (K, 2) float64。"""
+        """アクティブな歩行者の座標 (K, 2) float64。**書き換え不可**（使い回す）。"""
+        cached = self._positions
+        if cached is not None:
+            return cached
         idx = np.flatnonzero(self.active)
-        if idx.size == 0:
-            return np.zeros((0, 2), dtype=np.float64)
-        return np.column_stack((self.x[idx], self.y[idx]))
+        out = (
+            np.zeros((0, 2), dtype=np.float64)
+            if idx.size == 0
+            else np.column_stack((self.x[idx], self.y[idx]))
+        )
+        out.flags.writeable = False
+        self._positions = out
+        return out

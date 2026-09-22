@@ -54,7 +54,7 @@ export function TaxiHud() {
   // 迎車の途中でも、照準に入っていれば乗れる（乗車地点まで待たせない）
   const canBoard = isBoardablePhase(taxi.phase) && sample.aimed === taxi.vehicleId
 
-  // ★ 乗れる／降りられることを最優先で出す。
+  // 乗れる／降りられることを最優先で出す。
   //   ポインタロックの案内を先に置くと、肝心の「いま押せるキー」が隠れる
   let hint: string
   if (canBoard) {

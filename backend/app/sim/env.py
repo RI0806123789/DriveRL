@@ -119,14 +119,7 @@ class SimulationEnv:
         return ok
 
     def _autopilot(self, slot: int) -> tuple[float, float]:
-        """経路の先を追う操作を返す（Pure Pursuit）。
-
-        加速の抑制（信号・規制速度・カーブ・車間・乗降地点）は `constrain_accel` に
-        任せる。ここが決めるのは「どこを見て、どれだけ切るか」だけ。
-
-        ★ 舵角は**目標点を通る円弧の曲率**から出すこと。角度差をそのまま舵角に
-        すると、急カーブで切り足りずに膨らんで建物へ突っ込む（金沢で実測）。
-        """
+        """経路の先を追う操作を返す（Pure Pursuit）。"""
         world = self.world
         state = world.slots[slot]
         route = state.route
@@ -153,7 +146,7 @@ class SimulationEnv:
         curvature = 2.0 * math.sin(alpha) / max(distance, 1.0)
         steer = math.atan(config.WHEELBASE * curvature)
         # 曲がっている間は加速しない（突っ込むほど膨らむ）。
-        # ★ ただし止まっているときは必ず出すこと。切ったまま停まると、
+        # ただし止まっているときは必ず出すこと。切ったまま停まると、
         #   角度が変わらないので二度と発進できなくなる（銀座で 361 秒動かなくなった）
         straight = abs(alpha) < AUTOPILOT_STRAIGHT_RAD
         accel = 1.0 if (straight or speed < AUTOPILOT_CREEP_MPS) else 0.0
@@ -169,15 +162,7 @@ class SimulationEnv:
         return np.zeros(0, dtype=np.int64)
 
     def _lead_gap(self, slot: int) -> float:
-        """前方の同じ進路上にいる他車までの車間 [m]。いなければ inf。
-
-        経路追従は前走車を見ないので、**これが無いと停まっている車へ必ず追突する**
-        （学習が進んでいないモデルでは他車がその場に止まったままになる）。
-
-        ★ **同じ向きに走っている車だけ**を数えること。交差点で直交する車や対向車まで
-        「前走車」にすると、互いに相手の前方に居座って**双方が永久に止まる**
-        （実測で 444 秒動かなくなった）。交差する流れは信号が捌く。
-        """
+        """前方の同じ進路上にいる他車までの車間 [m]。"""
         fleet = self.world.fleet
         idx = np.flatnonzero(fleet.active)
         if idx.size <= 1:
@@ -202,14 +187,7 @@ class SimulationEnv:
         return float(lon[ahead].min())
 
     def _pedestrian_gap(self, slot: int) -> float:
-        """前方の進路上にいる歩行者までの距離 [m]。いなければ inf。
-
-        NPC 群衆と**実用モードの徒歩キャラ**の両方を見る（`world.pedestrian_xy`）。
-
-        ★ **経路追従の車にだけ掛けること**（`_lead_gap` と同じ理由）。学習中の車に
-        掛けると「歩行者を轢かない世界」になり、PPO から見た環境が変わってしまう。
-        PPO 側は観測（歩行者の欄と走行可能領域）から自分で止まれるようになる。
-        """
+        """前方の進路上にいる歩行者までの距離 [m]。"""
         people = self.world.pedestrian_xy
         if people.shape[0] == 0:
             return float("inf")
@@ -249,11 +227,7 @@ class SimulationEnv:
         return held(self._pedestrian_gap(slot), AUTOPILOT_PEDESTRIAN_MARGIN_M)
 
     def set_player_pose(self, at: tuple[float, float] | None) -> None:
-        """実用モードの徒歩キャラの位置を反映する（None で消す）。
-
-        歩行者として扱うだけで、専用の停止ロジックは持たない。`world.pedestrian_xy`
-        へ混ざるので、車間・擬似カメラ・正解ラベル・観測・衝突判定がそのまま効く。
-        """
+        """実用モードの徒歩キャラの位置を反映する（None で消す）。"""
         self.world.set_player(at)
 
     def commandeer_vehicle(self, slot: int) -> None:
@@ -294,12 +268,13 @@ class SimulationEnv:
         for slot in changed:
             self._reset_slot_stats(int(slot))
 
-    def reset_all(self) -> np.ndarray:
+    def reset_all(self, *, relocate_walkers: bool = True) -> np.ndarray:
         """全アクティブスロットを再スポーンし、観測を返す。"""
         for slot in range(config.MAX_VEHICLES):
             if self.world.fleet.active[slot]:
                 self.world.respawn(slot)
-        self.world.relocate_pedestrians()
+        if relocate_walkers:
+            self.world.relocate_pedestrians()
         self._episode_reward[:] = 0.0
         self._episode_lateral[:] = 0.0
         self.world.set_event_flags(
@@ -340,7 +315,6 @@ class SimulationEnv:
 
         # 経路追従で走らせる車。**方策の実力に体験を左右させないため**で、
         # 実用モードでは街の車も止まったままにしない（詰まるとタクシーも来られない）
-        held = int(self.commandeered_slot)
         piloted = self._autopilot_slots(active_before)
         for slot in piloted:
             accel_cmd[slot], steer_cmd[slot] = self._autopilot(int(slot))
@@ -358,7 +332,7 @@ class SimulationEnv:
         if params.obey_speed_signs:
             limit = np.minimum(limit, self.world.posted_speed_limits())
         limit = np.minimum(limit, self.world.stop_speed_limits())
-        # ★ 車間は経路追従の車にだけ掛ける。学習中の車に掛けると
+        # 車間は経路追従の車にだけ掛ける。学習中の車に掛けると
         #   「追突しない世界」になり、PPO から見た環境が変わってしまう
         for slot in piloted:
             limit[slot] = min(
@@ -665,10 +639,6 @@ class SimulationEnv:
                 for i, slot in enumerate(idx):
                     freespace[int(slot)] = free_arr[i]
             except Exception:
-                # ★ ここで手放さないと「観測の出どころ: CNN の認識結果」と出したまま
-                #   真値で走り続ける（画面が嘘をつく）。おまけに毎ステップ擬似カメラを
-                #   描いて推論を試み続けるので、落ちた分だけ遅くなる。
-                #   直すには「モデル作成」タブから読み込み直す（reload_detector）。
                 self._detector = None
                 self._camera = None
                 if not self._detector_failed:

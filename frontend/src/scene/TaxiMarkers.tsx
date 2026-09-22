@@ -8,8 +8,7 @@ import { useSimStore } from '../store/simStore'
 import { isRidingPhase } from '../types/protocol'
 import { usePalette } from './usePalette'
 
-/** 柱の高さ [m]。建物の陰からでも見えるだけの高さを取る。
- *  太くすると、乗車地点に立って待つときに視界を塞ぐので細く保つこと */
+/** 柱の高さ [m]。 */
 const PILLAR_HEIGHT = 10
 const PILLAR_RADIUS = 0.3
 

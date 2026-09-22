@@ -157,11 +157,7 @@ export interface SimStore {
   map: MapMessage | null
   /** 「読込中」を押した直後の楽観的表示に使う。status が来たら解除される */
   pendingPresetId: string | null
-  /**
-   * グラフ用の系列。**その場で追記する**（毎秒 O(n) のコピーを避けるため。
-   * `frameBuffer` と同じ作法。code_review E-03）。読む側は `metricsRevision` を
-   * 再計算の契機にすること。
-   */
+  /** グラフ用の系列。 */
   metricsSeries: MetricsSeries
   /** `metricsSeries` に追記するたびに増える */
   metricsRevision: number
@@ -314,7 +310,7 @@ export const useSimStore = create<SimStore>((set, get) => ({
           config: init.config ?? DEFAULT_CONFIG,
           params: init.params ?? DEFAULT_PARAMS,
           status,
-          // ★ リロードしてもサーバーのモードへ戻す（配車の途中で開発モードに落とさない）
+          // リロードしてもサーバーのモードへ戻す（配車の途中で開発モードに落とさない）
           mode: status.practicalMode ? 'taxi' : 'dev',
           taxiCameraOn: false,
           taxiAutoOn: false,

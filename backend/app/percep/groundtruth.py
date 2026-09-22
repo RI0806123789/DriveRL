@@ -200,17 +200,7 @@ def _blocked_by_fleet(
     viewer: int,
     exclude: np.ndarray | None = None,
 ) -> np.ndarray:
-    """視線が**他車の車体**で遮られているターゲットを True で返す。shape (T,)。
-
-    `_line_of_sight` は建物レイヤの占有グリッドしか見ないので、動く物体はここで見る
-    （code_review C-07）。遮蔽物を車両に限るのは、実測で「箱の領域に当該クラスの
-    画素が無い」障害物 681 件のうち **672 件（98.7%）が他車の陰**だったため。
-    パイロン（高さ 0.75m）は 2D の線分交差では信号・標識まで隠してしまい、
-    過剰に遮蔽する側へ倒れるので遮蔽物には含めない。
-
-    `exclude` は「そのターゲット自身である車両のスロット番号」（無ければ -1）。
-    自分自身の車体で自分が隠れる、という判定を避ける。
-    """
+    """視線が**他車の車体**で遮られているターゲットを True で返す。"""
     t = int(targets.shape[0])
     if t == 0:
         return np.zeros(0, dtype=bool)
@@ -680,7 +670,7 @@ def detect_ground_truth(
         per_class[cls] = [det for _, det in items[: CLASS_QUOTA[cls]]]
 
     result.detections = pack_by_class_quota(
-        per_class, int(config.PERCEP_MAX_DETECTIONS)
+        per_class, int(config.PERCEP_MAX_DETECTIONS), spec
     )
     return result
 

@@ -1,15 +1,6 @@
 /** カメラ位置の計算（純粋関数）。 */
 
-/**
- * カメラが目標位置を追う強さ [1/秒]。大きいほど速く追いつく。
- *
- * ★ **運転席は 0（＝車体に固定）にすること。** カメラは車内にあるので、
- * 車体に対して動いてはいけない。遅れて追わせると、定常状態で速度に比例した
- * ずれ（`driverSeatLag()`）が生まれ、**加減速のたびに車内で前後へ滑る**。
- * 実際に 22 で追わせていて、13.9m/s では 0.63m ぶん揺れていた
- * （目からダッシュボードまでが 0.51m しかないので、揺れのほうが大きい）。
- * 追従カメラ（車外から追いかける）は遅れてよいので、こちらは残す。
- */
+/** カメラが目標位置を追う強さ [1/秒]。 */
 export const DRIVER_FOLLOW_RATE = 0
 export const FOLLOW_FOLLOW_RATE = 4.5
 
@@ -19,10 +10,7 @@ export function followLerpFactor(rate: number, deltaSec: number): number {
   return 1 - Math.exp(-rate * Math.max(0, deltaSec))
 }
 
-/**
- * 追従の遅れで生じる、目標に対する定常的なずれ [m]。
- * 一定速度で走っているとき、カメラは目標より `speed / rate` だけ後ろに居座る。
- */
+/** 追従の遅れで生じる、目標に対する定常的なずれ [m]。 */
 export function driverSeatLag(rate: number, speedMps: number): number {
   if (rate <= 0) return 0
   return speedMps / rate
@@ -42,13 +30,7 @@ export const DRIVER_EYE_HEIGHT = 1.22
 export const DRIVER_LOOK_AHEAD = 30
 export const DRIVER_LOOK_DROP = 1.1
 
-/**
- * 運転席カメラの**垂直**視野角 [度]。
- * ★ **ここが唯一の出典。** `CameraRig` のカメラと `detectionProjection` の
- * 検出枠の両方がこれを読む。片方だけ変えると、認識結果の枠が実物からずれる。
- * 68 度だとアクセル・ブレーキ（目から俯角 48 度）が画角の下へ外れて映らないので、
- * 足元まで入る値にしてある（下端は視線の 2.1 度下 + 47.5 度 = 49.6 度）。
- */
+/** 運転席カメラの**垂直**視野角 [度]。 */
 export const DRIVER_FOV_DEG = 95
 
 export interface Vec3 {

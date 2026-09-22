@@ -1165,6 +1165,7 @@ cd frontend; npm run verify:pedestrian  # 徒歩キャラと NPC 歩行者（寸
 cd frontend; npm run verify:taximap     # スマホ画面の 2D 地図の座標変換
 cd frontend; npm run verify:nav         # カーナビの描き直しにかかる時間（金沢の規模で）
 cd frontend; npm run verify:taxiauto    # 配車の自動操作（段階の順番・送り直しの間隔）
+cd frontend; npm run verify:conventions # コメント規約と CSS の遷移規約
 ```
 
 `npm run verify` は Node で直接実行する検証スクリプトです。3D の向きは**間違っていても
@@ -1187,6 +1188,10 @@ cd frontend; npm run verify:taxiauto    # 配車の自動操作（段階の順�
 - 配車の自動操作: 段階を飛ばさないか（迎車の途中で乗らない・降りる前に呼ばない）、
   断られたときに 60fps で送り続けないか。**指令を出す順番だけは画面を見ても
   分からない**ので数値で確かめる
+- コメント規約と CSS: コード中に `★` が残っていないか、docstring と `/** */` が
+  1 行に収まっているか、`transition` にレイアウトを起こすプロパティが乗っていないか。
+  **どれも型チェックもビルドも通ってしまう**ので、宣言だけでは守られない
+  （実際に `★` は 133 件まで増え直した）
 - 天候: フォグの距離が霧の濃さに対して単調に縮むか、視点が高いほど緩むか
   （**俯瞰で街が完全に消えないこと**）、雨が視程を縮めないこと、明るさの下限、
   天候の移り変わり（雨がやんだ直後は空が先に晴れ、路面はまだ濡れていること）
