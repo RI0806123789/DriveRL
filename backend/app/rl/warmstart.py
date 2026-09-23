@@ -80,16 +80,14 @@ def collect_expert(env, steps: int = DEFAULT_STEPS, *, gamma: float | None = Non
             obs = np.asarray(env.observations, dtype=np.float32)
             active = np.asarray(env.active_mask, dtype=bool)
             slots = np.flatnonzero(active)
-            teach = {}
-            for slot in slots:
-                teach[int(slot)] = np.asarray(env._autopilot(int(slot)), dtype=np.float32)
 
             result = env.step(idle)
 
             for slot in slots:
                 slot = int(slot)
                 obs_seq[slot].append(obs[slot].copy())
-                act_seq[slot].append(teach[slot])
+                # 教師の操作は step() の中で経路追従が出したもの（進める前の状態から決めている）
+                act_seq[slot].append(env.autopilot_actions[slot].copy())
                 rew_seq[slot].append(float(result.rewards[slot]))
                 # 打ち切り（時間切れ）も区切りとして扱う。続きの価値を知らないので同じこと
                 truncated = result.truncated is not None and bool(result.truncated[slot])

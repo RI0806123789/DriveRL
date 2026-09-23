@@ -284,6 +284,16 @@ export function powerRatio(throttle: number): number {
   return Math.max(0, Math.min(1, (throttle + 1) / 2))
 }
 
+/** POWER の針の時定数 [s]。指令は 20Hz の段差で届き、方策の探索ノイズも乗るので慣性を付ける */
+export const POWER_NEEDLE_TAU_S = 0.15
+
+/** 針を目標の割合へ指数的に寄せる。間隔が長くても行き過ぎない */
+export function dampNeedle(current: number, target: number, dtSec: number, tauSec: number): number {
+  if (!(tauSec > 0)) return target
+  const k = 1 - Math.exp(-Math.max(0, dtSec) / tauSec)
+  return current + (target - current) * k
+}
+
 /** メーターの文字盤。 */
 export function makeGaugeFaceGeometry(radius: number): THREE.BufferGeometry {
   const g = new THREE.CircleGeometry(radius, 48)

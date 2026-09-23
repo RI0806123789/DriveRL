@@ -59,6 +59,8 @@ import {
   makeSteeringGeometry,
   makeTurnIndicatorGeometry,
   makeWheelGeometry,
+  POWER_NEEDLE_TAU_S,
+  dampNeedle,
   powerRatio,
   speedRatio,
 } from './vehicleGeometry'
@@ -69,9 +71,9 @@ const PEDALS_PER_VEHICLE = PEDAL_SLOTS.length
 const GAUGES_PER_VEHICLE = GAUGE_SLOTS.length
 const INDICATORS_PER_VEHICLE = TURN_INDICATOR_SLOTS.length
 
-/** メーターの針が指す割合 0..1。 */
-function gaugeRatio(kind: (typeof GAUGE_KINDS)[number], speed: number, throttle: number): number {
-  return kind === 'speed' ? speedRatio(speed) : powerRatio(throttle)
+/** メーターの針が指す割合 0..1。POWER は慣性を付けた割合（`dampNeedle`）を渡す */
+function gaugeRatio(kind: (typeof GAUGE_KINDS)[number], speed: number, power: number): number {
+  return kind === 'speed' ? speedRatio(speed) : power
 }
 
 const ringGeom = new THREE.TorusGeometry(2.9, 0.08, 8, 44)
@@ -200,6 +202,8 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
   const lastLights = useRef<Float32Array>(new Float32Array(0))
   /** 直前に書いたウインカー表示の明るさ。灯火と同じ理由で差分だけ送る */
   const lastIndicators = useRef<Float32Array>(new Float32Array(0))
+  /** POWER の針がいま指している割合。負なら未設定（次のフレームで指令へ合わせる） */
+  const powerNeedle = useRef<Float32Array>(new Float32Array(0))
 
   const resources = useMemo(() => {
     const bodyGeometry = makeBodyGeometry()
@@ -401,6 +405,7 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
     lastState.current = new Int8Array(count).fill(-1)
     lastLights.current = new Float32Array(count * LIGHTS_PER_VEHICLE).fill(-1)
     lastIndicators.current = new Float32Array(count * INDICATORS_PER_VEHICLE).fill(-1)
+    powerNeedle.current = new Float32Array(count).fill(-1)
     for (let id = 0; id < count; id++) {
       const row = plateUvRow(id, count)
       for (let k = 0; k < PLATES_PER_VEHICLE; k++) {
@@ -581,6 +586,7 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
         for (let k = 0; k < PLATES_PER_VEHICLE; k++) {
           plates.setMatrixAt(id * PLATES_PER_VEHICLE + k, scratch.hidden)
         }
+        powerNeedle.current[id] = -1
         continue
       }
 
@@ -602,10 +608,19 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
         pedals.setMatrixAt(id * PEDALS_PER_VEHICLE + k, scratch.out)
       }
 
+      // ペダルとブレーキランプは指令をそのまま使い、POWER の針だけ慣性を付ける
+      const powerTarget = powerRatio(pose.throttle)
+      const held = powerNeedle.current[id]
+      const power =
+        held < 0 || pose.teleported
+          ? powerTarget
+          : dampNeedle(held, powerTarget, delta, POWER_NEEDLE_TAU_S)
+      powerNeedle.current[id] = power
+
       for (let k = 0; k < GAUGES_PER_VEHICLE; k++) {
         composeFixedMatrix(scratch.transform, scratch.base, GAUGE_SLOTS[k].center, scratch.out)
         gauges.setMatrixAt(id * GAUGES_PER_VEHICLE + k, scratch.out)
-        const ratio = gaugeRatio(GAUGE_SLOTS[k].kind, pose.speed, pose.throttle)
+        const ratio = gaugeRatio(GAUGE_SLOTS[k].kind, pose.speed, power)
         composeNeedleMatrix(scratch.transform, scratch.base, k, ratio, scratch.out)
         needles.setMatrixAt(id * GAUGES_PER_VEHICLE + k, scratch.out)
       }

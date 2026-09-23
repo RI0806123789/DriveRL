@@ -51,6 +51,8 @@ import {
   makeTurnIndicatorGeometry,
   navSpanFor,
   needleAngle,
+  POWER_NEEDLE_TAU_S,
+  dampNeedle,
   pedalPress,
   powerRatio,
   speedRatio,
@@ -934,6 +936,37 @@ console.log('='.repeat(70))
     Math.abs(powerRatio(0.4) - 0.5 - (0.5 - powerRatio(-0.4))) < 1e-12,
   )
   check('範囲の外へは振れない', powerRatio(3) === 1 && powerRatio(-3) === 0)
+
+  // POWER の針の慣性。経路追従や方策の指令は 20Hz の段差で届き、0 と 1 の間を行き来する
+  check(
+    'POWER の針は時定数ぶんで 63% 寄る',
+    Math.abs(dampNeedle(0, 1, POWER_NEEDLE_TAU_S, POWER_NEEDLE_TAU_S) - (1 - Math.exp(-1))) < 1e-12,
+  )
+  check(
+    'POWER の針は間隔が長くても目標を行き過ぎない',
+    dampNeedle(0.5, 1, 10, POWER_NEEDLE_TAU_S) <= 1 &&
+      dampNeedle(0.5, 0, 10, POWER_NEEDLE_TAU_S) >= 0 &&
+      dampNeedle(0.5, 1, 0, POWER_NEEDLE_TAU_S) === 0.5,
+  )
+  {
+    // 0 と 1 を 50ms ごとに行き来する指令（振り切れる指令の最悪の形）を 60fps で追わせる
+    let needle = powerRatio(0)
+    let maxStep = 0
+    for (let frame = 1; frame <= 180; frame++) {
+      const target = powerRatio(Math.floor(frame / 3) % 2 === 0 ? 0 : 1)
+      const next = dampNeedle(needle, target, 1 / 60, POWER_NEEDLE_TAU_S)
+      maxStep = Math.max(maxStep, Math.abs(next - needle))
+      needle = next
+    }
+    check(
+      'POWER の針は振り切れる指令でも 1 フレームで目盛りの 1 割以上跳ばない',
+      maxStep < 0.1,
+      '最大 ' + maxStep.toFixed(3),
+    )
+    let settled = powerRatio(0)
+    for (let frame = 0; frame < 60; frame++) settled = dampNeedle(settled, 1, 1 / 60, POWER_NEEDLE_TAU_S)
+    check('POWER の針は 1 秒で指令に追いつく', Math.abs(settled - 1) < 0.01, settled.toFixed(4))
+  }
 
   // 針の角度。中央（0.5）が真上を向くこと
   check(
