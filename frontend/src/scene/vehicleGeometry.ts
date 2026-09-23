@@ -11,17 +11,9 @@ export const VEHICLE_WIDTH = 1.8
 export const VEHICLE_HEIGHT = 1.45
 
 const HALF_L = VEHICLE_LENGTH / 2
-const HALF_W = VEHICLE_WIDTH / 2
 
 /** 車輪の半径 [m]。転がり角の計算にも使う */
 export const WHEEL_RADIUS = 0.34
-
-/** 各ジオメトリの外接箱の中心（車両ローカル）。 */
-export const BODY_OFFSET: readonly [number, number, number] = [0, 0.815, 0]
-/** ボンネット先端の飾りの中心 */
-export const NOSE_OFFSET: readonly [number, number, number] = [1.94, 0.975, 0]
-/** キャビン（グラスハウス）の中心 */
-export const CABIN_OFFSET: readonly [number, number, number] = [-0.025, 1.215, 0]
 
 /** 車輪の取り付け位置と、舵角を効かせるかどうか。 */
 export const WHEEL_OFFSETS: ReadonlyArray<{
@@ -40,209 +32,61 @@ export const DRIVER_SEAT_Z = 0.36
 export const PASSENGER_SEAT_Z = -0.36
 
 /** キャビンの床・天井の高さ [m] */
-const FLOOR_Y = 0.34
-const ROOF_Y = VEHICLE_HEIGHT
+export const FLOOR_Y = 0.34
+export const ROOF_Y = VEHICLE_HEIGHT
 /** ベルトライン（窓の下端）[m] */
-const BELT_Y = 0.98
-/** 外板の厚み（片側）[m]。車体を中空にするときの壁の厚さ */
-const BODY_SKIN = 0.06
-
+export const BELT_Y = 0.98
 /** 部品どうしを重ねるときの食い込み量 [m]。 */
-const OVERLAP = 0.04
+export const OVERLAP = 0.04
+
+/** 平面形。前後端と、ドアの面での半幅 [m]。フェンダーはここから少しだけ張り出す */
+export const BODY_FRONT_X = HALF_L - 0.005
+export const BODY_REAR_X = -HALF_L + 0.005
+export const BODY_HALF_W = 0.885
 
 /** フロントガラスの下端・上端の X。寝かせるほど差が開く */
-const WINDSHIELD_BOTTOM_X = 1.15
-const WINDSHIELD_TOP_X = 0.55
+export const WINDSHIELD_BOTTOM_X = 1.15
+export const WINDSHIELD_TOP_X = 0.55
 /** リアガラス */
-const BACKLIGHT_BOTTOM_X = -1.1
-const BACKLIGHT_TOP_X = -0.6
+export const BACKLIGHT_BOTTOM_X = -1.1
+export const BACKLIGHT_TOP_X = -0.6
+/** 前後のガラスの上端の高さ [m] */
+export const GLASS_TOP_Y = ROOF_Y - 0.04
+/** 前後のガラスの下端・上端での半幅 [m]（上ほど細い） */
+export const GLASS_BOTTOM_HALF_W = 0.785
+export const GLASS_TOP_HALF_W = 0.685
 
-/** 箱を 1 つ作る。`min`〜`max` で与えるほうが、外接寸法を守れているか読めば分かる */
-function box(
-  min: readonly [number, number, number],
-  max: readonly [number, number, number],
-): THREE.BufferGeometry {
-  const g = new THREE.BoxGeometry(max[0] - min[0], max[1] - min[1], max[2] - min[2])
-  g.translate((min[0] + max[0]) / 2, (min[1] + max[1]) / 2, (min[2] + max[2]) / 2)
-  return g
+/** 横窓の面。ベルトラインで z = SIDE_GLASS_Z、上へ行くほど内側へ倒れる */
+export const SIDE_GLASS_Z = 0.8
+export const SIDE_GLASS_LEAN = 0.25
+/** 横窓の上端の高さ [m] */
+export const SIDE_GLASS_TOP_Y = 1.372
+
+/** 高さ y での横窓の面の |z| */
+export function sideGlassZ(y: number): number {
+  return SIDE_GLASS_Z - (y - BELT_Y) * SIDE_GLASS_LEAN
 }
 
-/** 左右対称に 2 つ置く。 */
-function mirrored(
-  make: (z: number) => THREE.BufferGeometry,
-  z: number,
-): THREE.BufferGeometry[] {
-  return [make(z), make(-z)]
-}
+/** 前後のドアの X の範囲 [後端, 前端]。B ピラーの X の範囲 */
+export const FRONT_DOOR_X: readonly [number, number] = [0.02, 1.0]
+export const REAR_DOOR_X: readonly [number, number] = [-0.98, -0.02]
+export const B_PILLAR_X: readonly [number, number] = [-0.07, 0.07]
+/** ドアの下端の高さ [m]（その下はサイドシル） */
+export const DOOR_BOTTOM_Y = 0.3
 
-/** 2 点を結ぶ板（ガラス・ピラーに使う）。 */
-function slab(
-  from: readonly [number, number],
-  to: readonly [number, number],
-  zMin: number,
-  zMax: number,
-  thickness: number,
-): THREE.BufferGeometry {
-  const dx = to[0] - from[0]
-  const dy = to[1] - from[1]
-  const length = Math.hypot(dx, dy)
-  const g = new THREE.BoxGeometry(length, thickness, zMax - zMin)
-  g.rotateZ(Math.atan2(dy, dx))
-  g.translate((from[0] + to[0]) / 2, (from[1] + to[1]) / 2, (zMin + zMax) / 2)
-  return g
-}
-
-/** 車体（塗装される外板）。 */
-export function makeBodyGeometry(): THREE.BufferGeometry {
-  const parts: THREE.BufferGeometry[] = [
-    // 左右の側面（サイドシル〜ベルトライン）
-    ...mirrored(
-      (z) => box([-HALF_L + 0.06, 0.2, z - BODY_SKIN], [HALF_L - 0.06, BELT_Y, z + BODY_SKIN]),
-      HALF_W - BODY_SKIN,
-    ),
-    // 床下（アンダーボディ）。内装のフロアへ食い込ませ、面を合わせない
-    box([-HALF_L + 0.1, 0.18, -HALF_W + 0.02], [HALF_L - 0.1, 0.33, HALF_W - 0.02]),
-    // 前端・後端（バンパーとその上のパネル）。エンジンルームとトランクの前後を塞ぐ。
-    // 上下端は内装の側壁（0.26〜0.96）とずらしてある
-    box([HALF_L - 0.24, 0.24, -HALF_W + 0.02], [HALF_L, BELT_Y - 0.04, HALF_W - 0.02]),
-    box([-HALF_L, 0.24, -HALF_W + 0.02], [-HALF_L + 0.24, BELT_Y - 0.04, HALF_W - 0.02]),
-    // ボンネット（前下がり）
-    slab([WINDSHIELD_BOTTOM_X, BELT_Y], [HALF_L - 0.12, BELT_Y - 0.06], -0.86, 0.86, 0.09),
-    // トランクリッド
-    slab([BACKLIGHT_BOTTOM_X, BELT_Y], [-HALF_L + 0.12, BELT_Y - 0.02], -0.86, 0.86, 0.09),
-    // ルーフ
-    box([BACKLIGHT_TOP_X, ROOF_Y - 0.06, -0.8], [WINDSHIELD_TOP_X, ROOF_Y, 0.8]),
-    // A ピラー（フロントガラスの左右端）。
-    // 傾いた板は回転のぶん角が伸びるので、上端をルーフより下げておく
-    ...mirrored(
-      (z) =>
-        slab(
-          [WINDSHIELD_BOTTOM_X, BELT_Y],
-          [WINDSHIELD_TOP_X + 0.03, ROOF_Y - 0.09],
-          z - 0.06,
-          z + 0.06,
-          0.09,
-        ),
-      0.78,
-    ),
-    // B ピラー（前後ドアの境目）
-    ...mirrored((z) => box([-0.08, BELT_Y, z - 0.05], [0.08, ROOF_Y, z + 0.05]), 0.82),
-    // C ピラー（リアガラスの左右端）
-    ...mirrored(
-      (z) =>
-        slab(
-          [BACKLIGHT_BOTTOM_X, BELT_Y],
-          [BACKLIGHT_TOP_X - 0.03, ROOF_Y - 0.09],
-          z - 0.06,
-          z + 0.06,
-          0.09,
-        ),
-      0.78,
-    ),
-    // ルーフサイドレール（左右の窓の上端）
-    ...mirrored(
-      (z) => box([BACKLIGHT_TOP_X, ROOF_Y - 0.05, z - 0.05], [WINDSHIELD_TOP_X, ROOF_Y, z + 0.05]),
-      0.8,
-    ),
-    // ドアミラー。**車幅の中に収める**（外接寸法を越えると検出枠とずれる）
-    ...mirrored((z) => box([0.72, 0.99, z - 0.075], [0.88, 1.12, z + 0.075]), 0.82),
-  ]
-  const merged = mergeGeometries(parts, false)
-  for (const p of parts) p.dispose()
-  if (!merged) throw new Error('車体ジオメトリをまとめられませんでした')
-  return merged
-}
-
-/** ボンネット先端の飾り（前方が一目で分かるようにする）。車体色とは別の明度で塗る */
-export function makeNoseGeometry(): THREE.BufferGeometry {
-  return box([HALF_L - 0.34, BELT_Y - 0.04, -0.52], [HALF_L - 0.18, BELT_Y + 0.03, 0.52])
-}
-
-/** キャビン（いまはルーフごと車体へ含めたので、当たり判定の代表箱としてだけ残す） */
-export function makeCabinGeometry(): THREE.BufferGeometry {
-  return box([BACKLIGHT_TOP_X, BELT_Y, -0.8], [WINDSHIELD_TOP_X, ROOF_Y, 0.8])
-}
-
-/** 窓ガラス。 */
-export function makeGlassGeometry(): THREE.BufferGeometry {
-  const parts: THREE.BufferGeometry[] = [
-    // フロントガラス
-    slab(
-      [WINDSHIELD_BOTTOM_X, BELT_Y],
-      [WINDSHIELD_TOP_X, ROOF_Y - 0.04],
-      -0.76,
-      0.76,
-      0.04,
-    ),
-    // リアガラス
-    slab([BACKLIGHT_BOTTOM_X, BELT_Y], [BACKLIGHT_TOP_X, ROOF_Y - 0.04], -0.76, 0.76, 0.04),
-    // サイドガラス（前後ドア × 左右）
-    ...mirrored((z) => box([0.12, BELT_Y, z - 0.02], [0.78, ROOF_Y - 0.06, z + 0.02]), 0.85),
-    ...mirrored((z) => box([-0.84, BELT_Y, z - 0.02], [-0.16, ROOF_Y - 0.06, z + 0.02]), 0.85),
-  ]
-  const merged = mergeGeometries(parts, false)
-  for (const p of parts) p.dispose()
-  if (!merged) throw new Error('窓ガラスをまとめられませんでした')
-  return merged
-}
+/** 開け閉めする左後席ドアの蝶番（鉛直軸の X と Z） */
+export const TAXI_DOOR_HINGE: readonly [number, number] = [REAR_DOOR_X[1] - 0.01, -(BODY_HALF_W - 0.02)]
+/** ドアを開き切ったときの角度 [rad] */
+export const TAXI_DOOR_OPEN = 1.15
 
 /** ダッシュボード上面の高さ [m]。メーターとハンドルの位置はここから決める */
-const DASH_TOP_Y = 1.02
+export const DASH_TOP_Y = 1.02
 /** ダッシュボードの前端・後端 [m]。 */
-const DASH_FRONT_X = 1.16
+export const DASH_FRONT_X = 1.16
 export const DASH_REAR_X = 0.86
 
 /** 前席を車両中心からどれだけ前に置くか [m]。 */
-const FRONT_SEAT_X = 0.25
-
-/** 内装の動かない部分（フロア・ダッシュボード・センターコンソール・シート・ ドアトリム・メーターの文字盤）。 */
-export function makeInteriorGeometry(): THREE.BufferGeometry {
-  const seat = (z: number, at: number): THREE.BufferGeometry[] => [
-    // 座面（フロアへ食い込ませる。浮かせると面が一致して点滅する）
-    box([at - 0.28, FLOOR_Y - 0.02, z - 0.24], [at + 0.28, FLOOR_Y + 0.16, z + 0.24]),
-    // 背もたれ（わずかに後ろへ倒す）
-    slab([at - 0.3, FLOOR_Y + 0.1], [at - 0.42, 1.06], z - 0.24, z + 0.24, 0.14),
-    // ヘッドレスト
-    box([at - 0.46, 1.06, z - 0.14], [at - 0.34, 1.24, z + 0.14]),
-  ]
-
-  const parts: THREE.BufferGeometry[] = [
-    // フロア。側壁と後ろの壁へ食い込ませる。
-    // Z を外板の内面（0.78）に合わせないこと
-    box([-1.74, FLOOR_Y - 0.04, -0.79], [DASH_FRONT_X + 0.02, FLOOR_Y, 0.79]),
-    // ダッシュボード
-    box([DASH_REAR_X, 0.7, -0.74], [DASH_FRONT_X, DASH_TOP_Y, 0.74]),
-    box([DASH_FRONT_X - OVERLAP, FLOOR_Y - 0.08, -0.74], [DASH_FRONT_X + 0.06, DASH_TOP_Y - 0.05, 0.74]),
-    // メーターの庇（フード）は**置かない**。目からメーターへの視線は
-    //   ダッシュボード上面のすぐ下を通るので、庇を立てるとそれ自体が視線を塞ぐ
-    // センターコンソール（フロアへ食い込ませる）
-    box([-0.35, FLOOR_Y - 0.02, -0.14], [0.5, 0.62, 0.14]),
-    // 車内の側壁（ドア内張り）。**外板の内側へ食い込ませること。**
-    //   外板と同じ Z に面を置くと、ドア一面が点滅する（実際にそうなった）
-    ...mirrored(
-      (z) =>
-        box(
-          [-1.74, FLOOR_Y - 0.08, z - 0.038],
-          [DASH_FRONT_X + 0.02, BELT_Y - 0.02, z + 0.038],
-        ),
-      HALF_W - BODY_SKIN - OVERLAP + 0.005,
-    ),
-    // 後ろの壁（トランクとの隔壁）。側壁の中で終わらせる
-    box([-1.78, FLOOR_Y - 0.06, -0.74], [-1.7, BELT_Y - 0.06, 0.74]),
-    // 前席（アイポイントに合わせて前へ出す）
-    ...seat(DRIVER_SEAT_Z, FRONT_SEAT_X),
-    ...seat(PASSENGER_SEAT_Z, FRONT_SEAT_X),
-    // 後席（ベンチ）
-    box([-1.24, FLOOR_Y - 0.02, -0.7], [-0.7, FLOOR_Y + 0.18, 0.7]),
-    slab([-1.2, FLOOR_Y + 0.12], [-1.34, 1.08], -0.7, 0.7, 0.16),
-    // リアパーセルシェルフ。側壁の上面（BELT_Y）と高さを合わせない
-    box([-1.68, BELT_Y - 0.08, -0.74], [-1.3, BELT_Y - 0.03, 0.74]),
-  ]
-  const merged = mergeGeometries(parts, false)
-  for (const p of parts) p.dispose()
-  if (!merged) throw new Error('内装をまとめられませんでした')
-  return merged
-}
+export const FRONT_SEAT_X = 0.25
 
 /** メーターの種類。 */
 export const GAUGE_KINDS = ['speed', 'power'] as const
@@ -398,7 +242,7 @@ export const PEDAL_SLOTS: ReadonlyArray<{
   readonly pivot: readonly [number, number, number]
   readonly kind: 'throttle' | 'brake'
 }> = [
-  { pivot: [DASH_FRONT_X - 0.06, 0.6, DRIVER_SEAT_Z + 0.11], kind: 'throttle' },
+  { pivot: [DASH_FRONT_X - 0.06, 0.6, DRIVER_SEAT_Z + 0.1], kind: 'throttle' },
   { pivot: [DASH_FRONT_X - 0.06, 0.62, DRIVER_SEAT_Z - 0.09], kind: 'brake' },
 ]
 
@@ -425,37 +269,6 @@ export function makeNeedleGeometry(radius: number): THREE.BufferGeometry {
 export const NEEDLE_START = -2.2
 export const NEEDLE_SWEEP = 4.4
 
-/** タイヤの幅 [m]。リムとスポークはこの中へ収める */
-const WHEEL_WIDTH = 0.24
-/** ホイール（リム）の半径 [m]。タイヤの内側に見える金属部分 */
-const RIM_RADIUS = WHEEL_RADIUS * 0.62
-
-/** 車輪。 */
-export function makeWheelGeometry(): THREE.BufferGeometry {
-  const tyre = new THREE.CylinderGeometry(WHEEL_RADIUS, WHEEL_RADIUS, WHEEL_WIDTH, 18)
-  const parts: THREE.BufferGeometry[] = [tyre]
-
-  // リムとスポークは**タイヤの幅の中へ収める**。はみ出すと車輪が太くなり、
-  //   外接寸法の検証が落ちる（見た目にもタイヤから金属が飛び出す）
-  const rim = new THREE.CylinderGeometry(RIM_RADIUS, RIM_RADIUS, WHEEL_WIDTH * 0.92, 16)
-  parts.push(rim)
-
-  // スポークは**円盤の面（XZ 平面）**に並べること。CylinderGeometry の軸は Y なので、
-  //   XY 平面で放射状にすると、軸を寝かせたときに車輪の幅方向へ広がる
-  for (let i = 0; i < 5; i++) {
-    const spoke = new THREE.BoxGeometry(RIM_RADIUS * 0.9, WHEEL_WIDTH * 0.6, 0.035)
-    spoke.translate(RIM_RADIUS * 0.45, 0, 0)
-    spoke.rotateY((i * Math.PI * 2) / 5)
-    parts.push(spoke)
-  }
-
-  const merged = mergeGeometries(parts, false)
-  for (const p of parts) p.dispose()
-  if (!merged) throw new Error('車輪をまとめられませんでした')
-  merged.rotateX(Math.PI / 2)
-  return merged
-}
-
 /** ナンバープレート 1 枚。法線を +X に向ける（車両ローカルの前方） */
 export function makePlateGeometry(width: number, height: number): THREE.BufferGeometry {
   const g = new THREE.PlaneGeometry(width, height)
@@ -477,11 +290,6 @@ export function composePlateMatrix(
   p.scale.setScalar(1)
   p.updateMatrix()
   return out.multiplyMatrices(base, p.matrix)
-}
-
-/** 灯体 1 個。位置は `scene/vehicleLights.ts` の `LIGHT_SLOTS` が決める */
-export function makeLightGeometry(size: readonly [number, number, number]): THREE.BufferGeometry {
-  return new THREE.BoxGeometry(size[0], size[1], size[2])
 }
 
 /** 行列を組み立てるときの作業用オブジェクト。毎フレームの new を避ける */
@@ -525,22 +333,7 @@ export function composeVehicleMatrix(
   return out.copy(n.matrix)
 }
 
-/** 灯体 1 個のワールド行列。車体に固定なので回転は持たない。 */
-export function composeLightMatrix(
-  scratch: TransformScratch,
-  base: THREE.Matrix4,
-  position: readonly [number, number, number],
-  out: THREE.Matrix4,
-): THREE.Matrix4 {
-  const l = scratch.light
-  l.position.set(position[0], position[1], position[2])
-  l.rotation.set(0, 0, 0)
-  l.scale.setScalar(1)
-  l.updateMatrix()
-  return out.multiplyMatrices(base, l.matrix)
-}
-
-/** 車輪 1 本のワールド行列。 */
+/** 車輪 1 本のワールド行列。**左の車輪は Y 軸まわりに半回転**させて、ホイールの面を外へ向ける */
 export function composeWheelMatrix(
   scratch: TransformScratch,
   base: THREE.Matrix4,
@@ -551,11 +344,38 @@ export function composeWheelMatrix(
 ): THREE.Matrix4 {
   const spec = WHEEL_OFFSETS[index]
   const w = scratch.wheel
+  const left = spec.position[2] < 0
   w.position.set(spec.position[0], spec.position[1], spec.position[2])
-  w.rotation.set(0, spec.steered ? steer : 0, roll)
+  // 半回転させると回転軸の向きも裏返るので、転がる角度の符号を戻す
+  w.rotation.set(0, (spec.steered ? steer : 0) + (left ? Math.PI : 0), left ? -roll : roll)
   w.scale.setScalar(1)
   w.updateMatrix()
   return out.multiplyMatrices(base, w.matrix)
+}
+
+/** ブレーキキャリパーのワールド行列。転がらず、舵角だけで向きが変わる */
+export function composeCaliperMatrix(
+  scratch: TransformScratch,
+  base: THREE.Matrix4,
+  index: number,
+  steer: number,
+  angle: number,
+  out: THREE.Matrix4,
+): THREE.Matrix4 {
+  const spec = WHEEL_OFFSETS[index]
+  const w = scratch.wheel
+  const left = spec.position[2] < 0
+  w.position.set(spec.position[0], spec.position[1], spec.position[2])
+  // 左は半回転で前後も入れ替わるので、置く角度を鏡に写して同じ「後ろ寄りの上」に揃える
+  w.rotation.set(0, (spec.steered ? steer : 0) + (left ? Math.PI : 0), left ? Math.PI - 2 * angle : 0)
+  w.scale.setScalar(1)
+  w.updateMatrix()
+  return out.multiplyMatrices(base, w.matrix)
+}
+
+/** 車体の傾きを掛けた行列（`tilt` は `vehicleMotion.composeTiltMatrix`）。車輪以外はこれを親にする */
+export function composeBodyMatrix(base: THREE.Matrix4, tilt: THREE.Matrix4, out: THREE.Matrix4): THREE.Matrix4 {
+  return out.multiplyMatrices(base, tilt)
 }
 
 /** 車体に固定された部品（内装・文字盤）のワールド行列。 */

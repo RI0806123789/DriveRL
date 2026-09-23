@@ -8,7 +8,8 @@ import { frameBuffer } from '../store/frameBuffer'
 import { useSimStore } from '../store/simStore'
 import { taxiCamera } from '../store/taxiCamera'
 import { DET_LANE, type Detection } from '../types/protocol'
-import { DRIVER_FOV_DEG, driverEye, driverLookAt } from './cameraMath'
+import { DRIVER_EYE_LOCAL, DRIVER_FOV_DEG, driverEye, driverLookAt, vehicleLocalToThree } from './cameraMath'
+import { tiltLocalPoint, tiltOf } from './vehicleMotion'
 import { detectionColor, detectionLabel } from './detectionLabels'
 import { projectBox } from './detectionProjection'
 import { computeAlpha, createPose, sampleVehicle } from './interpolation'
@@ -64,7 +65,7 @@ export function TaxiCameraFeed() {
     [],
   )
 
-  useFrame(({ gl, scene }, delta) => {
+  useFrame(({ gl, scene, clock }, delta) => {
     const canvas = taxiCamera.canvas
     if (!canvas || vehicleId < 0) {
       taxiCamera.live = false
@@ -89,15 +90,23 @@ export function TaxiCameraFeed() {
     }
 
     const paused = useSimStore.getState().status.renderPaused
-    if (!sampleVehicle(vehicleId, computeAlpha(performance.now(), paused), r.pose)) {
+    if (!sampleVehicle(vehicleId, computeAlpha(clock.oldTime, paused), r.pose)) {
       taxiCamera.live = false
       return
     }
 
-    const eye = driverEye(r.pose.x, r.pose.y, r.pose.heading)
+    // 運転席カメラと同じく、目は車体と一緒に傾け、視線は水平に保つ
+    const level = driverEye(r.pose.x, r.pose.y, r.pose.heading)
+    const tilt = tiltOf(vehicleId)
+    const eye = vehicleLocalToThree(
+      tiltLocalPoint(DRIVER_EYE_LOCAL, tilt.pitch, tilt.roll),
+      r.pose.x,
+      r.pose.y,
+      r.pose.heading,
+    )
     const look = driverLookAt(r.pose.x, r.pose.y, r.pose.heading)
     r.camera.position.set(eye.x, eye.y, eye.z)
-    r.camera.lookAt(look.x, look.y, look.z)
+    r.camera.lookAt(look.x + eye.x - level.x, look.y + eye.y - level.y, look.z + eye.z - level.z)
 
     // オフスクリーンへ描く。画面の一部を借りて描くと、そこを元の視点で
     //   描き直すためにシーンをもう一度走査することになる

@@ -122,7 +122,7 @@ export function LaneDetectionOverlay() {
     }
   }, [])
 
-  useFrame(() => {
+  useFrame((state) => {
     const g = group.current
     if (!g) return
 
@@ -132,7 +132,7 @@ export function LaneDetectionOverlay() {
       return
     }
 
-    const alpha = computeAlpha(performance.now(), store.status.renderPaused)
+    const alpha = computeAlpha(state.clock.oldTime, store.status.renderPaused)
     const followTarget = store.followTarget
     const tracked = sampleVehicle(followTarget, alpha, pose)
     if (!tracked) {
