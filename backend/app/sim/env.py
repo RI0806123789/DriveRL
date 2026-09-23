@@ -42,6 +42,11 @@ AUTOPILOT_LOOKAHEAD_FLOOR_M = 3.0
 AUTOPILOT_STRAIGHT_RAD = 0.22
 #: この速度までは、切っていても加速する [m/s]（曲がりながら発進できるように）
 AUTOPILOT_CREEP_MPS = 2.5
+#: 目標速度（その地点の上限）との差 1 m/s あたりのアクセル。2 m/s 手前から絞り始める
+AUTOPILOT_SPEED_GAIN = 0.5
+#: アクセルを踏み込む／戻す速さの上限 [1/秒]。0 と 1 の間を 1 ステップで行き来させない
+AUTOPILOT_PRESS_RATE = 2.0
+AUTOPILOT_RELEASE_RATE = 5.0
 
 AUTOPILOT_LANE_HALF_WIDTH_M = 2.4
 AUTOPILOT_HEADWAY_M = 2.5
@@ -85,6 +90,8 @@ class SimulationEnv:
         # 実用モードの間は全車を経路追従で走らせる。**学習中は必ず False**
         # （PPO から見た環境が変わってしまう）
         self.autopilot_all: bool = False
+        # 直前のステップで経路追従が出した操作（上限で抑える前）。行動クローニングの教師に使う
+        self.autopilot_actions = np.zeros((n, config.ACTION_DIM), dtype=np.float32)
 
         # 再スポーン待ちのスロット。経路生成が重いマップで 1 ステップに寄せない
         self._respawn_queue: list[int] = []
@@ -127,8 +134,8 @@ class SimulationEnv:
         self.params.vehicle_count = self.world.active_count
         return ok
 
-    def _autopilot(self, slot: int) -> tuple[float, float]:
-        """経路の先を追う操作を返す（Pure Pursuit）。"""
+    def _autopilot(self, slot: int, target_speed: float) -> tuple[float, float]:
+        """経路の先を追う操作を返す（Pure Pursuit）。アクセルは目標速度との差で決める。"""
         world = self.world
         state = world.slots[slot]
         route = state.route
@@ -158,7 +165,14 @@ class SimulationEnv:
         # ただし止まっているときは必ず出すこと。切ったまま停まると、
         #   角度が変わらないので二度と発進できなくなる（銀座で 361 秒動かなくなった）
         straight = abs(alpha) < AUTOPILOT_STRAIGHT_RAD
-        accel = 1.0 if (straight or speed < AUTOPILOT_CREEP_MPS) else 0.0
+        want = 0.0
+        if straight or speed < AUTOPILOT_CREEP_MPS:
+            want = min(1.0, max(0.0, AUTOPILOT_SPEED_GAIN * (float(target_speed) - speed)))
+        # 踏み込みと戻しの速さを抑える。安全のための減速は constrain_accel が即座に掛ける
+        prev = max(0.0, float(world.throttle[slot]))
+        press = AUTOPILOT_PRESS_RATE * config.DT
+        release = AUTOPILOT_RELEASE_RATE * config.DT
+        accel = prev + min(press, max(-release, want - prev))
         return accel, float(np.clip(steer / config.MAX_STEER, -1.0, 1.0))
 
     def _autopilot_slots(self, active: np.ndarray) -> np.ndarray:
@@ -344,8 +358,6 @@ class SimulationEnv:
         # 経路追従で走らせる車。**方策の実力に体験を左右させないため**で、
         # 実用モードでは街の車も止まったままにしない（詰まるとタクシーも来られない）
         piloted = self._autopilot_slots(active_before)
-        for slot in piloted:
-            accel_cmd[slot], steer_cmd[slot] = self._autopilot(int(slot))
 
         params = self.params
         max_speed = max(float(params.max_speed), 1e-3)
@@ -382,6 +394,13 @@ class SimulationEnv:
                     )
                 ),
             )
+        # 経路追従は、下の constrain_accel と同じ上限を目標速度にして手前からアクセルを絞る
+        self.autopilot_actions[:] = 0.0
+        for slot in piloted:
+            s = int(slot)
+            accel_cmd[s], steer_cmd[s] = self._autopilot(s, min(float(limit[s]), max_speed))
+            self.autopilot_actions[s, 0] = accel_cmd[s]
+            self.autopilot_actions[s, 1] = steer_cmd[s]
         accel_cmd = constrain_accel(
             accel_cmd,
             self.world.fleet.speed,
