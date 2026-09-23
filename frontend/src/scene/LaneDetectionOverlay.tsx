@@ -67,7 +67,7 @@ export function LaneDetectionOverlay() {
   const centerMesh = useRef<THREE.Mesh>(null)
 
   const pose = useMemo(createPose, [])
-  const lastReceived = useRef(-1)
+  const lastDisplayed = useRef(-1)
   const lastFollowTarget = useRef(-1)
   const hasLane = useRef(false)
   /** 自前で作ったジオメトリだけを持つ（EMPTY_GEOMETRY は共有物なので破棄しない） */
@@ -140,8 +140,8 @@ export function LaneDetectionOverlay() {
       return
     }
 
-    if (frameBuffer.received !== lastReceived.current || followTarget !== lastFollowTarget.current) {
-      lastReceived.current = frameBuffer.received
+    if (frameBuffer.displayed !== lastDisplayed.current || followTarget !== lastFollowTarget.current) {
+      lastDisplayed.current = frameBuffer.displayed
       lastFollowTarget.current = followTarget
 
       const dets = frameBuffer.curr?.detections?.[String(followTarget)]

@@ -29,6 +29,8 @@ class RouteSegment:
 
     edge: MapEdge
     points: list[Point]
+    #: 区間の入口での横位置（中心線から左へ [m]）。無ければ左端の車線から入る
+    entry_offset: float | None = None
 
 
 def lane_count_for_direction(edge: MapEdge) -> int:
@@ -255,6 +257,11 @@ def build_lane_route(
         entry_offset = lane_offset_left(edge, 0)
         exit_lane = _target_lane_before_turn(edge, turns[i])
         exit_offset = lane_offset_left(edge, exit_lane)
+        if seg.entry_offset is not None:
+            # 車のいる横位置から始める（先頭で横へ跳ばない）。車線を移る距離が無ければその車線のまま
+            entry_offset = float(seg.entry_offset)
+            if _cumulative(seg.points)[-1] < LANE_CHANGE_LEAD_M:
+                exit_offset = entry_offset
 
         offset_pts = _offset_points(seg.points, entry_offset, exit_offset, LANE_CHANGE_LEAD_M)
 

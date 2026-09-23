@@ -15,18 +15,18 @@ const LABEL_FLIP_THRESHOLD = 0.08
 /** 追従対象の車両について、いま表示すべき検出結果一覧を返すフック */
 function useTrackedDetections(followTarget: number, active: boolean): Detection[] {
   const [dets, setDets] = useState<Detection[]>(EMPTY_DETECTIONS)
-  const lastReceived = useRef(-1)
+  const lastDisplayed = useRef(-1)
 
   useEffect(() => {
     if (!active) {
       setDets(EMPTY_DETECTIONS)
       return
     }
-    lastReceived.current = -1
+    lastDisplayed.current = -1
     let raf = 0
     const tick = () => {
-      if (frameBuffer.received !== lastReceived.current) {
-        lastReceived.current = frameBuffer.received
+      if (frameBuffer.displayed !== lastDisplayed.current) {
+        lastDisplayed.current = frameBuffer.displayed
         const curr: FrameMessage | null = frameBuffer.curr
         setDets(curr?.detections?.[String(followTarget)] ?? EMPTY_DETECTIONS)
       }

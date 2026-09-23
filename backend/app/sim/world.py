@@ -10,7 +10,13 @@ import logging
 import numpy as np
 
 from app import config
-from app.contracts import FrameSnapshot, MapIndex, ObstacleSnapshot, VehicleSnapshot
+from app.contracts import (
+    FrameSnapshot,
+    MapIndex,
+    ObstacleSnapshot,
+    RoadLead,
+    VehicleSnapshot,
+)
 from app.sim.pedestrians import PedestrianCrowd
 from app.sim.signals import (
     RED,
@@ -67,9 +73,10 @@ TURN_TANGENT_SPAN_M = 3.0
 TURN_ON_RAD = 0.35
 TURN_OFF_RAD = 0.12
 
-FORWARD_NODE_RADIUS_M = 150.0
-FORWARD_NODE_MIN_M = 14.0
-FORWARD_NODE_MAX_ANGLE_RAD = math.radians(60.0)
+#: 経路が最初に曲がるまでに、少なくともまっすぐ進む距離 [m]
+LEAD_MIN_M = 12.0
+#: いまの速度から、曲がり始めるまでに要る距離を見込む減速度 [m/s²]
+LEAD_DECEL_MPS2 = 2.5
 
 
 def _in_body_ellipse(
@@ -262,29 +269,47 @@ class World:
             return self._route_from_nodes(best_src, best_dst)
         return None
 
-    def _route_from_point(
-        self, x: float, y: float, *, heading: float | None = None
-    ) -> np.ndarray | None:
-        """指定座標を道路にスナップし、そこから到達可能な目的地への経路を作る。"""
+    def _road_lead(
+        self, x: float, y: float, heading: float | None, speed: float
+    ) -> RoadLead | None:
+        """いまいる道路を道なりに進み、曲がり始められるノードまでの道のり。"""
+        need = LEAD_MIN_M + max(0.0, float(speed)) ** 2 / (2.0 * LEAD_DECEL_MPS2)
         try:
-            snap_x, snap_y, _edge_id, _heading = self.map_index.nearest_road_point(
-                float(x), float(y)
-            )
+            return self.map_index.road_lead(float(x), float(y), heading, need)
         except Exception:
-            logger.debug("道路へのスナップに失敗しました: (%.1f, %.1f)", x, y, exc_info=True)
+            logger.debug("道路の特定に失敗しました: (%.1f, %.1f)", x, y, exc_info=True)
             return None
-        src = (
-            self._forward_node(float(snap_x), float(snap_y), heading)
-            if heading is not None
-            else None
+
+    def _route_from_lead(self, lead: RoadLead, dst: int) -> np.ndarray | None:
+        """道なりの出だし `lead` の先を、目的ノード `dst` まで最短経路でつなぐ。"""
+        node_path = self.map_index.shortest_path(
+            int(lead.exit_node), int(dst), arrive_heading=float(lead.exit_heading)
         )
-        if src is None:
-            src = int(self.map_index.nearest_node(float(snap_x), float(snap_y)))
+        if not node_path:
+            return None
+        pts = self.map_index.lane_route_polyline(node_path, config.ROUTE_RESAMPLE_M, lead=lead)
+        if pts is None or len(pts) < 2:
+            return None
+        return np.asarray(pts, dtype=np.float32)
+
+    def _route_from_point(
+        self,
+        x: float,
+        y: float,
+        *,
+        heading: float | None = None,
+        speed: float = 0.0,
+    ) -> np.ndarray | None:
+        """指定座標から道なりに出て、到達可能な目的地へ向かう経路を作る。"""
+        lead = self._road_lead(x, y, heading, speed)
+        if lead is None:
+            return None
+        src = int(lead.exit_node)
 
         route: np.ndarray | None = None
         if self._node_xy.shape[0] > 1:
-            dx = self._node_xy[:, 0] - np.float32(snap_x)
-            dy = self._node_xy[:, 1] - np.float32(snap_y)
+            dx = self._node_xy[:, 0] - np.float32(x)
+            dy = self._node_xy[:, 1] - np.float32(y)
             dist2 = dx * dx + dy * dy
             # 目的地は近すぎず遠すぎない範囲から選ぶ（`_random_route` と同じ理由）
             near_enough = dist2 <= np.float32(ROUTE_MAX_DISTANCE_M * ROUTE_MAX_DISTANCE_M)
@@ -307,28 +332,13 @@ class World:
                 pool[pick] = pool[size]
                 if dst == src:
                     continue
-                route = self._route_from_nodes(src, dst)
+                route = self._route_from_lead(lead, dst)
                 if route is not None:
                     break
 
         if route is None:
             return self._random_route()
-
-        if float(np.hypot(route[0, 0] - snap_x, route[0, 1] - snap_y)) > 0.5:
-            head = np.array([[snap_x, snap_y]], dtype=np.float32)
-            route = np.concatenate([head, route], axis=0)
         return route
-
-    def snap_to_road(self, x: float, y: float) -> tuple[float, float] | None:
-        """指定座標を最寄りの道路中心線上へスナップする。"""
-        try:
-            snap_x, snap_y, _edge_id, _heading = self.map_index.nearest_road_point(
-                float(x), float(y)
-            )
-        except Exception:
-            logger.debug("道路へのスナップに失敗しました: (%.1f, %.1f)", x, y, exc_info=True)
-            return None
-        return float(snap_x), float(snap_y)
 
     def snap_to_road_node(self, x: float, y: float) -> tuple[float, float] | None:
         """指定座標を最寄りの道路ノードへ寄せる（決定 7）。"""
@@ -338,25 +348,6 @@ class World:
         dy = self._node_xy[:, 1] - np.float32(y)
         i = int(np.argmin(dx * dx + dy * dy))
         return float(self._node_xy[i, 0]), float(self._node_xy[i, 1])
-
-    def _forward_node(self, x: float, y: float, heading: float) -> int | None:
-        """進行方向の前方にあるノード。"""
-        if self._node_xy.shape[0] == 0:
-            return None
-        dx = self._node_xy[:, 0] - np.float32(x)
-        dy = self._node_xy[:, 1] - np.float32(y)
-        dist2 = (dx * dx + dy * dy).astype(np.float64)
-        forward = dx * math.cos(heading) + dy * math.sin(heading)
-        ok = (
-            (dist2 >= FORWARD_NODE_MIN_M**2)
-            & (dist2 <= FORWARD_NODE_RADIUS_M**2)
-            & (forward > 0.0)
-            & (forward >= np.sqrt(dist2) * math.cos(FORWARD_NODE_MAX_ANGLE_RAD))
-        )
-        cand = np.flatnonzero(ok)
-        if cand.size == 0:
-            return None
-        return int(self._node_ids[cand[int(np.argmin(dist2[cand]))]])
 
     @staticmethod
     def _trim_tail(route: np.ndarray, dst: tuple[float, float]) -> np.ndarray:
@@ -369,20 +360,17 @@ class World:
         return route[: max(2, i + 1)]
 
     @staticmethod
-    def _with_endpoints(
-        route: np.ndarray, src: tuple[float, float], dst: tuple[float, float]
-    ) -> np.ndarray:
-        """経路の両端を、指定した出発地・目的地そのものへ伸ばす。"""
-        parts: list[np.ndarray] = [route]
-        if float(np.hypot(route[0, 0] - src[0], route[0, 1] - src[1])) > 0.5:
-            parts.insert(0, np.array([src], dtype=np.float32))
-        if float(np.hypot(route[-1, 0] - dst[0], route[-1, 1] - dst[1])) > 0.5:
-            parts.append(np.array([dst], dtype=np.float32))
-        return np.concatenate(parts, axis=0) if len(parts) > 1 else route
+    def _with_destination(route: np.ndarray, dst: tuple[float, float]) -> np.ndarray:
+        """経路の終端を、目的地そのものへ伸ばす。"""
+        if float(np.hypot(route[-1, 0] - dst[0], route[-1, 1] - dst[1])) <= 0.5:
+            return route
+        return np.concatenate([route, np.array([dst], dtype=np.float32)], axis=0)
 
-    def route_onward(self, x: float, y: float, heading: float) -> np.ndarray | None:
-        """いまいる場所から、進行方向の先にある目的地への経路を作る（徴用の解除に使う）。"""
-        return self._route_from_point(x, y, heading=heading)
+    def route_onward(
+        self, x: float, y: float, heading: float, speed: float = 0.0
+    ) -> np.ndarray | None:
+        """いまいる場所から道なりに出て、その先の目的地への経路を作る（徴用の解除に使う）。"""
+        return self._route_from_point(x, y, heading=heading, speed=speed)
 
     def route_between(
         self,
@@ -390,29 +378,21 @@ class World:
         dst: tuple[float, float],
         *,
         heading: float | None = None,
+        speed: float = 0.0,
     ) -> np.ndarray | None:
-        """出発地を道路へ、目的地を道路ノードへ寄せて走行経路を作る（決定 7・12）。"""
-        src_snap = self.snap_to_road(*src)
+        """出発地から道なりに出て、道路ノードへ寄せた目的地までの走行経路を作る（決定 7・12）。"""
         dst_snap = self.snap_to_road_node(*dst)
-        if src_snap is None or dst_snap is None:
+        if dst_snap is None:
             return None
-
-        src_node = (
-            self._forward_node(src_snap[0], src_snap[1], heading)
-            if heading is not None
-            else None
-        )
-        if src_node is None:
-            src_node = int(self.map_index.nearest_node(src_snap[0], src_snap[1]))
+        lead = self._road_lead(float(src[0]), float(src[1]), heading, speed)
+        if lead is None:
+            return None
         dst_node = int(self.map_index.nearest_node(dst_snap[0], dst_snap[1]))
-        if src_node == dst_node:
-            return None
-
-        route = self._route_from_nodes(src_node, dst_node)
+        route = self._route_from_lead(lead, dst_node)
         if route is None:
             return None
         # 別の道路から目的ノードへ入る経路もあるので、念のため折り返しを切り落とす
-        return self._with_endpoints(self._trim_tail(route, dst_snap), src_snap, dst_snap)
+        return self._with_destination(self._trim_tail(route, dst_snap), dst_snap)
 
     def advance_time(self, dt: float) -> None:
         """シミュレーション内時刻を進め、信号の現示と歩行者を更新する。"""
