@@ -1,7 +1,7 @@
 /** フレーム間補間（memo 5章「学習頻度と描画頻度の関係」） */
 
 import type { VehicleState } from '../types/protocol'
-import { frameBuffer } from '../store/frameBuffer'
+import { advanceDisplay, frameBuffer } from '../store/frameBuffer'
 import { TELEPORT_DISTANCE_M as TELEPORT_M, lerp, lerpAngle } from './interpolationMath'
 
 export {
@@ -41,13 +41,9 @@ export interface VehiclePose {
   teleported: boolean
 }
 
-/** 現在時刻における補間係数 alpha を求める。 */
+/** 現在時刻における補間係数 alpha を求める。表示の区間（prev / curr）もここで進める */
 export function computeAlpha(nowMs: number, renderPaused: boolean): number {
-  if (renderPaused) return 1
-  const dt = frameBuffer.intervalMs
-  if (dt <= 0) return 1
-  const t = (nowMs - frameBuffer.currTime) / dt
-  return t <= 0 ? 0 : t >= 1 ? 1 : t
+  return advanceDisplay(nowMs, renderPaused)
 }
 
 function findVehicle(list: VehicleState[] | undefined, id: number): VehicleState | undefined {

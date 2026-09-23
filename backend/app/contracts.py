@@ -70,6 +70,21 @@ class MapEdge:
 
 
 @dataclass
+class RoadLead:
+    """車の位置から、走っている道路に沿って最初に曲がれるノードまでの道のり。"""
+
+    exit_node: int
+    #: 出口のノードに着いたときの進行方位 [rad]（そこで折り返させないために使う）
+    exit_heading: float
+    #: 通るエッジと、その中心線（進行方向に並べる。先頭は車の位置の真横）
+    edge_ids: list[int]
+    polylines: list[list[tuple[float, float]]]
+    length: float
+    #: 車の横位置（先頭のエッジの中心線から進行方向の左へ [m]）
+    entry_offset: float = 0.0
+
+
+@dataclass
 class MapBuilding:
     """建物のフットプリント。outline は閉じない（末尾と先頭は重複させない）。"""
 
@@ -230,8 +245,10 @@ class MapIndex(Protocol):
         """指定座標を最寄りの道路中心線上にスナップする。"""
         ...
 
-    def shortest_path(self, src_node: int, dst_node: int) -> list[int] | None:
-        """ノード ID 列で最短経路を返す。到達不能なら None。"""
+    def shortest_path(
+        self, src_node: int, dst_node: int, arrive_heading: float | None = None
+    ) -> list[int] | None:
+        """ノード ID 列で最短経路を返す。`arrive_heading` で着いた向きから折り返す出だしは、ほかに道があれば避ける。"""
         ...
 
     def route_polyline(
@@ -241,9 +258,18 @@ class MapIndex(Protocol):
         ...
 
     def lane_route_polyline(
-        self, node_path: Sequence[int], resample_m: float = 2.0
+        self,
+        node_path: Sequence[int],
+        resample_m: float = 2.0,
+        lead: RoadLead | None = None,
     ) -> list[tuple[float, float]]:
-        """左側通行の車線に沿った走行経路を返す。"""
+        """左側通行の車線に沿った走行経路を返す。`lead` があれば車の位置から道なりに始める。"""
+        ...
+
+    def road_lead(
+        self, x: float, y: float, heading: float | None, min_length_m: float = 0.0
+    ) -> RoadLead | None:
+        """いま走っている道路を進行方向へたどり、最初に曲がれるノードまでの道のりを返す。"""
         ...
 
     def signals_on_route(

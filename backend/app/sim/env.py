@@ -261,6 +261,7 @@ class SimulationEnv:
             float(world.fleet.x[slot]),
             float(world.fleet.y[slot]),
             float(world.fleet.heading[slot]),
+            float(world.fleet.speed[slot]),
         )
         if route is None or not world.install_route(slot, route, keep_pose=True):
             world.respawn(slot)

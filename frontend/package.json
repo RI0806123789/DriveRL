@@ -12,6 +12,7 @@
     "verify:signals": "node scripts/verify-signal-geometry.ts",
     "verify:speedsigns": "node scripts/verify-sign-geometry.ts",
     "verify:camera": "node scripts/verify-camera-route.ts",
+    "verify:playout": "node scripts/verify-playout.ts",
     "verify:colors": "node scripts/verify-vehicle-colors.ts",
     "verify:vehicles": "node scripts/verify-vehicle-transforms.ts",
     "verify:sun": "node scripts/verify-sun.ts",
@@ -23,7 +24,7 @@
     "verify:nav": "node scripts/verify-nav-cost.ts",
     "verify:taxiauto": "node scripts/verify-taxi-auto.ts",
     "verify:conventions": "node scripts/verify-conventions.ts",
-    "verify": "npm run verify:signals && npm run verify:speedsigns && npm run verify:camera && npm run verify:colors && npm run verify:vehicles && npm run verify:sun && npm run verify:detections && npm run verify:markings && npm run verify:weather && npm run verify:pedestrian && npm run verify:taximap && npm run verify:nav && npm run verify:taxiauto && npm run verify:conventions"
+    "verify": "npm run verify:signals && npm run verify:speedsigns && npm run verify:camera && npm run verify:playout && npm run verify:colors && npm run verify:vehicles && npm run verify:sun && npm run verify:detections && npm run verify:markings && npm run verify:weather && npm run verify:pedestrian && npm run verify:taximap && npm run verify:nav && npm run verify:taxiauto && npm run verify:conventions"
   },
   "dependencies": {
     "@react-three/drei": "^10.7.8",

@@ -322,8 +322,8 @@ console.log('='.repeat(70))
     '滑り ' + Math.abs(after - before).toFixed(4) + 'm',
   )
 
-  // 20Hz を 60fps へ線形補間したとき、1 フレームの移動量がどれだけ跳ねるか。
-  // 補間の継ぎ目で速度が階段状に変わるが、知覚できる量かを見る
+  // 20Hz を 60fps へ線形補間したとき、1 フレームの移動量がどれだけ跳ねるか（受信が等間隔の場合）。
+  // 実際の受信は揺れるので、そちらは verify:playout が再生の時計ごと検査する
   const hz = 20
   const fps = 60
   const dtFrame = 1 / fps
@@ -347,7 +347,7 @@ console.log('='.repeat(70))
     samples.push(pos)
   }
   check(
-    '20Hz を 60fps へ補間しても、1 フレームの移動量が跳ねない',
+    '受信が等間隔なら、20Hz を 60fps へ補間しても 1 フレームの移動量が跳ねない',
     worstJump < 0.005,
     '最大 ' + (worstJump * 1000).toFixed(2) + 'mm（3m/s^2 で加速中）',
   )

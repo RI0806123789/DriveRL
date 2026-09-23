@@ -7,21 +7,28 @@ import type {
   VehicleState,
   WeatherState,
 } from '../types/protocol'
+import {
+  createPlayoutClock,
+  notePlayoutArrival,
+  playoutTime,
+  resetPlayoutClock,
+} from './playout'
+import type { PlayoutClock } from './playout'
 
-/** 補間に必要な 2 フレーム分 + 受信時刻を保持する箱 */
+/** 補間に使う 2 フレームと、再生を待っているフレームを保持する箱 */
 export interface FrameBuffer {
-  /** 1 つ前のフレーム（補間の始点） */
+  /** 表示している区間の始点。**受信順ではなく再生の時計（`clock`）で進む** */
   prev: FrameMessage | null
-  /** 最新フレーム（補間の終点） */
+  /** 表示している区間の終点（表示に使っている最新のフレーム） */
   curr: FrameMessage | null
-  /** prev を受信した時刻（performance.now()） */
-  prevTime: number
-  /** curr を受信した時刻（performance.now()） */
-  currTime: number
-  /** 直近の受信間隔 [ms]。既定は 20Hz = 50ms */
-  intervalMs: number
+  /** 届いたがまだ表示に使っていないフレーム（simTime の昇順） */
+  pending: FrameMessage[]
+  /** simTime を時計にした再生の状態 */
+  clock: PlayoutClock
   /** これまでに受信したフレーム数 */
   received: number
+  /** prev / curr が入れ替わるたびに増える。表示に使うフレームが変わった合図 */
+  displayed: number
   /** 車両ごとの最新経路。frame.route は変化時のみ届くので、ここで保持する */
   routes: Map<number, Vec2[]>
   /** 車両ごとの経路の版。その車両の経路が届くたびに +1 する。 */
@@ -48,10 +55,10 @@ const EMPTY_REVISIONS = new Map<number, number>()
 export const frameBuffer: FrameBuffer = {
   prev: null,
   curr: null,
-  prevTime: 0,
-  currTime: 0,
-  intervalMs: 50,
+  pending: [],
+  clock: createPlayoutClock(),
   received: 0,
+  displayed: 0,
   routes: EMPTY_ROUTES,
   routeRevisions: EMPTY_REVISIONS,
   routeVersion: 0,
@@ -74,17 +81,19 @@ let lastObstacleSig = ''
 /** 新しい frame を受け取ってバッファを進める */
 export function pushFrame(frame: FrameMessage): void {
   const now = performance.now()
-
-  frameBuffer.prev = frameBuffer.curr
-  frameBuffer.prevTime = frameBuffer.currTime
-  frameBuffer.curr = frame
-  frameBuffer.currTime = now
   frameBuffer.received += 1
 
-  if (frameBuffer.prev) {
-    const dt = frameBuffer.currTime - frameBuffer.prevTime
-    if (dt > 1) frameBuffer.intervalMs = Math.min(500, Math.max(16, dt))
+  const event = notePlayoutArrival(frameBuffer.clock, frame.simTime, now)
+  if (event === 'reset') {
+    frameBuffer.prev = null
+    frameBuffer.curr = frame
+    frameBuffer.pending.length = 0
+    frameBuffer.displayed += 1
+  } else if (event !== 'stale') {
+    frameBuffer.pending.push(frame)
   }
+  // 描画が止まっているタブでも待ち行列を溜め込まない
+  advanceDisplay(now, false)
 
   let routeChanged = false
   for (const v of frame.vehicles) {
@@ -131,14 +140,44 @@ export function pushFrame(frame: FrameMessage): void {
   }
 }
 
+/** 再生の時計まで表示の区間（prev / curr）を進め、区間内の補間係数 0..1 を返す。 */
+export function advanceDisplay(nowMs: number, paused: boolean): number {
+  if (!frameBuffer.curr) return 1
+  if (paused) {
+    // 止めている間は届いている最新を出す。再開後の simTime は飛ぶので時計を張り直す
+    resetPlayoutClock(frameBuffer.clock)
+    promoteUntil(Infinity)
+    return 1
+  }
+  const t = playoutTime(frameBuffer.clock, nowMs)
+  promoteUntil(t)
+  const prev = frameBuffer.prev
+  if (!prev) return 1
+  const span = frameBuffer.curr.simTime - prev.simTime
+  if (!(span > 0)) return 1
+  const a = (t - prev.simTime) / span
+  return a <= 0 ? 0 : a >= 1 ? 1 : a
+}
+
+function promoteUntil(simTime: number): void {
+  let next = frameBuffer.pending[0]
+  while (next !== undefined && frameBuffer.curr !== null && frameBuffer.curr.simTime <= simTime) {
+    frameBuffer.prev = frameBuffer.curr
+    frameBuffer.curr = next
+    frameBuffer.pending.shift()
+    frameBuffer.displayed += 1
+    next = frameBuffer.pending[0]
+  }
+}
+
 /** 切断・マップ切替時にバッファを空にする */
 export function resetFrameBuffer(): void {
   frameBuffer.prev = null
   frameBuffer.curr = null
-  frameBuffer.prevTime = 0
-  frameBuffer.currTime = 0
-  frameBuffer.intervalMs = 50
+  frameBuffer.pending.length = 0
+  resetPlayoutClock(frameBuffer.clock)
   frameBuffer.received = 0
+  frameBuffer.displayed += 1
   frameBuffer.routes = new Map()
   frameBuffer.routeRevisions = new Map()
   frameBuffer.routeVersion += 1
@@ -150,7 +189,7 @@ export function resetFrameBuffer(): void {
   lastObstacleSig = ''
 }
 
-/** スロット番号から最新の車両状態を引く（補間なしの生値） */
+/** スロット番号から表示中の車両状態を引く（補間なしの生値） */
 export function getLatestVehicle(id: number): VehicleState | null {
   const curr = frameBuffer.curr
   if (!curr) return null

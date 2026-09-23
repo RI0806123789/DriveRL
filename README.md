@@ -31,6 +31,7 @@ DriveRL/
 │   ├── verify_log_std.py           方策分布（log_std）の健全性チェック
 │   ├── verify_signal_phases.py     信号の現示（交差する流れが同時に青にならないか）
 │   ├── verify_publish_routes.py    経路の配信（取りこぼしてもクライアントへ届くか）
+│   ├── verify_route_start.py       配車の経路の出だし（道なりに出るか・建物を突き抜けないか）
 │   ├── app/
 │   │   ├── config.py               定数（観測 66 次元の内訳・車両諸元・PPO 設定）
 │   │   ├── contracts.py            パッケージ間の共有型。ここが内部の契約
@@ -1122,7 +1123,7 @@ Keras 3 は PyTorch をバックエンドにできるので、このプロジェ
 | 物理 | キネマティック自転車モデル。建物衝突は**バックエンドで判定**し、結果をフロントへ送る |
 | 一時停止 | **描画だけ**が止まる。裏側の学習は止まらない |
 | 認識器の学習 | 「モデル作成」タブから専用スレッドで回す。**その間だけは物理と PPO も止める**（CPU と `groundtruth` の静的キャッシュを取り合わないため）|
-| 学習と描画の分離 | サーバー 20Hz / ブラウザ 60fps。フロント側でフレーム間を補間する |
+| 学習と描画の分離 | サーバー 20Hz / ブラウザ 60fps。フロント側でフレーム間を補間する（受信した時刻ではなく `simTime` を時計にして、約 90ms 遅らせて再生する）|
 | 永続化 | PPO の重みとオプティマイザ状態を自動保存し、次回起動時に復元 |
 | 通信 | WebSocket（状態配信・操作）+ HTTP（モデルの入出力）|
 
@@ -1167,6 +1168,7 @@ cd frontend; npm run verify
 cd frontend; npm run verify:signals     # 灯器の向き・灯火の並び・高さ
 cd frontend; npm run verify:speedsigns  # 標識の向き・取り付け高さ
 cd frontend; npm run verify:camera      # 運転席視点と進路矢印
+cd frontend; npm run verify:playout     # frame の再生（受信の間隔が揺れても表示が等速に近いか）
 cd frontend; npm run verify:colors      # 車両 64 色の見分けやすさ
 cd frontend; npm run verify:vehicles    # 車両の行列・内装・メーター・ライト・面の重なり
 cd frontend; npm run verify:sun         # 日の出・日の入り
@@ -1183,6 +1185,7 @@ cd frontend; npm run verify:conventions # コメント規約と CSS の遷移規
 cd backend; .venv\Scripts\python.exe verify_log_std.py        # 方策分布（log_std）
 cd backend; .venv\Scripts\python.exe verify_signal_phases.py  # 信号の現示（プリセット名を渡せば 1 つだけ）
 cd backend; .venv\Scripts\python.exe verify_publish_routes.py # 配車と frame の経路が配信で落ちないか
+cd backend; .venv\Scripts\python.exe verify_route_start.py    # 配車の経路が道なりに出て建物を突き抜けないか
 ```
 
 `npm run verify` は Node で直接実行する検証スクリプトです。3D の向きは**間違っていても
@@ -1192,6 +1195,14 @@ cd backend; .venv\Scripts\python.exe verify_publish_routes.py # 配車と frame 
 - 信号機: 灯器が運転者に正対しているか、青が運転者から見て左か、灯器の高さ
 - 最高速度標識: 板が運転者に正対しているか（裏を向いていないか）、取り付け高さ
 - カメラ: 運転席が右ハンドルの位置にあるか、視線が進行方向を向いているか
+- frame の再生: 受信の間隔が揺れても（Windows の配信は 25〜94ms おき）、13.9m/s の車の
+  表示位置が等速に近いまま進むか、止まらないか、届いた frame より先を出さないか。
+  **旧実装（直前の受信間隔で次の区間を再生する）がこの到着列で揺れること**も確かめる
+  （運転席視点では車ごと前後に揺れて見えていた。#29）
+- 配車の経路の出だし（`backend/verify_route_start.py`）: 経路が車の位置から道なりに
+  始まるか、出だしに道路を外れた直線が無いか、建物を突き抜けるのが「建物の下をくぐる道」と
+  「狭い道の車線」だけか、出口で折り返さないか。**旧実装は出だしの直線が最大 417m あり、
+  配車の経路の 5.5〜13.5% が建物を貫通していた**（#31）
 - 進路矢印: リボン幅が保たれるか、矢羽根が進行方向を指しているか
 - 車両の色: 64 色が CIELAB 距離で十分に離れているか（小さな色見本やピンで見分けられるか）
 - 車両の行列: 車体・ノーズ・キャビンの取り付け位置、前輪だけに効く舵角、車輪の転がり

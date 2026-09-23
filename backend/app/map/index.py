@@ -11,15 +11,35 @@ import logging
 import numpy as np
 import shapely
 from shapely.geometry import LineString, Point, Polygon
+from shapely.ops import substring
 
 from app import config
-from app.contracts import SIGNAL_MERGE_M, MapData, MapEdge, OccupancyGrid
+from app.contracts import SIGNAL_MERGE_M, MapData, MapEdge, OccupancyGrid, RoadLead
 
 __all__ = ["MapIndexImpl", "build_map_index"]
 
 from app.map.lanes import RouteSegment, build_lane_route
 
 logger = logging.getLogger("autoware_sim")
+
+#: 建物の中を通るエッジの経路探索の重みに、中の長さ 1m あたり足す値 [m]
+ROUTE_BUILDING_PENALTY = 1000.0
+#: これより短い重なりは、建物の角をかすめただけとみなす [m]
+BUILDING_OVERLAP_MIN_M = 1.0
+#: いま走っている道路を探す範囲 [m]。幅 32.5m の道路では車線の中心が中心線から 15m 近く離れる
+LEAD_SEARCH_RADIUS_M = 25.0
+#: 道路の幅の内側にいる候補どうしで、中心線に近いほうを選ぶための重み
+LEAD_CENTER_WEIGHT = 0.1
+#: 道路を選ぶとき、向きのずれ 1rad を距離何 m ぶんとみなすか
+LEAD_ANGLE_WEIGHT_M = 10.0
+#: 交差点を「まっすぐ抜けられる」とみなす向きのずれ [rad]
+LEAD_STRAIGHT_RAD = math.radians(35.0)
+#: まっすぐ抜ける道をたどる上限
+LEAD_MAX_HOPS = 8
+#: エッジの向きを測る長さ [m]。端の 1 区間だけだと短すぎて向きが暴れる
+LEAD_DIRECTION_SPAN_M = 3.0
+#: 経路の出だしで、着いた向きからこれより大きく曲がる辺は折り返し（U ターン）とみなす [rad]
+ROUTE_MAX_START_TURN_RAD = math.radians(120.0)
 
 _WARNED: set[str] = set()
 
@@ -48,6 +68,8 @@ class MapIndexImpl:
 
         self.graph = self._build_graph(data)
         self._reachable = self._build_reachable_nodes()
+        self._reachable_mask = np.zeros(self._node_xy.shape[0], dtype=bool)
+        self._reachable_mask[self._reachable[self._reachable < self._reachable_mask.size]] = True
 
         self._edge_lines: list[LineString] = []
         self._edge_line_ids: list[int] = []
@@ -71,6 +93,13 @@ class MapIndexImpl:
         self._building_tree = (
             shapely.STRtree(self._building_polys) if self._building_polys else None
         )
+
+        # 当たり判定は 2 次元なので、建物の中を通る道（高架・建物の下をくぐる道）を走れば
+        #   建物にぶつかる。ほかに道があれば避けるよう、経路探索の重みだけを重くする
+        self.edge_inside_building_m = self._edge_building_overlap()
+        for _u, _v, attrs in self.graph.edges(data=True):
+            inside = self.edge_inside_building_m.get(int(attrs["edge_id"]), 0.0)
+            attrs["cost"] = float(attrs["length"]) + ROUTE_BUILDING_PENALTY * inside
 
         self._signal_xy, self._signal_heading, self._signal_tree = _point_layer(
             data.signals
@@ -106,6 +135,32 @@ class MapIndexImpl:
         except ValueError:
             return np.zeros(0, dtype=np.int64)
         return np.fromiter(sorted(largest), dtype=np.int64, count=len(largest))
+
+    def _edge_building_overlap(self) -> dict[int, float]:
+        """エッジの中心線が建物の中を通る長さ [m]。短い重なりは数えない。"""
+        if self._building_tree is None or not self._edge_lines:
+            return {}
+        try:
+            lines = np.empty(len(self._edge_lines), dtype=object)
+            lines[:] = self._edge_lines
+            polys = np.empty(len(self._building_polys), dtype=object)
+            polys[:] = self._building_polys
+            pairs = self._building_tree.query(lines, predicate="intersects")
+            if pairs.shape[1] == 0:
+                return {}
+            parts = shapely.intersection(lines[pairs[0]], polys[pairs[1]])
+            inside = np.zeros(len(self._edge_lines), dtype=np.float64)
+            np.add.at(inside, pairs[0], shapely.length(parts))
+        except Exception:
+            _warn_once(
+                "edge_building_overlap",
+                "建物の中を通る道路の判定に失敗しました。経路は建物を避けずに作ります",
+            )
+            return {}
+        return {
+            int(self._edge_line_ids[i]): float(inside[i])
+            for i in np.flatnonzero(inside >= BUILDING_OVERLAP_MIN_M)
+        }
 
     def _build_occupancy(self, data: MapData) -> OccupancyGrid:
         """建物レイヤと道路レイヤをラスタ化した占有グリッドを作る。"""
@@ -181,16 +236,40 @@ class MapIndexImpl:
         p1 = line.interpolate(fore)
         return math.atan2(p1.y - p0.y, p1.x - p0.x)
 
-    def shortest_path(self, src_node: int, dst_node: int) -> list[int] | None:
+    def shortest_path(
+        self, src_node: int, dst_node: int, arrive_heading: float | None = None
+    ) -> list[int] | None:
         """ノード ID 列で最短経路を返す。到達不能なら None。"""
         src = int(src_node)
         dst = int(dst_node)
         if src == dst:
             return [src] if self.graph.has_node(src) else None
+        if arrive_heading is not None:
+            # 出だしで折り返す辺（同じ道の U ターン・中央分離帯の切れ目での転回）だけを外して探す。
+            #   行き止まりで折り返すしかないときは下で普通に探す
+            heading = float(arrive_heading)
+
+            def weight(u: int, v: int, attrs: dict) -> float | None:
+                if u == src and self._turns_back(u, attrs, heading):
+                    return None
+                return attrs["cost"]
+
+            try:
+                return list(nx.shortest_path(self.graph, src, dst, weight=weight))
+            except (nx.NetworkXNoPath, nx.NodeNotFound):
+                pass
         try:
-            return list(nx.shortest_path(self.graph, src, dst, weight="length"))
+            return list(nx.shortest_path(self.graph, src, dst, weight="cost"))
         except (nx.NetworkXNoPath, nx.NodeNotFound):
             return None
+
+    def _turns_back(self, node: int, attrs: dict, heading: float) -> bool:
+        """向き `heading` で着いたノード `node` から、このエッジへ出ると折り返しになるか。"""
+        edge = self._edges_by_id.get(int(attrs["edge_id"]))
+        if edge is None or len(edge.polyline) < 2:
+            return False
+        pts = edge.polyline if int(edge.u) == int(node) else edge.polyline[::-1]
+        return abs(_wrap(_direction(pts, at_end=False) - heading)) > ROUTE_MAX_START_TURN_RAD
 
     def route_polyline(
         self, node_path: Sequence[int], resample_m: float = 2.0
@@ -228,14 +307,28 @@ class MapIndexImpl:
         return _resample_polyline(points, float(resample_m))
 
     def lane_route_polyline(
-        self, node_path: Sequence[int], resample_m: float = 2.0
+        self,
+        node_path: Sequence[int],
+        resample_m: float = 2.0,
+        lead: RoadLead | None = None,
     ) -> list[tuple[float, float]]:
         """左側通行の車線に沿った走行経路を返す（道交法 17 条 4 項 / 34 条）。"""
         path = [int(n) for n in node_path]
-        if len(path) < 2:
+        segments: list[RouteSegment] = []
+        if lead is not None:
+            for edge_id, pts in zip(lead.edge_ids, lead.polylines):
+                edge = self._edges_by_id.get(int(edge_id))
+                if edge is not None and len(pts) >= 2:
+                    segments.append(
+                        RouteSegment(
+                            edge=edge,
+                            points=[(float(px), float(py)) for px, py in pts],
+                            entry_offset=None if segments else lead.entry_offset,
+                        )
+                    )
+        elif len(path) < 2:
             return self.route_polyline(path, resample_m)
 
-        segments: list[RouteSegment] = []
         for a, b in zip(path[:-1], path[1:]):
             attrs = self.graph.get_edge_data(a, b)
             if attrs is None:
@@ -255,6 +348,109 @@ class MapIndexImpl:
         if len(route) < 2:
             return self.route_polyline(path, resample_m)
         return route
+
+    def road_lead(
+        self, x: float, y: float, heading: float | None, min_length_m: float = 0.0
+    ) -> RoadLead | None:
+        """いま走っている道路を進行方向へたどり、最初に曲がれるノードまでの道のりを返す。"""
+        start = self._current_edge(float(x), float(y), heading)
+        if start is None:
+            return None
+        edge, points, exit_node, facing, lateral = start
+        edge_ids = [int(edge.id)]
+        polylines = [points]
+        length = _polyline_length(points)
+        seen = {int(edge.id)}
+        # 速度が出ていると、すぐ先の交差点では曲がりきれない。まっすぐ抜けられる道を先へたどる
+        while length < float(min_length_m) and len(edge_ids) <= LEAD_MAX_HOPS:
+            nxt = self._straight_on(exit_node, facing, seen)
+            if nxt is None:
+                break
+            edge, points, facing = nxt
+            exit_node = int(edge.v) if int(edge.u) == exit_node else int(edge.u)
+            seen.add(int(edge.id))
+            edge_ids.append(int(edge.id))
+            polylines.append(points)
+            length += float(edge.length)
+        return RoadLead(
+            exit_node=int(exit_node),
+            exit_heading=float(facing),
+            edge_ids=edge_ids,
+            polylines=polylines,
+            length=float(length),
+            entry_offset=float(lateral),
+        )
+
+    def _current_edge(
+        self, x: float, y: float, heading: float | None
+    ) -> tuple[MapEdge, list[tuple[float, float]], int, float, float] | None:
+        """車の位置と向きに最も合う道路を選び、車の真横から先の中心線・出口・向き・横位置を返す。"""
+        if self._edge_tree is None or not self._edge_lines:
+            return None
+        point = Point(x, y)
+        idx = np.atleast_1d(
+            np.asarray(
+                self._edge_tree.query(point, predicate="dwithin", distance=LEAD_SEARCH_RADIUS_M)
+            )
+        ).ravel()
+        if idx.size == 0:
+            idx = np.atleast_1d(np.asarray(self._edge_tree.query_nearest(point))).ravel()
+
+        best: tuple[float, MapEdge, LineString, float, bool] | None = None
+        for i in idx:
+            edge = self._edges_by_id.get(self._edge_line_ids[int(i)])
+            if edge is None or edge.u == edge.v:
+                continue
+            line = self._edge_lines[int(i)]
+            along = float(line.project(point))
+            tangent = self._tangent_heading(line, along)
+            gap = float(line.distance(point))
+            # 道路の幅の内側にいれば、中心線からの距離はほとんど問わない（広い道路の外側の車線）
+            outside = max(0.0, gap - float(edge.width) / 2.0) + LEAD_CENTER_WEIGHT * gap
+            for forward in (True,) if edge.oneway else (True, False):
+                facing = tangent if forward else tangent + math.pi
+                turn = 0.0 if heading is None else abs(_wrap(float(heading) - facing))
+                score = outside + LEAD_ANGLE_WEIGHT_M * turn
+                if best is None or score < best[0]:
+                    best = (score, edge, line, along, forward)
+        if best is None:
+            return None
+
+        _score, edge, line, along, forward = best
+        foot = line.interpolate(along)
+        facing = self._tangent_heading(line, along) + (0.0 if forward else math.pi)
+        lateral = -(x - foot.x) * math.sin(facing) + (y - foot.y) * math.cos(facing)
+        half = float(edge.width) / 2.0
+        lateral = min(half, max(-half, lateral))
+        full = [(float(px), float(py)) for px, py in edge.polyline]
+        if forward:
+            points = _cut(line, along, float(line.length))
+            return edge, points, int(edge.v), _direction(full, at_end=True), lateral
+        points = _cut(line, 0.0, along)
+        points.reverse()
+        full.reverse()
+        return edge, points, int(edge.u), _direction(full, at_end=True), lateral
+
+    def _straight_on(
+        self, node: int, facing: float, seen: set[int]
+    ) -> tuple[MapEdge, list[tuple[float, float]], float] | None:
+        """ノードをまっすぐ抜けた先のエッジ。無ければ None（そこで曲がるしかない）。"""
+        best: tuple[float, MapEdge, list[tuple[float, float]]] | None = None
+        for _n, succ, attrs in self.graph.out_edges(node, data=True):
+            edge = self._edges_by_id.get(int(attrs["edge_id"]))
+            if edge is None or int(edge.id) in seen or len(edge.polyline) < 2:
+                continue
+            if not (0 <= int(succ) < self._reachable_mask.size and self._reachable_mask[int(succ)]):
+                continue
+            pts = [(float(px), float(py)) for px, py in edge.polyline]
+            if int(edge.u) != int(node):
+                pts.reverse()
+            turn = abs(_wrap(_direction(pts, at_end=False) - facing))
+            if turn <= LEAD_STRAIGHT_RAD and (best is None or turn < best[0]):
+                best = (turn, edge, pts)
+        if best is None:
+            return None
+        return best[1], best[2], _direction(best[2], at_end=True)
 
     def signals_on_route(
         self,
@@ -507,6 +703,39 @@ class MapIndexImpl:
 def build_map_index(data: MapData) -> MapIndexImpl:
     """`MapData` から実行時インデックスを組み立てる。"""
     return MapIndexImpl(data)
+
+
+def _wrap(angle: float) -> float:
+    """角度を (-pi, pi] に畳む。"""
+    return math.atan2(math.sin(angle), math.cos(angle))
+
+
+def _polyline_length(points: Sequence[tuple[float, float]]) -> float:
+    return float(sum(math.dist(a, b) for a, b in zip(points[:-1], points[1:])))
+
+
+def _cut(line: LineString, start: float, end: float) -> list[tuple[float, float]]:
+    """ポリラインの弧長 start..end の部分を点列で返す。"""
+    part = substring(line, start, end)
+    if part.geom_type == "Point":
+        return [(float(part.x), float(part.y))]
+    return [(float(px), float(py)) for px, py in part.coords]
+
+
+def _direction(points: Sequence[tuple[float, float]], at_end: bool) -> float:
+    """点列の始点（または終点）での進行方位 [rad]。`LEAD_DIRECTION_SPAN_M` ぶん離れた点で測る。"""
+    pts = list(reversed(points)) if at_end else list(points)
+    origin = pts[0]
+    far = pts[-1]
+    walked = 0.0
+    for a, b in zip(pts[:-1], pts[1:]):
+        walked += math.dist(a, b)
+        if walked >= LEAD_DIRECTION_SPAN_M:
+            far = b
+            break
+    if at_end:
+        return math.atan2(origin[1] - far[1], origin[0] - far[0])
+    return math.atan2(far[1] - origin[1], far[0] - origin[0])
 
 
 def _sq_dist(a: Sequence[float], b: Sequence[float]) -> float:

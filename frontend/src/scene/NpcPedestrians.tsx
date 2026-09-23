@@ -144,6 +144,8 @@ export function NpcPedestrians({ castShadow }: NpcPedestriansProps) {
     const leg = legRef.current
     if (!head || !torso || !hip || !arm || !leg) return
 
+    // 表示の区間を先に進めてから prev / curr を読む（逆だと別の区間の係数で補間する）
+    const alpha = computeAlpha(performance.now(), renderPaused)
     const curr = frameBuffer.curr
     const people = curr?.pedestrians
     if (!people || people.length === 0) {
@@ -157,13 +159,12 @@ export function NpcPedestrians({ castShadow }: NpcPedestriansProps) {
 
     const prev = scratch.prev
     const prevFrame = frameBuffer.prev?.pedestrians
-    if (prevFrame && scratch.indexedAt !== frameBuffer.received) {
-      scratch.indexedAt = frameBuffer.received
+    if (prevFrame && scratch.indexedAt !== frameBuffer.displayed) {
+      scratch.indexedAt = frameBuffer.displayed
       prev.clear()
       for (const p of prevFrame) prev.set(p.id, p)
     }
 
-    const alpha = computeAlpha(performance.now(), renderPaused)
     const n = Math.min(people.length, MAX_PEDESTRIANS)
     for (let i = 0; i < n; i++) {
       const p = people[i]
