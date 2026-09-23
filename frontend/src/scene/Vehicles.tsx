@@ -113,6 +113,7 @@ import {
   type PartKey,
 } from './vehicleParts'
 import { driverEye } from './cameraMath'
+import { useHiddenFromMirrors } from './mirrorHidden'
 import { displayedWeather, weatherLook } from './weatherView'
 
 
@@ -225,6 +226,9 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
   const meshes = useRef<Partial<Record<PartKey, THREE.InstancedMesh>>>({})
   const ringRef = useRef<THREE.Mesh>(null)
   const pinRef = useRef<THREE.Group>(null)
+  // 追跡の印は画面の上の目印なので、ミラーの映像には入れない
+  useHiddenFromMirrors(ringRef)
+  useHiddenFromMirrors(pinRef)
 
   const pose = useMemo(createPose, [])
   const spin = useRef(0)

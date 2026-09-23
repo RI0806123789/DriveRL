@@ -21,7 +21,17 @@ import {
   WINDSHIELD_TOP_X,
   sideGlassZ,
 } from './vehicleGeometry.ts'
-import { LIGHT_SLOTS, MIRROR } from './vehicleLights.ts'
+import { LIGHT_SLOTS } from './vehicleLights.ts'
+import {
+  DOOR_MIRROR_DEPTH,
+  DOOR_MIRROR_GLASS,
+  DOOR_MIRROR_HALF,
+  DOOR_MIRROR_RECESS,
+  MIRROR_FACES,
+  doorMirrorFrame,
+  doorMirrorLocal,
+  doorMirrorPoint,
+} from './mirrorView.ts'
 import { WINDSHIELD_BULGE } from './wiper.ts'
 import {
   ARCH_HALF_SPAN,
@@ -643,40 +653,97 @@ function addPanelGaps(b: MeshBuilder, style: PartStyle): void {
   addStrip(b, (t) => rearSurface(-0.6 + 1.2 * t, 0.868), W, LIFT, 8, style)
 }
 
-/** ドアミラーの筐体（角を丸めた箱）。右側 */
-function mirrorHousing(sign: number): THREE.BufferGeometry {
-  const w = MIRROR.x[1] - MIRROR.x[0]
-  const h = MIRROR.y[1] - MIRROR.y[0]
-  const bevel = 0.014
-  const shape = new THREE.Shape()
-  const r = 0.035
-  const x0 = -w / 2 + bevel
-  const y0 = -h / 2 + bevel
-  const x1 = w / 2 - bevel
-  const y1 = h / 2 - bevel
-  shape.moveTo(x0 + r, y0)
-  shape.lineTo(x1 - r, y0)
-  shape.quadraticCurveTo(x1, y0, x1, y0 + r)
-  shape.lineTo(x1, y1 - r)
-  shape.quadraticCurveTo(x1, y1, x1 - r, y1)
-  shape.lineTo(x0 + r, y1)
-  shape.quadraticCurveTo(x0, y1, x0, y1 - r)
-  shape.lineTo(x0, y0 + r)
-  shape.quadraticCurveTo(x0, y0, x0 + r, y0)
-  const depth = MIRROR.z[1] - MIRROR.z[0] - 2 * bevel
-  const g = new THREE.ExtrudeGeometry(shape, {
-    depth,
-    bevelEnabled: true,
-    bevelThickness: bevel,
-    bevelSize: bevel,
-    bevelSegments: 2,
-    curveSegments: 3,
-  })
-  g.translate(0, 0, bevel)
-  // 形は上下対称なので、X 軸まわりに半回転すれば巻き順を保ったまま左右が入れ替わる
-  if (sign < 0) g.rotateX(Math.PI)
-  g.translate((MIRROR.x[0] + MIRROR.x[1]) / 2, (MIRROR.y[0] + MIRROR.y[1]) / 2, sign * MIRROR.z[0])
-  return g
+/** ドアミラーの筐体の輪郭（筐体の座標の x, y）。角を丸めた四角（超楕円）を一周して始点へ戻る */
+function mirrorRing(halfX: number, halfY: number, count = 24): Array<readonly [number, number]> {
+  const out: Array<readonly [number, number]> = []
+  for (let i = 0; i <= count; i++) {
+    const a = (2 * Math.PI * i) / count
+    const c = Math.cos(a)
+    const s = Math.sin(a)
+    out.push([Math.sign(c) * Math.sqrt(Math.abs(c)) * halfX, Math.sign(s) * Math.sqrt(Math.abs(s)) * halfY])
+  }
+  return out
+}
+
+/** 筐体を前へ細らせる段（筐体の座標の z と、縁に対する大きさ） */
+const MIRROR_STATIONS: ReadonlyArray<readonly [number, number]> = [
+  [0, 1],
+  [-0.02, 1],
+  [-0.045, 0.95],
+  [-0.062, 0.83],
+  [-0.073, 0.6],
+  [-DOOR_MIRROR_DEPTH, 0.25],
+]
+
+/** 鏡の周りの開口（鏡より一回り大きい）と、鏡の奥の底の深さ */
+const MIRROR_OPENING: readonly [number, number] = [DOOR_MIRROR_GLASS[0] / 2 + 0.003, DOOR_MIRROR_GLASS[1] / 2 + 0.003]
+const MIRROR_CUP_Z = -(DOOR_MIRROR_RECESS + 0.012)
+
+/** 筐体の座標の向き（x, y, z の重み）を車両ローカルの向きへ */
+function mirrorDir(sign: number, x: number, y: number, z: number): Vec3 {
+  const f = doorMirrorFrame(sign)
+  return [f.x[0] * x + f.y[0] * y + f.z[0] * z, f.x[1] * x + f.y[1] * y + f.z[1] * z, f.x[2] * x + f.y[2] * y + f.z[2] * z]
+}
+
+/** ドアミラーの筐体（塗装）。鏡の側を開けた殻で、前へ細らせて先端をふさぐ */
+function addMirrorShell(b: MeshBuilder, sign: number, style: PartStyle): void {
+  const [hx, hy] = DOOR_MIRROR_HALF
+  const rows = MIRROR_STATIONS.map(([z, k]) => mirrorRing(hx * k, hy * k).map(([x, y]) => doorMirrorPoint(sign, x, y, z)))
+  b.grid(
+    rows,
+    (p) => {
+      const l = doorMirrorLocal(sign, p)
+      return mirrorDir(sign, l[0], l[1], -0.25 * Math.hypot(l[0], l[1]))
+    },
+    style,
+  )
+  const tip = doorMirrorPoint(sign, 0, 0, -DOOR_MIRROR_DEPTH - 0.003)
+  const last = rows[rows.length - 1]
+  const forward = mirrorDir(sign, 0, 0, -1)
+  for (let j = 0; j + 1 < last.length; j++) b.triangle(tip, last[j], last[j + 1], style, undefined, forward)
+}
+
+/** ドアミラーの黒い部分（鏡の周りの縁・鏡の奥の器・ドアへの腕と台座） */
+function addMirrorBezel(b: MeshBuilder, sign: number, style: PartStyle): void {
+  const [hx, hy] = DOOR_MIRROR_HALF
+  const outer = mirrorRing(hx, hy).map(([x, y]) => doorMirrorPoint(sign, x, y, 0))
+  const opening = mirrorRing(MIRROR_OPENING[0], MIRROR_OPENING[1])
+  const inner = opening.map(([x, y]) => doorMirrorPoint(sign, x, y, 0))
+  const cup = opening.map(([x, y]) => doorMirrorPoint(sign, x, y, MIRROR_CUP_Z))
+  const back = mirrorDir(sign, 0, 0, 1)
+  b.grid([outer, inner], back, style)
+  b.grid(
+    [inner, cup],
+    (p) => {
+      const l = doorMirrorLocal(sign, p)
+      return mirrorDir(sign, -l[0], -l[1], 0)
+    },
+    style,
+  )
+  const bottom = doorMirrorPoint(sign, 0, 0, MIRROR_CUP_Z)
+  for (let j = 0; j + 1 < cup.length; j++) b.triangle(bottom, cup[j], cup[j + 1], style, undefined, back)
+  const z = (a: number, c: number): [number, number] => (sign > 0 ? [a, c] : [-c, -a])
+  const [baseZ0, baseZ1] = z(0.8, 0.875)
+  const [armZ0, armZ1] = z(0.84, 0.94)
+  for (const g of [
+    new THREE.BoxGeometry(0.09, 0.035, baseZ1 - baseZ0).translate(0.96, 0.9725, (baseZ0 + baseZ1) / 2),
+    new THREE.BoxGeometry(0.06, 0.037, armZ1 - armZ0).translate(0.955, 0.9935, (armZ0 + armZ1) / 2),
+  ]) {
+    b.geometry(g, style)
+    g.dispose()
+  }
+}
+
+/** ドアミラーの鏡面（静かな映り込み。運転席から見ている車には、後ろの景色を映す板を重ねる） */
+function mirrorGlass(sign: number): THREE.BufferGeometry {
+  const face = MIRROR_FACES.find((f) => f.key === (sign > 0 ? 'right' : 'left'))!
+  const n = face.normal
+  return orientedBox(
+    [face.center[0] - n[0] * 0.0015, face.center[1] - n[1] * 0.0015, face.center[2] - n[2] * 0.0015],
+    face.right,
+    face.up,
+    [face.width, face.height, 0.003],
+  )
 }
 
 /** 塗装される部分。 */
@@ -685,11 +752,7 @@ export function makeBodyPaintGeometry(): THREE.BufferGeometry {
   const b = new MeshBuilder()
   const wall = wallSections(spec)
   addPaintShell(b, spec, wall, {})
-  for (const sign of [1, -1]) {
-    const g = mirrorHousing(sign)
-    b.geometry(g)
-    g.dispose()
-  }
+  for (const sign of [1, -1]) addMirrorShell(b, sign, {})
   const lid = sideSurface(-1.55, 0.855, -1)
   b.geometry(orientedBox(offset(lid, 0.0035), [1, 0, 0], [0, 1, 0], [0.15, 0.1, 0.004]))
   return b.build({ door: true })
@@ -737,9 +800,7 @@ export function makeBodyTrimGeometry(): THREE.BufferGeometry {
         [0, 0, sign],
       )
     }
-    const stay = orientedBox([0.965, 0.995, sign * 0.815], [1, 0, 0], [0, 1, 0], [0.07, 0.05, 0.03])
-    b.geometry(stay, s)
-    stay.dispose()
+    addMirrorBezel(b, sign, s)
   }
   addPatch(
     b,
@@ -791,12 +852,7 @@ export function makeBodyChromeGeometry(): THREE.BufferGeometry {
       const h = sideSurface(x, 0.855, sign)
       b.geometry(orientedBox(offset(h, 0.008), [1, 0, 0], [0, 1, 0], [0.15, 0.026, 0.018]), { door })
     }
-    const glass = orientedBox(
-      [MIRROR.x[0] - 0.004, (MIRROR.y[0] + MIRROR.y[1]) / 2, sign * ((MIRROR.z[0] + MIRROR.z[1]) / 2 + 0.004)],
-      [0, 0, 1],
-      [0, 1, 0],
-      [MIRROR.z[1] - MIRROR.z[0] - 0.026, MIRROR.y[1] - MIRROR.y[0] - 0.03, 0.006],
-    )
+    const glass = mirrorGlass(sign)
     b.geometry(glass)
     glass.dispose()
   }
@@ -825,14 +881,17 @@ export function makeFarBodyGeometry(): THREE.BufferGeometry {
       dark,
       [0, 0, sign],
     )
-    const m = orientedBox(
-      [(MIRROR.x[0] + MIRROR.x[1]) / 2, (MIRROR.y[0] + MIRROR.y[1]) / 2, sign * ((MIRROR.z[0] + MIRROR.z[1]) / 2)],
-      [1, 0, 0],
-      [0, 1, 0],
-      [MIRROR.x[1] - MIRROR.x[0], MIRROR.y[1] - MIRROR.y[0], MIRROR.z[1] - MIRROR.z[0]],
-    )
+    const f = doorMirrorFrame(sign)
+    const m = orientedBox(doorMirrorPoint(sign, 0, 0, -DOOR_MIRROR_DEPTH / 2), f.x, f.y, [
+      2 * DOOR_MIRROR_HALF[0],
+      2 * DOOR_MIRROR_HALF[1],
+      DOOR_MIRROR_DEPTH,
+    ])
     b.geometry(m, paint)
     m.dispose()
+    const arm = new THREE.BoxGeometry(0.06, 0.04, 0.1).translate(0.955, 0.99, sign * 0.89)
+    b.geometry(arm, dark)
+    arm.dispose()
   }
   addWheelHouses(b, 4, false, dark)
   addCabinCore(b, dark)

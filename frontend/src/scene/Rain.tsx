@@ -3,6 +3,7 @@
 import { useMemo, useRef } from 'react'
 import { useFrame } from '@react-three/fiber'
 import * as THREE from 'three'
+import { useHiddenFromMirrors } from './mirrorHidden'
 import { usePalette } from './usePalette'
 import { displayedWeather, weatherLook } from './weatherView'
 
@@ -59,6 +60,8 @@ export function Rain() {
   const palette = usePalette()
   const mesh = useRef<THREE.Mesh>(null)
   const material = useRef<THREE.ShaderMaterial>(null)
+  // 画面のカメラの前に貼った板なので、ミラーの映像には入れない
+  useHiddenFromMirrors(mesh)
 
   const uniforms = useMemo(
     () => ({

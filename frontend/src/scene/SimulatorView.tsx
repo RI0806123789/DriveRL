@@ -14,6 +14,7 @@ import { Obstacles } from './Obstacles'
 import { PedestrianSignals } from './PedestrianSignals'
 import { NavScreen } from './NavScreen'
 import { WindshieldRain } from './WindshieldRain'
+import { RearViewMirrors } from './RearViewMirrors'
 import { Pedestrian } from './Pedestrian'
 import { Rain } from './Rain'
 import { RoadMarkings } from './RoadMarkings'
@@ -123,9 +124,10 @@ export function SimulatorView() {
           />
           <LaneDetectionOverlay />
           <Vehicles maxVehicles={maxVehicles} castShadow={view.shadows} />
-          {/* カーナビとフロントガラスの水滴は、見ている 1 台にだけ出す */}
+          {/* カーナビ・フロントガラスの水滴・ミラーの映像は、見ている 1 台にだけ出す */}
           <NavScreen />
           <WindshieldRain />
+          <RearViewMirrors />
           <Obstacles castShadow={view.shadows} />
           <NpcPedestrians castShadow={view.shadows} />
           <Rain />

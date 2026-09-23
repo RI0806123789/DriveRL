@@ -4,6 +4,7 @@ import * as THREE from 'three'
 import {
   BELT_Y,
   BODY_HALF_W,
+  GLASS_TOP_Y,
   COLUMN_TILT,
   DASH_REAR_X,
   DASH_TOP_Y,
@@ -97,7 +98,6 @@ import {
   LIGHT_STOP,
   LIGHT_TAIL,
   LIGHT_TURN,
-  MIRROR,
   blinkOn,
   composeLampMatrix,
   headlightsOn,
@@ -113,7 +113,22 @@ import {
   makeFarBodyGeometry,
   makeVehicleGlass,
 } from '../src/scene/vehicleBody.ts'
-import { AC_VENTS, ROOM_MIRROR, makeInteriorGeometry } from '../src/scene/vehicleInterior.ts'
+import { AC_VENTS, ROOM_MIRROR_BODY_DEPTH, ROOM_MIRROR_RIM, makeInteriorGeometry } from '../src/scene/vehicleInterior.ts'
+import {
+  DOOR_MIRROR_DEPTH,
+  DOOR_MIRROR_HALF,
+  MIRRORS_PER_FRAME,
+  MIRROR_FACES,
+  MIRROR_INTERVAL_SEC,
+  REAR_GLASS_CENTER,
+  doorMirrorLocal,
+  makeMirrorQuadGeometry,
+  mirrorCorners,
+  mirrorView,
+  mirrorsDue,
+  type MirrorFace,
+} from '../src/scene/mirrorView.ts'
+import { orientedBox } from '../src/scene/meshBuilder.ts'
 import {
   RIM_RADIUS,
   TYRE_WIDTH,
@@ -204,6 +219,35 @@ function insideBox(b: THREE.Box3, tol = 1e-6): boolean {
     b.min.z >= -VEHICLE_WIDTH / 2 - tol &&
     b.max.z <= VEHICLE_WIDTH / 2 + tol
   )
+}
+
+/** ドアミラーの張り出しを許す範囲（車両ローカル）。筐体・腕・台座がここに入る */
+const DOOR_MIRROR_ZONE = { x: [0.8, 1.05], y: [0.94, 1.13], minAbsZ: 0.79 } as const
+/** ドアミラーが外接寸法の横からはみ出してよい量 [m]（CLAUDE.md の例外） */
+const DOOR_MIRROR_OVERHANG_LIMIT = 0.18
+
+function inDoorMirrorZone(v: THREE.Vector3): boolean {
+  const z = DOOR_MIRROR_ZONE
+  return v.x >= z.x[0] && v.x <= z.x[1] && v.y >= z.y[0] && v.y <= z.y[1] && Math.abs(v.z) >= z.minAbsZ
+}
+
+/** ドアミラーの範囲を除いた外接箱と、ドアミラーが横へはみ出した量の最大 */
+function boundsBesideMirrors(g: THREE.BufferGeometry, matrix?: THREE.Matrix4): { box: THREE.Box3; overhang: number } {
+  const box = new THREE.Box3()
+  let overhang = 0
+  const p = g.attributes.position
+  const v = new THREE.Vector3()
+  for (let i = 0; i < p.count; i++) {
+    v.set(p.getX(i), p.getY(i), p.getZ(i))
+    if (inDoorMirrorZone(v)) {
+      overhang = Math.max(overhang, Math.abs(v.z) - VEHICLE_WIDTH / 2)
+      if (matrix) v.applyMatrix4(matrix)
+      continue
+    }
+    if (matrix) v.applyMatrix4(matrix)
+    box.expandByPoint(v)
+  }
+  return { box, overhang }
 }
 
 function describeBox(b: THREE.Box3): string {
@@ -663,12 +707,22 @@ function state(over: Partial<Parameters<typeof lightStateFor>[0]>) {
   const idm = new THREE.Matrix4()
   const lm = new THREE.Matrix4()
   let outside = 0
+  let mirrorLampOverhang = 0
   for (const s of LIGHT_SLOTS) {
     composeLampMatrix(idm, s, lm)
     const b = boundsOf(lens, lm)
+    if (inDoorMirrorZone(new THREE.Vector3(...s.position))) {
+      mirrorLampOverhang = Math.max(mirrorLampOverhang, Math.max(Math.abs(b.min.z), Math.abs(b.max.z)) - VEHICLE_WIDTH / 2)
+      continue
+    }
     if (!insideBox(b)) outside++
   }
-  check('灯火のレンズがすべて外接寸法の内側にある', outside === 0, `${outside} 個がはみ出す`)
+  check('灯火のレンズがすべて外接寸法の内側にある（ドアミラーのものを除く）', outside === 0, `${outside} 個がはみ出す`)
+  check(
+    `ドアミラーのサイドターンランプのはみ出しは ${DOOR_MIRROR_OVERHANG_LIMIT * 100}cm まで`,
+    mirrorLampOverhang <= DOOR_MIRROR_OVERHANG_LIMIT,
+    `${(mirrorLampOverhang * 100).toFixed(1)}cm`,
+  )
   const stop = LIGHT_SLOTS.find((s) => s.kind === LIGHT_STOP)!
   check(
     'ハイマウントストップランプはリアガラスの上端（屋根の縁の下）で、後ろ上を向く',
@@ -676,10 +730,22 @@ function state(over: Partial<Parameters<typeof lightStateFor>[0]>) {
     `(${stop.position.map((v) => v.toFixed(2)).join(', ')})`,
   )
   const mirrorTurn = LIGHT_SLOTS.filter((s) => s.kind === LIGHT_TURN && s.position[1] > 0.98)
+  // 筐体の座標で見て、外側（運転席から遠い側）の側面にあり、筐体の高さと奥行きの中に収まる
   check(
-    'サイドターンランプはドアミラーの筐体に付く',
+    'サイドターンランプはドアミラーの筐体の外側の側面に付く',
     mirrorTurn.length === 2 &&
-      mirrorTurn.every((s) => s.position[0] >= MIRROR.x[0] && s.position[0] <= MIRROR.x[1] && Math.abs(s.position[2]) <= MIRROR.z[1]),
+      mirrorTurn.every((s) => {
+        // 筐体の x は右の筐体では外向き、左の筐体では内向き（左右の筐体は鏡像）
+        const l = doorMirrorLocal(s.side, s.position)
+        const outward = s.side * l[0]
+        return (
+          outward >= DOOR_MIRROR_HALF[0] * 0.85 &&
+          outward <= DOOR_MIRROR_HALF[0] + 0.01 &&
+          Math.abs(l[1]) <= DOOR_MIRROR_HALF[1] &&
+          l[2] <= 0 &&
+          l[2] >= -DOOR_MIRROR_DEPTH
+        )
+      }),
   )
   lens.dispose()
 }
@@ -762,7 +828,7 @@ console.log('='.repeat(70))
 
 {
   // 外接寸法（4.4 × 1.8 × 1.45m）は衝突判定・擬似カメラ・正解ラベルが前提にしている。
-  //   はみ出してよいのは、実用モードのタクシーの表示灯（高さだけ）と車輪（取り付け位置が元から外）だけ
+  //   はみ出してよいのは、実用モードのタクシーの表示灯（高さだけ）・ドアミラー（横だけ）・車輪（取り付け位置が元から外）だけ
   const idm = new THREE.Matrix4()
   const pieces: Array<[string, THREE.BufferGeometry]> = [
     ['車体（塗装）', makeBodyPaintGeometry()],
@@ -772,15 +838,22 @@ console.log('='.repeat(70))
     ['遠景の車体', makeFarBodyGeometry()],
     ['内装', makeInteriorGeometry()],
   ]
+  let mirrorOverhang = 0
   for (const [name, g] of pieces) {
-    const b = boundsOf(g)
+    const { box, overhang } = boundsBesideMirrors(g)
+    mirrorOverhang = Math.max(mirrorOverhang, overhang)
     check(
-      name + 'が外接寸法 ' + VEHICLE_LENGTH + '×' + VEHICLE_WIDTH + '×' + VEHICLE_HEIGHT + 'm に収まる',
-      insideBox(b),
-      describeBox(b),
+      name + 'が外接寸法 ' + VEHICLE_LENGTH + '×' + VEHICLE_WIDTH + '×' + VEHICLE_HEIGHT + 'm に収まる（ドアミラーを除く）',
+      insideBox(box),
+      describeBox(box),
     )
     g.dispose()
   }
+  check(
+    `ドアミラーの横へのはみ出しは片側 ${DOOR_MIRROR_OVERHANG_LIMIT * 100}cm まで（外接寸法の例外）`,
+    mirrorOverhang > 0.1 && mirrorOverhang <= DOOR_MIRROR_OVERHANG_LIMIT,
+    `${(mirrorOverhang * 100).toFixed(1)}cm`,
+  )
   const wiper = makeWiperGeometry()
   let wiperWorst = new THREE.Box3()
   for (let k = 0; k < WIPER_PIVOTS.length; k++) {
@@ -804,7 +877,7 @@ console.log('='.repeat(70))
 {
   const body = makeBodyPaintGeometry()
   const glass = makeVehicleGlass()
-  const bb = boundsOf(body)
+  const bb = boundsBesideMirrors(body).box
   const gb = boundsOf(glass)
   check('窓はベルトラインより上にある', gb.min.y > 0.9, '窓の下端 ' + gb.min.y.toFixed(2) + 'm')
   check(
@@ -1734,7 +1807,7 @@ console.log('='.repeat(70))
     [-1, 1],
     [-1, -1],
   ]) {
-    const tb = boundsOf(body, composeTiltMatrix(p * MAX_PITCH * TILT_OVERSHOOT, r * MAX_ROLL * TILT_OVERSHOOT, new THREE.Matrix4()))
+    const tb = boundsBesideMirrors(body, composeTiltMatrix(p * MAX_PITCH * TILT_OVERSHOOT, r * MAX_ROLL * TILT_OVERSHOOT, new THREE.Matrix4())).box
     excess = Math.max(
       excess,
       tb.max.y - VEHICLE_HEIGHT,
@@ -1744,7 +1817,7 @@ console.log('='.repeat(70))
       -VEHICLE_LENGTH / 2 - tb.min.x,
     )
   }
-  check('傾き切っても外接寸法からのはみ出しが 5cm 以内', excess <= 0.05, `${(excess * 100).toFixed(1)}cm`)
+  check('傾き切っても外接寸法からのはみ出しが 5cm 以内（ドアミラーを除く）', excess <= 0.05, `${(excess * 100).toFixed(1)}cm`)
   body.dispose()
 
   // 運転席の目は車体と一緒に動く（車体の行列を掛けた目の位置と一致する）
@@ -1942,13 +2015,20 @@ class DriverRaster {
   }
   check('強い雨でも、拭いている所の水滴は平均 4% まで', sum / n <= 0.04, `${((sum / n) * 100).toFixed(2)}%（粒の不透明度 ${DROP_OPACITY}）`)
 
-  // ルームミラーは小さく保つ（`vehicleInterior` と同じ寸法・向きで箱を作って測る）
-  const rm = ROOM_MIRROR
-  const mirror = new THREE.BoxGeometry(rm.width, rm.height, 0.02)
-  const mm = new THREE.Matrix4().makeRotationY(Math.PI / 2 - rm.yaw)
-  mm.setPosition(rm.center[0], rm.center[1], rm.center[2])
+  // ルームミラーは小さく保つ（`vehicleInterior` と同じ寸法・向きで本体の箱を作って測る）
+  const rm = MIRROR_FACES[0]
+  const mirror = orientedBox(
+    [
+      rm.center[0] - rm.normal[0] * (0.002 + ROOM_MIRROR_BODY_DEPTH / 2),
+      rm.center[1] - rm.normal[1] * (0.002 + ROOM_MIRROR_BODY_DEPTH / 2),
+      rm.center[2] - rm.normal[2] * (0.002 + ROOM_MIRROR_BODY_DEPTH / 2),
+    ],
+    rm.right,
+    rm.up,
+    [rm.width + 2 * ROOM_MIRROR_RIM, rm.height + 2 * ROOM_MIRROR_RIM, ROOM_MIRROR_BODY_DEPTH],
+  )
   const raster2 = new DriverRaster()
-  const mirrorCells = raster2.draw(mirror, mm, false, false)
+  const mirrorCells = raster2.draw(mirror, null, false, false)
   check('ルームミラーが視界を塞ぐのは画面の 3% まで', mirrorCells / raster2.cells <= 0.03, `${((mirrorCells / raster2.cells) * 100).toFixed(2)}%`)
   mirror.dispose()
 
@@ -2054,6 +2134,197 @@ console.log('='.repeat(70))
   const rz = -BODY_HALF_W - TAXI_DOOR_HINGE[1]
   const zOpen = TAXI_DOOR_HINGE[1] - rx * Math.sin(a) + rz * Math.cos(a)
   check('ドアを開けると後ろの縁が外（-Z）へ出る', zOpen < -BODY_HALF_W - 0.5, `z=${zOpen.toFixed(2)}`)
+}
+
+console.log()
+console.log('='.repeat(70))
+console.log('ルームミラーとドアミラー（後ろの景色を映す）')
+console.log('='.repeat(70))
+
+{
+  const eye = new THREE.Vector3(...DRIVER_EYE_LOCAL)
+  const v3 = (p: readonly [number, number, number]) => new THREE.Vector3(p[0], p[1], p[2])
+  const reflected = (f: MirrorFace) => {
+    const n = v3(f.normal)
+    const d = v3(f.center).sub(eye).normalize()
+    return d.sub(n.multiplyScalar(2 * d.dot(v3(f.normal))))
+  }
+  check(
+    '鏡は 3 枚（ルームミラーと左右のドアミラー）',
+    MIRROR_FACES.map((f) => f.key).join(',') === 'room,right,left',
+  )
+  check(
+    '鏡面の向き（法線・右・上）は直交する単位ベクトルで、右 = 上 × 法線',
+    MIRROR_FACES.every((f) => {
+      const n = v3(f.normal)
+      const r = v3(f.right)
+      const u = v3(f.up)
+      return (
+        Math.abs(n.length() - 1) < 1e-9 &&
+        Math.abs(r.length() - 1) < 1e-9 &&
+        Math.abs(u.length() - 1) < 1e-9 &&
+        Math.abs(n.dot(r)) < 1e-9 &&
+        Math.abs(n.dot(u)) < 1e-9 &&
+        u.clone().cross(n).distanceTo(r) < 1e-9
+      )
+    }),
+  )
+  check('鏡面は運転席の目の側を向く', MIRROR_FACES.every((f) => eye.clone().sub(v3(f.center)).dot(v3(f.normal)) > 0))
+
+  // ルームミラーの真ん中には、リアガラス越しの真後ろがほぼ水平に映る（下を向きすぎると地平線が入らない）
+  const room = MIRROR_FACES[0]
+  const rr = reflected(room)
+  const tRear = (REAR_GLASS_CENTER[0] - room.center[0]) / rr.x
+  const hit = v3(room.center).add(rr.clone().multiplyScalar(tRear))
+  const roomPitch = (Math.asin(rr.y) * 180) / Math.PI
+  check(
+    'ルームミラーの真ん中はリアガラスを通って真後ろを映し、下向きは 3 度まで',
+    rr.x < 0 && hit.y > BELT_Y + 0.1 && hit.y < GLASS_TOP_Y - 0.05 && Math.abs(hit.z) < 0.1 && roomPitch <= 0 && roomPitch >= -3,
+    `リアガラスで y=${hit.y.toFixed(3)} z=${hit.z.toFixed(3)} / ${roomPitch.toFixed(1)} 度`,
+  )
+  // ドアミラーの真ん中は、車の真後ろから少し外・少し下を映す
+  for (const f of MIRROR_FACES.slice(1)) {
+    const r = reflected(f)
+    const side = f.key === 'right' ? 1 : -1
+    const outward = (Math.atan2(side * r.z, -r.x) * 180) / Math.PI
+    const pitch = (Math.asin(r.y) * 180) / Math.PI
+    check(
+      `${f.key === 'right' ? '右' : '左'}のドアミラーの真ん中は真後ろから外へ 3〜10 度・下へ 0〜5 度`,
+      r.x < 0 && outward >= 3 && outward <= 10 && pitch <= 0 && pitch >= -5,
+      `外へ ${outward.toFixed(1)} 度 / ${pitch.toFixed(1)} 度`,
+    )
+  }
+
+  // 映像の左右：車の後ろの右にある物は鏡の右に、左にある物は鏡の左に映る（運転席から見て）
+  const driver = new DriverRaster().cam
+  const screenXOf = (f: MirrorFace, world: THREE.Vector3): number | null => {
+    const view = mirrorView(f)
+    const cam = new THREE.PerspectiveCamera()
+    cam.projectionMatrix.makePerspective(view.left, view.right, view.top, view.bottom, view.near, view.far)
+    cam.projectionMatrixInverse.copy(cam.projectionMatrix).invert()
+    view.matrix.decompose(cam.position, cam.quaternion, cam.scale)
+    cam.updateMatrixWorld(true)
+    const ndc = world.clone().project(cam)
+    if (Math.abs(ndc.x) > 1 || Math.abs(ndc.y) > 1 || ndc.z < -1 || ndc.z > 1) return null
+    const [pa, pb, pc] = mirrorCorners(f).map(v3)
+    const u = (ndc.x + 1) / 2
+    const w = (ndc.y + 1) / 2
+    const q = pa.clone().add(pb.clone().sub(pa).multiplyScalar(u)).add(pc.clone().sub(pa).multiplyScalar(w))
+    return q.project(driver).x
+  }
+  const pairs: Array<[MirrorFace, THREE.Vector3, THREE.Vector3]> = [
+    [MIRROR_FACES[0], new THREE.Vector3(-14, 0.8, 1.2), new THREE.Vector3(-14, 0.8, -1.2)],
+    [MIRROR_FACES[1], new THREE.Vector3(-14, 0.9, 3.6), new THREE.Vector3(-14, 0.9, 1.8)],
+    [MIRROR_FACES[2], new THREE.Vector3(-14, 0.9, -1.8), new THREE.Vector3(-14, 0.9, -3.4)],
+  ]
+  for (const [f, rightPoint, leftPoint] of pairs) {
+    const xr = screenXOf(f, rightPoint)
+    const xl = screenXOf(f, leftPoint)
+    check(
+      `${f.key === 'room' ? 'ルームミラー' : f.key === 'right' ? '右のドアミラー' : '左のドアミラー'}：後ろの右にある物ほど、運転席から見て鏡の右に映る`,
+      xr !== null && xl !== null && xr > xl,
+      xr !== null && xl !== null ? `右 ${xr.toFixed(4)} / 左 ${xl.toFixed(4)}` : '鏡に映らない',
+    )
+  }
+
+  // 鏡より前（運転席の反対側）の物は映さない。ルームミラーからはフロントガラスが見えない
+  {
+    const view = mirrorView(room)
+    const cam = new THREE.PerspectiveCamera()
+    cam.projectionMatrix.makePerspective(view.left, view.right, view.top, view.bottom, view.near, view.far)
+    view.matrix.decompose(cam.position, cam.quaternion, cam.scale)
+    cam.updateMatrixWorld(true)
+    const front = new THREE.Vector3(0.95, 1.15, 0.02).project(cam)
+    const rear = new THREE.Vector3(-15, 0.6, 0).project(cam)
+    check(
+      'ルームミラーの映像には、鏡より前のフロントガラスが入らず、15m 後ろの道路が入る',
+      !(Math.abs(front.x) <= 1 && Math.abs(front.y) <= 1 && front.z >= -1 && front.z <= 1) &&
+        Math.abs(rear.x) <= 1 && Math.abs(rear.y) <= 1 && rear.z >= -1 && rear.z <= 1,
+    )
+  }
+
+  // ドアミラーに自分の車が映る割合（実車のように内側の端に少しだけ車体が見える）
+  const carBox = new THREE.Box3(
+    new THREE.Vector3(-VEHICLE_LENGTH / 2, 0, -VEHICLE_WIDTH / 2),
+    new THREE.Vector3(VEHICLE_LENGTH / 2, VEHICLE_HEIGHT, VEHICLE_WIDTH / 2),
+  )
+  for (const f of MIRROR_FACES.slice(1)) {
+    const view = mirrorView(f)
+    const rot = new THREE.Matrix4().extractRotation(view.matrix)
+    const origin = v3(view.eye)
+    let own = 0
+    let total = 0
+    for (let i = 0; i < 24; i++) {
+      for (let j = 0; j < 14; j++) {
+        const x = view.left + ((i + 0.5) / 24) * (view.right - view.left)
+        const y = view.bottom + ((j + 0.5) / 14) * (view.top - view.bottom)
+        const dir = new THREE.Vector3(x, y, -view.near).applyMatrix4(rot).normalize()
+        const start = origin.clone().add(dir.clone().multiplyScalar(view.near / Math.max(1e-9, -new THREE.Vector3(x, y, -view.near).normalize().z)))
+        const ray = new THREE.Ray(start, dir)
+        const p = ray.intersectBox(carBox, new THREE.Vector3())
+        if (p && p.distanceTo(start) < 8) own++
+        total++
+      }
+    }
+    check(
+      `${f.key === 'right' ? '右' : '左'}のドアミラーに映る自分の車は 3〜35%（内側の端に少しだけ）`,
+      own / total >= 0.03 && own / total <= 0.35,
+      `${((own / total) * 100).toFixed(1)}%`,
+    )
+  }
+
+  // 映像を貼る板は運転席の側を向き、鏡の面のすぐ手前にある
+  check(
+    '映像を貼る板は運転席の側を向く（表が見える）',
+    MIRROR_FACES.every((f) => {
+      const g = makeMirrorQuadGeometry(f, 0.001)
+      const pos = g.attributes.position
+      const a = new THREE.Vector3().fromBufferAttribute(pos, 0)
+      const b = new THREE.Vector3().fromBufferAttribute(pos, 1)
+      const c = new THREE.Vector3().fromBufferAttribute(pos, 2)
+      const n = b.clone().sub(a).cross(c.clone().sub(a))
+      g.dispose()
+      return n.dot(eye.clone().sub(a)) > 0
+    }),
+  )
+
+  // 運転席から見える鏡：ルームミラーと右（運転席側）のドアミラーは画角に入る
+  const inDriverView = (p: readonly [number, number, number]) => {
+    const q = v3(p).project(driver)
+    return q.z > -1 && q.z < 1 && Math.abs(q.x) <= 1 && Math.abs(q.y) <= 1
+  }
+  check('ルームミラーと運転席側のドアミラーが運転席の画角に入る', inDriverView(MIRROR_FACES[0].center) && inDriverView(MIRROR_FACES[1].center))
+
+  // 描き直しの順番：見えている鏡だけを、間隔を空けて、1 フレームに上限まで
+  const simulate = (visible: boolean[], fps: number, seconds: number) => {
+    const ages = visible.map(() => Infinity)
+    const counts = visible.map(() => 0)
+    let worst = 0
+    for (let k = 0; k < fps * seconds; k++) {
+      for (let i = 0; i < ages.length; i++) ages[i] += 1 / fps
+      const due = mirrorsDue(ages, visible)
+      worst = Math.max(worst, due.length)
+      for (const i of due) {
+        counts[i]++
+        ages[i] = 0
+      }
+    }
+    return { counts, worst }
+  }
+  const two = simulate([true, true, false], 60, 1)
+  check(
+    `見えている 2 枚は 60fps の画面で毎秒 ${Math.round(1 / MIRROR_INTERVAL_SEC)} 回前後描き直し、見えていない鏡は描かない`,
+    two.counts[0] >= 25 && two.counts[1] >= 25 && two.counts[2] === 0,
+    two.counts.join(' / '),
+  )
+  const three = simulate([true, true, true], 60, 1)
+  check(
+    `3 枚とも見えていても 1 フレームに ${MIRRORS_PER_FRAME} 枚まで、それぞれ毎秒 18 回以上`,
+    three.worst <= MIRRORS_PER_FRAME && three.counts.every((c) => c >= 18),
+    `${three.counts.join(' / ')}（1 フレーム最大 ${three.worst} 枚）`,
+  )
+  const slow = simulate([true, true, false], 30, 1)
+  check('画面が 30fps に落ちても、見えている鏡は毎秒 14 回以上描き直す', slow.counts[0] >= 14 && slow.counts[1] >= 14, slow.counts.join(' / '))
 }
 
 console.log()

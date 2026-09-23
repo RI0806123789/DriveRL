@@ -1,7 +1,8 @@
 /** 車両のライト（前照灯・尾灯・制動灯・方向指示器）の配置と点灯条件。**純粋モジュール。** */
 
 import * as THREE from 'three'
-import type { Vec3 } from './meshBuilder.ts'
+import { vec, type Vec3 } from './meshBuilder.ts'
+import { doorMirrorFrame, doorMirrorPoint } from './mirrorView.ts'
 import {
   BACKLIGHT_BOTTOM_X,
   BACKLIGHT_TOP_X,
@@ -72,13 +73,8 @@ function rightSide(): LightSlot[] {
   ]
 }
 
-/** ドアミラーの外側の面（`vehicleBody` のミラーと同じ寸法から出す） */
-export const MIRROR = {
-  /** 筐体の外接箱 [x0, x1] / [y0, y1] / [z0, z1]（右側） */
-  x: [0.86, 1.06] as const,
-  y: [1.0, 1.12] as const,
-  z: [0.805, 0.892] as const,
-} as const
+/** ドアミラーのサイドターンランプの位置（右の筐体の座標。外側の側面の下寄り） */
+export const MIRROR_REPEATER_LOCAL: Vec3 = [0.094, -0.028, -0.04]
 
 /** ハイマウントストップランプ。リアガラス上端の外側、屋根の縁のすぐ下 */
 function stopLamp(): LightSlot {
@@ -111,13 +107,19 @@ function mirrored(slot: LightSlot): LightSlot {
   }
 }
 
-/** ドアミラーのサイドターンランプ（右） */
+/** ドアミラーのサイドターンランプ（右）。筐体の外側の面に沿わせ、少し前と下へ向ける */
 function mirrorRepeater(): LightSlot {
+  const f = doorMirrorFrame(1)
+  const [x, y, z] = MIRROR_REPEATER_LOCAL
+  const facing = vec.normalize(
+    [f.x[0] - 0.12 * f.y[0] - 0.2 * f.z[0], f.x[1] - 0.12 * f.y[1] - 0.2 * f.z[1], f.x[2] - 0.12 * f.y[2] - 0.2 * f.z[2]],
+    [0, 0, 1],
+  )
   return {
-    position: [(MIRROR.x[0] + MIRROR.x[1]) / 2 + 0.03, MIRROR.y[0] + 0.02, MIRROR.z[1] - 0.016],
-    facing: [0.35, -0.1, 0.93],
+    position: doorMirrorPoint(1, x, y, z),
+    facing,
     up: [0, 1, 0],
-    size: [0.012, 0.018, 0.08],
+    size: [0.012, 0.016, 0.07],
     kind: LIGHT_TURN,
     side: 1,
   }

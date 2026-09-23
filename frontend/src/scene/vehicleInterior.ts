@@ -28,6 +28,7 @@ import {
   WINDSHIELD_TOP_X,
   sideGlassZ,
 } from './vehicleGeometry.ts'
+import { MIRROR_FACES } from './mirrorView.ts'
 
 /** 頂点色（内装のマテリアルの色に掛ける明るさ） */
 const FABRIC: Vec3 = [1, 1, 1]
@@ -41,14 +42,9 @@ const BUTTON: Vec3 = [1.3, 1.3, 1.32]
 const TRIM_Z = 0.805
 const TRIM_HALF = 0.038
 
-/** ルームミラー（小さく保つ。運転席の視界を塞がない）。鏡面を運転席へ向けて置く */
-export const ROOM_MIRROR = {
-  center: [WINDSHIELD_TOP_X + 0.07, 1.33, 0.02] as const,
-  width: 0.15,
-  height: 0.042,
-  /** 運転席へ向ける角度 [rad]（Y 軸まわり） */
-  yaw: 0.45,
-} as const
+/** ルームミラーの本体（鏡面の周りの縁の幅と、鏡面の奥の厚み）[m] */
+export const ROOM_MIRROR_RIM = 0.005
+export const ROOM_MIRROR_BODY_DEPTH = 0.02
 
 /** 車室の後ろの端（後ろの壁）[m]。リアガラスの付け根より少し後ろ */
 const CABIN_REAR_X = BACKLIGHT_BOTTOM_X - 0.06
@@ -297,22 +293,21 @@ export function makeInteriorGeometry(): THREE.BufferGeometry {
   }
   // リアパーセルシェルフ（リアガラスの付け根の下）。側壁の上面（BELT_Y）と高さを合わせない
   add(b, boxGeometry([CABIN_REAR_X - 0.04, BELT_Y - 0.05, -0.74], [-0.97, BELT_Y - 0.018, 0.74]), { color: DARK })
-  // ルームミラー（ステーと本体と鏡面）
-  const rm = ROOM_MIRROR.center
-  add(b, rodGeometry([rm[0] - 0.015, 1.4, rm[2]], [rm[0], rm[1] + 0.015, rm[2]], 0.005), { color: ACCENT })
-  const facing: Vec3 = [-Math.cos(ROOM_MIRROR.yaw), 0, Math.sin(ROOM_MIRROR.yaw)]
-  const across: Vec3 = [Math.sin(ROOM_MIRROR.yaw), 0, Math.cos(ROOM_MIRROR.yaw)]
-  add(b, orientedBox([rm[0], rm[1], rm[2]], across, [0, 1, 0], [ROOM_MIRROR.width, ROOM_MIRROR.height, 0.02]), { color: ACCENT })
+  // ルームミラー（ステーと本体と鏡面）。鏡面の向きは `mirrorView` が目とリアガラスから決める
+  const rm = MIRROR_FACES[0]
+  const at = (d: number): Vec3 => [rm.center[0] - rm.normal[0] * d, rm.center[1] - rm.normal[1] * d, rm.center[2] - rm.normal[2] * d]
+  const body = at(0.002 + ROOM_MIRROR_BODY_DEPTH / 2)
+  // ステーはフロントガラスの内側に付ける（ガラスは上ほど後ろへ寝ている）
+  const mountY = body[1] + 0.045
+  const mountX =
+    WINDSHIELD_BOTTOM_X + ((WINDSHIELD_TOP_X - WINDSHIELD_BOTTOM_X) * (mountY - BELT_Y)) / (GLASS_TOP_Y - BELT_Y) - 0.004
+  add(b, rodGeometry([body[0], body[1] + 0.012, body[2]], [mountX, mountY, body[2]], 0.005), { color: ACCENT })
   add(
     b,
-    orientedBox(
-      [rm[0] + facing[0] * 0.011, rm[1], rm[2] + facing[2] * 0.011],
-      across,
-      [0, 1, 0],
-      [ROOM_MIRROR.width - 0.012, ROOM_MIRROR.height - 0.01, 0.003],
-    ),
-    { color: BUTTON },
+    orientedBox(body, rm.right, rm.up, [rm.width + 2 * ROOM_MIRROR_RIM, rm.height + 2 * ROOM_MIRROR_RIM, ROOM_MIRROR_BODY_DEPTH]),
+    { color: ACCENT },
   )
+  add(b, orientedBox(at(0.0015), rm.right, rm.up, [rm.width, rm.height, 0.003]), { color: BUTTON })
 
   addLinings(b)
   return b.build({ color: true, door: true })
