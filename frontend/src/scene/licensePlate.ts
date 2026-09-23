@@ -4,14 +4,14 @@
 export const PLATE_W = 0.33
 export const PLATE_H = 0.165
 
-/** 取り付け位置。 */
+/** 取り付け位置。バンパーの面から少しだけ浮かせる（verify:vehicles が面との間を検査する） */
 export const PLATE_SLOTS: ReadonlyArray<{
   readonly position: readonly [number, number, number]
   /** 板の向き [rad]。前は車の前方、後ろは真後ろを向く */
   readonly yaw: number
 }> = [
-  { position: [2.37, 0.44, 0], yaw: 0 },
-  { position: [-2.23, 0.46, 0], yaw: Math.PI },
+  { position: [2.1945, 0.44, 0], yaw: 0 },
+  { position: [-2.1935, 0.6, 0], yaw: Math.PI },
 ]
 
 export const PLATES_PER_VEHICLE = PLATE_SLOTS.length

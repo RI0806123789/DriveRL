@@ -11,6 +11,7 @@ import { useSimStore } from '../store/simStore'
 import type { MapBounds } from '../types/protocol'
 import { computeAlpha, createPose, sampleVehicle } from './interpolation'
 import {
+  DRIVER_EYE_LOCAL,
   DRIVER_FOLLOW_RATE,
   DRIVER_FOV_DEG,
   FOLLOW_FOLLOW_RATE,
@@ -20,7 +21,9 @@ import {
   followEye,
   followLerpFactor,
   followLookAt,
+  vehicleLocalToThree,
 } from './cameraMath'
+import { tiltLocalPoint, tiltOf } from './vehicleMotion'
 import { eyeLookAt, eyePosition } from './pedestrianGeometry'
 import { setCameraNotice } from './sceneStats'
 
@@ -102,7 +105,7 @@ export const CameraRig = memo(function CameraRig({ bounds }: CameraRigProps) {
     lostSince.current = 0
   }, [mode, followTarget])
 
-  useFrame((_state, delta) => {
+  useFrame((state, delta) => {
     // 歩いている間は補間せず、そのまま目線へ置く（動かしているのがフロント自身のため）。
     // **立つ場所が決まるまでは俯瞰のまま**にする（原点は建物の中のことがある）
     if (taxiWalk && pedestrian.placed) {
@@ -123,7 +126,8 @@ export const CameraRig = memo(function CameraRig({ bounds }: CameraRigProps) {
     if (mode === 'orbit') return
 
     const paused = useSimStore.getState().status.renderPaused
-    const alpha = computeAlpha(performance.now(), paused)
+    // 車体と同じ時刻で補間する（別の時刻で取ると、車内が車体に対して前後に揺れる）
+    const alpha = computeAlpha(state.clock.oldTime, paused)
     const ok = sampleVehicle(followTarget, alpha, pose)
     if (!ok) {
       recoverLostTarget(followTarget, lostSince)
@@ -131,16 +135,25 @@ export const CameraRig = memo(function CameraRig({ bounds }: CameraRigProps) {
     }
     lostSince.current = 0
 
-    const eye =
-      mode === 'driver'
-        ? driverEye(pose.x, pose.y, pose.heading)
-        : followEye(pose.x, pose.y, pose.heading)
-    const look =
-      mode === 'driver'
-        ? driverLookAt(pose.x, pose.y, pose.heading)
-        : followLookAt(pose.x, pose.y, pose.heading)
-    desiredPos.set(eye.x, eye.y, eye.z)
-    desiredLook.set(look.x, look.y, look.z)
+    if (mode === 'driver') {
+      // 目は車体と一緒に傾くが、視線は水平のまま（首で傾きを打ち消す）。枠は擬似カメラと揃ったまま
+      const level = driverEye(pose.x, pose.y, pose.heading)
+      const tilt = tiltOf(followTarget)
+      const eye = vehicleLocalToThree(
+        tiltLocalPoint(DRIVER_EYE_LOCAL, tilt.pitch, tilt.roll),
+        pose.x,
+        pose.y,
+        pose.heading,
+      )
+      const look = driverLookAt(pose.x, pose.y, pose.heading)
+      desiredPos.set(eye.x, eye.y, eye.z)
+      desiredLook.set(look.x + eye.x - level.x, look.y + eye.y - level.y, look.z + eye.z - level.z)
+    } else {
+      const eye = followEye(pose.x, pose.y, pose.heading)
+      const look = followLookAt(pose.x, pose.y, pose.heading)
+      desiredPos.set(eye.x, eye.y, eye.z)
+      desiredLook.set(look.x, look.y, look.z)
+    }
 
     if (!initialised.current || pose.teleported) {
       camera.position.copy(desiredPos)

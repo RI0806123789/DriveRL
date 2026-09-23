@@ -21,12 +21,14 @@ import { computeAlpha, createPose, sampleVehicle } from './interpolation'
 import { usePalette } from './usePalette'
 import {
   NAV_SCREEN,
+  composeBodyMatrix,
   composeFixedMatrix,
   composeVehicleMatrix,
   createTransformScratch,
   makeNavScreenGeometry,
   navSpanFor,
 } from './vehicleGeometry'
+import { composeTiltMatrix, tiltOf } from './vehicleMotion'
 
 /** 画面の解像度 [px]。 */
 const TEX_W = 256
@@ -74,6 +76,8 @@ export function NavScreen() {
     () => ({
       transform: createTransformScratch(),
       base: new THREE.Matrix4(),
+      tilt: new THREE.Matrix4(),
+      body: new THREE.Matrix4(),
       out: new THREE.Matrix4(),
     }),
     [],
@@ -82,7 +86,7 @@ export function NavScreen() {
   const view = useRef<MapView | null>(null)
   const lastDraw = useRef(0)
 
-  useFrame((_state, delta) => {
+  useFrame((state, delta) => {
     const mesh = meshRef.current
     if (!mesh) return
     if (!map) {
@@ -91,15 +95,18 @@ export function NavScreen() {
     }
 
     const store = useSimStore.getState()
-    const alpha = computeAlpha(performance.now(), store.status.renderPaused)
+    const alpha = computeAlpha(state.clock.oldTime, store.status.renderPaused)
     const target = store.followTarget
     const ok = sampleVehicle(target, alpha, pose)
     mesh.visible = ok
     if (!ok) return
 
-    // 画面は車体に固定する（カメラと同じく、車内のものは車体に貼り付く）
+    // 画面は車体に固定する（カメラと同じく、車内のものは車体に貼り付く。傾きも車体と同じ）
     composeVehicleMatrix(scratch.transform, pose.x, pose.y, pose.heading, scratch.base)
-    composeFixedMatrix(scratch.transform, scratch.base, NAV_SCREEN.center, scratch.out)
+    const tilt = tiltOf(target)
+    composeTiltMatrix(tilt.pitch, tilt.roll, scratch.tilt)
+    composeBodyMatrix(scratch.base, scratch.tilt, scratch.body)
+    composeFixedMatrix(scratch.transform, scratch.body, NAV_SCREEN.center, scratch.out)
     mesh.matrix.copy(scratch.out)
     mesh.matrixWorldNeedsUpdate = true
 

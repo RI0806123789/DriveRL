@@ -63,17 +63,24 @@ function toThree(enuX: number, enuY: number, height: number): Vec3 {
   return { x: enuX, y: height, z: -enuY }
 }
 
-/** 運転席のアイポイント（three 空間） */
-export function driverEye(x: number, y: number, heading: number): Vec3 {
+/** 運転席のアイポイント（車両ローカル: 前・上・右） */
+export const DRIVER_EYE_LOCAL: readonly [number, number, number] = [DRIVER_FORWARD, DRIVER_EYE_HEIGHT, DRIVER_RIGHT]
+
+/** 車両ローカルの点（前・上・右）を three 空間へ */
+export function vehicleLocalToThree(
+  local: readonly [number, number, number],
+  x: number,
+  y: number,
+  heading: number,
+): Vec3 {
   const cos = Math.cos(heading)
   const sin = Math.sin(heading)
-  const rightX = sin
-  const rightY = -cos
-  return toThree(
-    x + cos * DRIVER_FORWARD + rightX * DRIVER_RIGHT,
-    y + sin * DRIVER_FORWARD + rightY * DRIVER_RIGHT,
-    DRIVER_EYE_HEIGHT,
-  )
+  return toThree(x + cos * local[0] + sin * local[2], y + sin * local[0] - cos * local[2], local[1])
+}
+
+/** 運転席のアイポイント（three 空間） */
+export function driverEye(x: number, y: number, heading: number): Vec3 {
+  return vehicleLocalToThree(DRIVER_EYE_LOCAL, x, y, heading)
 }
 
 /** 運転席から見る先（three 空間） */
