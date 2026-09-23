@@ -5,7 +5,7 @@ import { frameBuffer } from '../store/frameBuffer'
 import { useSimStore } from '../store/simStore'
 import { DET_LANE, type Detection, type FrameMessage } from '../types/protocol'
 import { detectionColor, detectionLabel } from './detectionLabels'
-import { detectorViewport, projectBox } from './detectionProjection'
+import { projectBox } from './detectionProjection'
 
 const EMPTY_DETECTIONS: Detection[] = []
 
@@ -67,23 +67,8 @@ export function DetectionOverlay() {
   const ref = useRef<HTMLDivElement>(null)
   const aspect = useAspect(ref)
 
-  const scope = detectorViewport(aspect)
-
   return (
     <div ref={ref} className="detection-overlay">
-      {active && (
-        <div
-          className="detection-scope"
-          style={{
-            left: `${scope.left * 100}%`,
-            top: `${scope.top * 100}%`,
-            width: `${scope.width * 100}%`,
-            height: `${scope.height * 100}%`,
-          }}
-        >
-          <span className="detection-scope-label">認識範囲</span>
-        </div>
-      )}
       {active &&
         dets
           .filter((det) => det.cls !== DET_LANE)

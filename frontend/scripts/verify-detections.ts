@@ -3,7 +3,6 @@
 import {
   BACKEND_CAMERA,
   BACKEND_FOCAL_PX,
-  detectorViewport,
   projectBox,
   projectToViewport,
 } from '../src/scene/detectionProjection.ts'
@@ -92,7 +91,7 @@ console.log('\n画角の違いが実際に効いていること（素通しと�
   )
 }
 console.log('')
-console.log('認識器が見ている範囲の広さ（画角を動かすと縮む）')
+console.log('検出枠が出る範囲の広さ（擬似カメラの画いっぱい。運転席の画角を広げると縮む）')
 {
   // 下限。**運転席の画角（DRIVER_FOV_DEG）を広げるほど検出枠の出る範囲は狭くなる**
   // ので、下回ったら画角を見直すか、擬似カメラ（percep/types.py の CameraSpec）と
@@ -102,36 +101,28 @@ console.log('認識器が見ている範囲の広さ（画角を動かすと縮�
   const MIN_AREA = 0.12
 
   for (const aspect of [WIDE, 4 / 3]) {
-    const scope = detectorViewport(aspect)
+    const scope = projectBox([0, 0, 1, 1], aspect)
     const area = scope.width * scope.height
     check(
-      `認識範囲の横幅が画面の ${(MIN_W * 100).toFixed(0)}% 以上 (aspect=${aspect.toFixed(2)})`,
+      `検出枠が出る範囲の横幅が画面の ${(MIN_W * 100).toFixed(0)}% 以上 (aspect=${aspect.toFixed(2)})`,
       scope.width >= MIN_W,
       `${(scope.width * 100).toFixed(1)}%`,
     )
     check(
-      `認識範囲の高さが画面の ${(MIN_H * 100).toFixed(0)}% 以上`,
+      `検出枠が出る範囲の高さが画面の ${(MIN_H * 100).toFixed(0)}% 以上`,
       scope.height >= MIN_H,
       `${(scope.height * 100).toFixed(1)}%`,
     )
     check(
-      `認識範囲の面積が画面の ${(MIN_AREA * 100).toFixed(0)}% 以上`,
+      `検出枠が出る範囲の面積が画面の ${(MIN_AREA * 100).toFixed(0)}% 以上`,
       area >= MIN_AREA,
       `${(area * 100).toFixed(1)}%`,
     )
   }
 
-  const scope = detectorViewport(WIDE)
-  const box = projectBox([0, 0, 1, 1], WIDE)
+  const scope = projectBox([0, 0, 1, 1], WIDE)
   check(
-    'detectorViewport は projectBox([0,0,1,1]) と同じ',
-    near(scope.left, box.left) &&
-      near(scope.width, box.width) &&
-      near(scope.top, box.top) &&
-      near(scope.height, box.height),
-  )
-  check(
-    '認識範囲は画面の中央にある',
+    '検出枠が出る範囲は画面の中央にある',
     near(scope.left + scope.width / 2, 0.5, 1e-9) &&
       near(scope.top + scope.height / 2, 0.5, 1e-9),
   )

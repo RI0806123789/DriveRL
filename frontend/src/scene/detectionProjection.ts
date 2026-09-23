@@ -43,10 +43,6 @@ export interface ViewportRect {
   height: number
 }
 
-/** 認識器が見ている範囲（擬似カメラの画いっぱい）を、画面のどこに写るかで返す。 */
-export function detectorViewport(aspect: number): ViewportRect {
-  return projectBox([0, 0, 1, 1], aspect)
-}
 
 /** 検出のバウンディングボックス（擬似カメラの正規化座標）を */
 export function projectBox(
