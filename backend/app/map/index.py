@@ -40,6 +40,8 @@ LEAD_MAX_HOPS = 8
 LEAD_DIRECTION_SPAN_M = 3.0
 #: 経路の出だしで、着いた向きからこれより大きく曲がる辺は折り返し（U ターン）とみなす [rad]
 ROUTE_MAX_START_TURN_RAD = math.radians(120.0)
+#: 地物が経路の始点より後ろ・終点より先にあるとみなす距離 [m]。経路点の float32 の丸めを吸収する
+ROUTE_END_EPS_M = 0.01
 
 _WARNED: set[str] = set()
 
@@ -469,15 +471,20 @@ class MapIndexImpl:
         if cand.size == 0:
             return []
 
-        nearest, dist = _nearest_on_route(pts, self._signal_xy[cand])
+        xy = self._signal_xy[cand]
+        nearest, dist = _nearest_on_route(pts, xy)
         sh = self._signal_heading[cand]
         route_h = tang[nearest]
         diff = np.abs(np.arctan2(np.sin(sh - route_h), np.cos(sh - route_h)))
 
-        hits = (dist <= float(max_lateral)) & (diff <= float(max_heading_diff))
-        out = [
-            (float(cum[nearest[i]]), int(cand[i])) for i in np.flatnonzero(hits)
-        ]
+        arcs = _arcs_on_route(pts, cum, tang, nearest, xy)
+        hits = (
+            (dist <= float(max_lateral))
+            & (diff <= float(max_heading_diff))
+            & (arcs >= 0.0)
+            & (arcs <= float(cum[-1]))
+        )
+        out = [(float(arcs[i]), int(cand[i])) for i in np.flatnonzero(hits)]
         out.sort(key=lambda item: item[0])
 
         merged: list[tuple[float, int]] = []
@@ -507,14 +514,21 @@ class MapIndexImpl:
 
         cand = self._near_route(self._sign_tree, pts, float(max_lateral))
         if cand.size:
-            nearest, dist = _nearest_on_route(pts, self._sign_xy[cand])
+            xy = self._sign_xy[cand]
+            nearest, dist = _nearest_on_route(pts, xy)
             sh = self._sign_heading[cand]
             route_h = tang[nearest]
             diff = np.abs(np.arctan2(np.sin(sh - route_h), np.cos(sh - route_h)))
 
-            hits = (dist <= float(max_lateral)) & (diff <= float(max_heading_diff))
+            arcs = _arcs_on_route(pts, cum, tang, nearest, xy)
+            hits = (
+                (dist <= float(max_lateral))
+                & (diff <= float(max_heading_diff))
+                & (arcs >= 0.0)
+                & (arcs <= float(cum[-1]))
+            )
             found = [
-                (float(cum[nearest[i]]), float(self._sign_limit[cand[i]]))
+                (float(arcs[i]), float(self._sign_limit[cand[i]]))
                 for i in np.flatnonzero(hits)
             ]
             found.sort(key=lambda item: item[0])
@@ -790,6 +804,28 @@ def _nearest_on_route(pts: np.ndarray, xy: np.ndarray) -> tuple[np.ndarray, np.n
         nearest[lo:hi] = idx
         dist[lo:hi] = np.sqrt(d2[np.arange(hi - lo), idx])
     return nearest, dist
+
+
+def _arcs_on_route(
+    pts: np.ndarray,
+    cum: np.ndarray,
+    tang: np.ndarray,
+    nearest: np.ndarray,
+    xy: np.ndarray,
+) -> np.ndarray:
+    """地物の弧長。始点より後ろは負、終点より先は全長より大きい値にする（最寄り点のままだと端に張り付く）。"""
+    arcs = cum[nearest].astype(np.float64)
+    last = pts.shape[0] - 1
+    for end in (0, last):
+        at = np.flatnonzero(nearest == end)
+        if at.size == 0:
+            continue
+        along = (xy[at, 0] - pts[end, 0]) * math.cos(tang[end]) + (
+            xy[at, 1] - pts[end, 1]
+        ) * math.sin(tang[end])
+        outside = along < -ROUTE_END_EPS_M if end == 0 else along > ROUTE_END_EPS_M
+        arcs[at] = np.where(outside, cum[end] + along, cum[end])
+    return arcs
 
 
 def _resample_polyline(
