@@ -32,6 +32,7 @@ DriveRL/
 │   ├── verify_signal_phases.py     信号の現示（交差する流れが同時に青にならないか）
 │   ├── verify_publish_routes.py    経路の配信（取りこぼしてもクライアントへ届くか）
 │   ├── verify_route_start.py       配車の経路の出だし（道なりに出るか・建物を突き抜けないか）
+│   ├── verify_route_signals.py     経路上の信号（始点より後ろの停止線を 0m 先の赤と数えないか）
 │   ├── app/
 │   │   ├── config.py               定数（観測 66 次元の内訳・車両諸元・PPO 設定）
 │   │   ├── contracts.py            パッケージ間の共有型。ここが内部の契約
@@ -1200,6 +1201,7 @@ cd backend; .venv\Scripts\python.exe verify_log_std.py        # 方策分布（l
 cd backend; .venv\Scripts\python.exe verify_signal_phases.py  # 信号の現示（プリセット名を渡せば 1 つだけ）
 cd backend; .venv\Scripts\python.exe verify_publish_routes.py # 配車と frame の経路が配信で落ちないか
 cd backend; .venv\Scripts\python.exe verify_route_start.py    # 配車の経路が道なりに出て建物を突き抜けないか
+cd backend; .venv\Scripts\python.exe verify_route_signals.py  # 経路上の信号が始点より後ろ・終点より先を含まないか
 ```
 
 `npm run verify` は Node で直接実行する検証スクリプトです。3D の向きは**間違っていても
@@ -1217,6 +1219,10 @@ cd backend; .venv\Scripts\python.exe verify_route_start.py    # 配車の経路�
   始まるか、出だしに道路を外れた直線が無いか、建物を突き抜けるのが「建物の下をくぐる道」と
   「狭い道の車線」だけか、出口で折り返さないか。**旧実装は出だしの直線が最大 417m あり、
   配車の経路の 5.5〜13.5% が建物を貫通していた**（#31）
+- 経路上の信号（`backend/verify_route_signals.py`）: 経路に載る信号・標識が始点より後ろ・終点より先を
+  含まないか、再スポーンや配車の作り直しの直後に後ろの停止線の赤で止められないか、停止線の手前で
+  作り直しても赤を越えないか、速度の上限と信号無視の判定が同じ信号を見るか。**旧実装は後ろの停止線を
+  「0m 先の信号」と数え、銀座では再スポーンの 41.5% が 1 秒以上（最長 35 秒）交差点の中心で止められていた**（#47）
 - 進路矢印: リボン幅が保たれるか、矢羽根が進行方向を指しているか
 - 車両の色: 64 色が CIELAB 距離で十分に離れているか（小さな色見本やピンで見分けられるか）
 - 車両: 車体と車輪の行列（旧実装との一致）、前輪だけに効く舵角、4 輪とも前へ転がるか、

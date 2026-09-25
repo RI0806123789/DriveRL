@@ -47,7 +47,6 @@ VEHICLE_HIT_SEMI_LAT_M = config.VEHICLE_WIDTH * 1.1
 #: （6.6m 先に湧くと、走ってきた車が次の瞬間に追突する）
 SPAWN_CLEARANCE_M2 = (config.VEHICLE_LENGTH * 4.0) ** 2
 SPAWN_ROUTE_TRIALS = 12
-SPAWN_SIGNAL_SKIP_M = 3.0
 
 SIGNAL_LOOKAHEAD_COUNT = 3
 
@@ -743,10 +742,11 @@ class World:
         else:
             state.signal_arcs = np.zeros(0, dtype=np.float32)
             state.signal_ids = np.zeros(0, dtype=np.int32)
+        # 「越えた信号」は signal_violations() と同じ式で数える（速度の上限と同じ信号を見る）
         state.signals_floor = int(
             np.searchsorted(
                 state.signal_arcs,
-                float(self.arc[slot]) + SPAWN_SIGNAL_SKIP_M,
+                float(self.arc[slot]) - config.SIGNAL_STOP_TOLERANCE_M,
                 side="right",
             )
         )
