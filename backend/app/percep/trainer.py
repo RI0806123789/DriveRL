@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import math
 import os
+import shutil
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -27,7 +28,7 @@ if TYPE_CHECKING:
 
 DATASET_FILE = "detector_dataset.npz"
 
-DATASET_VERSION = 3
+DATASET_VERSION = 4
 
 VALIDATION_SPLIT = 0.1
 
@@ -517,6 +518,13 @@ class FitResult:
     history: list[dict[str, float]] = field(default_factory=list)
     verify_counts: list[int] = field(default_factory=list)
     warning: str = ""
+    #: 検証に通って `path` を差し替えたか。False なら前の認識器がそのまま残っている
+    installed: bool = False
+
+
+def previous_detector_path(path: Path) -> Path:
+    """差し替える前の認識器を 1 世代だけ残す先（`detector.prev.keras`）。"""
+    return path.with_name(f"{path.stem}.prev{path.suffix}")
 
 
 def steps_per_epoch(sample_count: int, batch_size: int) -> int:
@@ -613,30 +621,47 @@ def fit_detector(
 
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    model.save(out_path)
-    size_bytes = out_path.stat().st_size if out_path.exists() else 0
-    if log is not None:
-        log(f"保存しました: {out_path}")
-
+    # 保存先へ直接書かない。検証に落ちたモデルや書きかけのファイルで、動いている認識器を壊さないため
+    staged = out_path.with_name(f"{out_path.stem}.staged{out_path.suffix}")
     result = FitResult(
         path=out_path,
         param_count=param_count,
         epochs_run=len(history),
-        size_bytes=int(size_bytes),
+        size_bytes=0,
         history=history,
     )
+    try:
+        model.save(staged)
+        result.size_bytes = int(staged.stat().st_size)
+        result.warning = _verify_saved(staged, data, spec, result)
+        if result.warning:
+            if log is not None:
+                log(f"検証に通らなかったため保存しませんでした（前の認識器のまま）: {result.warning}")
+            return result
+        if out_path.exists():
+            shutil.copy2(out_path, previous_detector_path(out_path))
+        os.replace(staged, out_path)
+        result.installed = True
+    finally:
+        staged.unlink(missing_ok=True)
+    if log is not None:
+        log(f"保存しました: {out_path}")
+    return result
 
-    loaded = det.Detector.load(out_path, spec)
+
+def _verify_saved(
+    path: Path, data: dict[str, np.ndarray], spec: CameraSpec, result: FitResult
+) -> str:
+    """保存したモデルを読み直して推論する。問題があれば理由を返す（無ければ空文字）。"""
+    loaded = det.Detector.load(path, spec)
     if loaded is None:
-        result.warning = "保存したモデルを Detector.load() が受け付けませんでした"
-        return result
-
+        return "保存したモデルを Detector.load() が受け付けませんでした"
     sample = data["images"][: min(4, len(data["images"]))]
     results = loaded.detect(sample, list(range(len(sample))))
     result.verify_counts = [len(r.detections) for r in results]
     if not any(result.verify_counts):
-        result.warning = (
+        return (
             "読み直せましたが何も検出しませんでした。エポック数かサンプル数を増やすか、"
             "収集時のクラス内訳が偏っていないか確認してください"
         )
-    return result
+    return ""

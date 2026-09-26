@@ -40,6 +40,7 @@ __all__ = [
     "estimate_distance",
     "facing_viewer",
     "pack_by_class_quota",
+    "signal_ahead_of_stop",
 ]
 
 
@@ -225,6 +226,17 @@ def facing_viewer(
     )
     ahead = (obj_x - eye_x) * cos_o + (obj_y - eye_y) * sin_o > 0.0
     return np.asarray(aligned & ahead, dtype=bool)
+
+
+def signal_ahead_of_stop(
+    stop_x: Any, stop_y: Any, signal_heading: Any, eye_x: Any, eye_y: Any
+) -> np.ndarray:
+    """信号の停止線をまだ越えていないか。越えた灯器は視点を規制しないので、描かずラベルも付けない。"""
+    along = (stop_x - eye_x) * np.cos(signal_heading) + (stop_y - eye_y) * np.sin(
+        signal_heading
+    )
+    # 信号無視の判定（`World.signal_violations`）と同じ許容で「越えた」とみなす
+    return np.asarray(along > -float(config.SIGNAL_STOP_TOLERANCE_M), dtype=bool)
 
 
 LANE_LOOKAHEAD_M = 25.0

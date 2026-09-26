@@ -119,6 +119,53 @@ check(
 
 print()
 print("=" * 72)
+print("frame — 新規接続向けの全経路の要求（code_review Z-11）")
+print("=" * 72)
+
+engine = SimulationEngine()
+engine._install_map(index, preset.id, preset.name)
+
+
+def make_frame():
+    """エンジンスレッドの 1 ステップ（配信の間隔を待たずに frame を作らせる）。"""
+    engine._last_frame_at = 0.0
+    engine._step_once()
+    return engine._latest_frame
+
+
+def is_full(frame) -> bool:
+    return len(frame.routed_slots) == len(frame.vehicles)
+
+
+seq, _ = engine.take_frame(-1)
+make_frame()
+second = make_frame()
+check(
+    "全経路の通が取られる前に上書きされても、次の通も全経路で作る",
+    is_full(second),
+    f"{len(second.routed_slots)} / {len(second.vehicles)} スロット",
+)
+seq, taken = engine.take_frame(seq)
+after_full = make_frame()
+check(
+    "取られたら普通の通に戻る（毎通すべての経路を送らない）",
+    taken is second and not is_full(after_full),
+    f"{len(after_full.routed_slots)} / {len(after_full.vehicles)} スロット",
+)
+seq, _ = engine.take_frame(seq)
+engine.request_full_frame()
+make_frame()
+engine.request_full_frame()
+seq, _ = engine.take_frame(seq)
+late = make_frame()
+check(
+    "全経路の通を作った後・取られる前に来た要求も落とさない",
+    is_full(late),
+    f"{len(late.routed_slots)} / {len(late.vehicles)} スロット",
+)
+
+print()
+print("=" * 72)
 if FAILURES:
     print(f"結果: {len(FAILURES)} 件の不合格")
     for f in FAILURES:

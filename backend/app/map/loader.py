@@ -32,7 +32,7 @@ class MapLoadError(RuntimeError):
     """OSM の取得・正規化に失敗したときに投げる。"""
 
 
-CACHE_VERSION = 8
+CACHE_VERSION = 9
 
 _DEFAULT_LANES: dict[str, int] = {
     "motorway": 3,
@@ -87,7 +87,7 @@ def load_map(preset: MapPreset, *, force_refresh: bool = False) -> MapData:
             return cached
 
     data = _fetch_and_normalize(preset)
-    _write_cache(cache_path, data)
+    _write_cache(cache_path, data, preset)
     return data
 
 
@@ -887,6 +887,9 @@ def _read_cache(path: Path, preset: MapPreset) -> MapData | None:
         return None
     if not _close(payload.get("radiusM"), preset.radius_m, 1e-3):
         return None
+    # 信号の置き方もプリセット定義の一部。変えたら古い配置を読まない
+    if payload.get("signalsAtAllIntersections") != bool(preset.signals_at_all_intersections):
+        return None
 
     try:
         return _from_cache_dict(payload, preset)
@@ -894,13 +897,15 @@ def _read_cache(path: Path, preset: MapPreset) -> MapData | None:
         return None
 
 
-def _write_cache(path: Path, data: MapData) -> None:
+def _write_cache(path: Path, data: MapData, preset: MapPreset) -> None:
     """キャッシュを書き出す。書き込みに失敗しても処理は続行する（読み込みは成功済み）。"""
     tmp = path.with_suffix(".json.tmp")
+    payload = _to_cache_dict(data)
+    payload["signalsAtAllIntersections"] = bool(preset.signals_at_all_intersections)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with tmp.open("w", encoding="utf-8") as fp:
-            json.dump(_to_cache_dict(data), fp, ensure_ascii=False, separators=(",", ":"))
+            json.dump(payload, fp, ensure_ascii=False, separators=(",", ":"))
         tmp.replace(path)
     except OSError:
         return

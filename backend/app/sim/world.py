@@ -15,6 +15,7 @@ from app.contracts import (
     MapIndex,
     ObstacleSnapshot,
     RoadLead,
+    RouteLeg,
     VehicleSnapshot,
 )
 from app.sim.pedestrians import PedestrianCrowd
@@ -27,7 +28,7 @@ from app.sim.signals import (
 )
 from app.sim.vehicle import VehicleFleet
 
-__all__ = ["ObstacleState", "SlotState", "World"]
+__all__ = ["ObstacleState", "Route", "SlotState", "World"]
 
 ROUTE_MIN_DISTANCE_M = 120.0
 
@@ -47,6 +48,10 @@ VEHICLE_HIT_SEMI_LAT_M = config.VEHICLE_WIDTH * 1.1
 #: （6.6m 先に湧くと、走ってきた車が次の瞬間に追突する）
 SPAWN_CLEARANCE_M2 = (config.VEHICLE_LENGTH * 4.0) ** 2
 SPAWN_ROUTE_TRIALS = 12
+#: 地点を指定して出すとき、他車とこれだけ離れていなければ断る [m]（車体が重なる）
+SPAWN_AT_OVERLAP_M = config.VEHICLE_LENGTH * 1.5
+#: 地点を指定して出すとき、道路の中心線がこれより遠ければ断る [m]
+SPAWN_AT_MAX_OFFSET_M = 25.0
 
 SIGNAL_LOOKAHEAD_COUNT = 3
 
@@ -90,6 +95,18 @@ def _in_body_ellipse(
     long_ = dx * cos_h + dy * sin_h
     lat = -dx * sin_h + dy * cos_h
     return (long_ / semi_long) ** 2 + (lat / semi_lat) ** 2 < 1.0
+
+
+@dataclass
+class Route:
+    """走行経路。点列 (K, 2) と、それが通る辺（信号と規制速度はここから引く）。"""
+
+    points: np.ndarray
+    legs: tuple[RouteLeg, ...]
+
+    def with_points(self, points: np.ndarray) -> "Route":
+        """点列だけを差し替えた経路（端を切り詰める・延ばすとき）。始点は動かさないこと。"""
+        return Route(points=np.asarray(points, dtype=np.float32), legs=self.legs)
 
 
 @dataclass
@@ -192,48 +209,40 @@ class World:
             self._node_xy = np.zeros((0, 2), dtype=np.float32)
             self._node_ids = np.zeros(0, dtype=np.int64)
 
-    def _route_from_nodes(self, src: int, dst: int) -> np.ndarray | None:
-        """ノード ID の組から経路点列 (K, 2) を作る。失敗したら None。"""
+    def _route_from_nodes(self, src: int, dst: int) -> Route | None:
+        """ノード ID の組から経路を作る。失敗したら None。"""
         node_path = self.map_index.shortest_path(int(src), int(dst))
         if not node_path or len(node_path) < 2:
             return None
-        pts = self.map_index.lane_route_polyline(node_path, config.ROUTE_RESAMPLE_M)
+        return self._lane_route(node_path, None)
+
+    def _lane_route(self, node_path: list[int], lead: RoadLead | None) -> Route | None:
+        pts, legs = self.map_index.lane_route(node_path, config.ROUTE_RESAMPLE_M, lead=lead)
         if pts is None or len(pts) < 2:
             return None
-        return np.asarray(pts, dtype=np.float32)
-
-    def _start_clearance(self, route: np.ndarray, exclude: int) -> float:
-        """経路の始点から、いちばん近い他車までの距離の二乗。他に誰もいなければ inf。"""
-        if route is None or route.shape[0] < 1:
-            return -1.0
-        active = self.fleet.active.copy()
-        active[exclude] = False
-        idx = np.flatnonzero(active)
-        if idx.size == 0:
-            return float("inf")
-        dx = self.fleet.x[idx] - np.float32(route[0, 0])
-        dy = self.fleet.y[idx] - np.float32(route[0, 1])
-        return float(np.min(dx * dx + dy * dy))
-
-    def _start_is_clear(self, route: np.ndarray, exclude: int) -> bool:
-        """経路の始点が、既に走っている車両と重なっていないか。"""
-        return self._start_clearance(route, exclude) >= SPAWN_CLEARANCE_M2
+        return Route(points=np.asarray(pts, dtype=np.float32), legs=tuple(legs))
 
     def _node_clearance(self, node: int, exclude: int) -> float:
         """そのノードから、いちばん近い他車までの距離の二乗。他に誰もいなければ inf。"""
         if not (0 <= int(node) < self._node_xy.shape[0]):
             return -1.0
+        return self._point_clearance(
+            float(self._node_xy[int(node), 0]), float(self._node_xy[int(node), 1]), exclude
+        )
+
+    def _point_clearance(self, x: float, y: float, exclude: int) -> float:
+        """その地点から、いちばん近い他車までの距離の二乗。他に誰もいなければ inf。"""
         active = self.fleet.active.copy()
         if 0 <= exclude < active.shape[0]:
             active[exclude] = False
         idx = np.flatnonzero(active)
         if idx.size == 0:
             return float("inf")
-        dx = self.fleet.x[idx] - np.float32(self._node_xy[int(node), 0])
-        dy = self.fleet.y[idx] - np.float32(self._node_xy[int(node), 1])
+        dx = self.fleet.x[idx] - np.float32(x)
+        dy = self.fleet.y[idx] - np.float32(y)
         return float(np.min(dx * dx + dy * dy))
 
-    def _random_route(self, exclude: int = -1) -> np.ndarray | None:
+    def _random_route(self, exclude: int = -1) -> Route | None:
         """ランダムな出発地・目的地の組から経路を作る。"""
         best_src = -1
         best_dst = -1
@@ -279,17 +288,14 @@ class World:
             logger.debug("道路の特定に失敗しました: (%.1f, %.1f)", x, y, exc_info=True)
             return None
 
-    def _route_from_lead(self, lead: RoadLead, dst: int) -> np.ndarray | None:
+    def _route_from_lead(self, lead: RoadLead, dst: int) -> Route | None:
         """道なりの出だし `lead` の先を、目的ノード `dst` まで最短経路でつなぐ。"""
         node_path = self.map_index.shortest_path(
             int(lead.exit_node), int(dst), arrive_heading=float(lead.exit_heading)
         )
         if not node_path:
             return None
-        pts = self.map_index.lane_route_polyline(node_path, config.ROUTE_RESAMPLE_M, lead=lead)
-        if pts is None or len(pts) < 2:
-            return None
-        return np.asarray(pts, dtype=np.float32)
+        return self._lane_route(node_path, lead)
 
     def _route_from_point(
         self,
@@ -298,14 +304,17 @@ class World:
         *,
         heading: float | None = None,
         speed: float = 0.0,
-    ) -> np.ndarray | None:
-        """指定座標から道なりに出て、到達可能な目的地へ向かう経路を作る。"""
+    ) -> Route | None:
+        """指定座標から道なりに出て、到達可能な目的地へ向かう経路を作る。作れなければ None。"""
         lead = self._road_lead(x, y, heading, speed)
         if lead is None:
             return None
-        src = int(lead.exit_node)
+        return self._route_onward_from(x, y, lead)
 
-        route: np.ndarray | None = None
+    def _route_onward_from(self, x: float, y: float, lead: RoadLead) -> Route | None:
+        """道なりの出だし `lead` の先に目的地を選び、そこまでの経路を作る。"""
+        src = int(lead.exit_node)
+        route: Route | None = None
         if self._node_xy.shape[0] > 1:
             dx = self._node_xy[:, 0] - np.float32(x)
             dy = self._node_xy[:, 1] - np.float32(y)
@@ -334,9 +343,7 @@ class World:
                 route = self._route_from_lead(lead, dst)
                 if route is not None:
                     break
-
-        if route is None:
-            return self._random_route()
+        # ランダムな場所へは落とさない。指定した所と無関係な場所に車が出る（code_review Z-05）
         return route
 
     def snap_to_road_node(self, x: float, y: float) -> tuple[float, float] | None:
@@ -349,25 +356,29 @@ class World:
         return float(self._node_xy[i, 0]), float(self._node_xy[i, 1])
 
     @staticmethod
-    def _trim_tail(route: np.ndarray, dst: tuple[float, float]) -> np.ndarray:
+    def _trim_tail(route: Route, dst: tuple[float, float]) -> Route:
         """目的地にいちばん近い点より先を捨てる。"""
-        if route.shape[0] < 3:
+        pts = route.points
+        if pts.shape[0] < 3:
             return route
-        dx = route[:, 0] - np.float32(dst[0])
-        dy = route[:, 1] - np.float32(dst[1])
+        dx = pts[:, 0] - np.float32(dst[0])
+        dy = pts[:, 1] - np.float32(dst[1])
         i = int(np.argmin(dx * dx + dy * dy))
-        return route[: max(2, i + 1)]
+        return route.with_points(pts[: max(2, i + 1)])
 
     @staticmethod
-    def _with_destination(route: np.ndarray, dst: tuple[float, float]) -> np.ndarray:
+    def _with_destination(route: Route, dst: tuple[float, float]) -> Route:
         """経路の終端を、目的地そのものへ伸ばす。"""
-        if float(np.hypot(route[-1, 0] - dst[0], route[-1, 1] - dst[1])) <= 0.5:
+        pts = route.points
+        if float(np.hypot(pts[-1, 0] - dst[0], pts[-1, 1] - dst[1])) <= 0.5:
             return route
-        return np.concatenate([route, np.array([dst], dtype=np.float32)], axis=0)
+        return route.with_points(
+            np.concatenate([pts, np.array([dst], dtype=np.float32)], axis=0)
+        )
 
     def route_onward(
         self, x: float, y: float, heading: float, speed: float = 0.0
-    ) -> np.ndarray | None:
+    ) -> Route | None:
         """いまいる場所から道なりに出て、その先の目的地への経路を作る（徴用の解除に使う）。"""
         return self._route_from_point(x, y, heading=heading, speed=speed)
 
@@ -378,7 +389,7 @@ class World:
         *,
         heading: float | None = None,
         speed: float = 0.0,
-    ) -> np.ndarray | None:
+    ) -> Route | None:
         """出発地から道なりに出て、道路ノードへ寄せた目的地までの走行経路を作る（決定 7・12）。"""
         dst_snap = self.snap_to_road_node(*dst)
         if dst_snap is None:
@@ -686,11 +697,12 @@ class World:
         return cum
 
     def _install_route(
-        self, slot: int, route: np.ndarray, *, keep_pose: bool = False
+        self, slot: int, plan: Route, *, keep_pose: bool = False
     ) -> bool:
         """経路をスロットに設定し、車両を経路始点に配置する。"""
-        if route is None or route.shape[0] < 2:
+        if plan is None or plan.points.shape[0] < 2:
             return False
+        route = plan.points
         state = self.slots[slot]
         state.route = np.ascontiguousarray(route, dtype=np.float32)
         state.route_cum = self._cumulative_length(state.route)
@@ -727,10 +739,9 @@ class World:
         self.reached_flags[slot] = False
         self.stop_arc[slot] = np.inf
 
+        points = [(float(px), float(py)) for px, py in state.route]
         try:
-            stops = self.map_index.signals_on_route(
-                [(float(px), float(py)) for px, py in state.route]
-            )
+            stops = self.map_index.signals_on_route(points, plan.legs)
         except Exception:
             stops = []
             if not self._signals_on_route_failed:
@@ -752,9 +763,7 @@ class World:
         )
         state.signals_passed = state.signals_floor
         try:
-            limits = self.map_index.speed_limits_on_route(
-                [(float(px), float(py)) for px, py in state.route]
-            )
+            limits = self.map_index.speed_limits_on_route(points, plan.legs)
         except Exception:
             limits = []
             if not self._speed_limits_on_route_failed:
@@ -778,7 +787,7 @@ class World:
         return True
 
     def install_route(
-        self, slot: int, route: np.ndarray, *, keep_pose: bool = False
+        self, slot: int, route: Route, *, keep_pose: bool = False
     ) -> bool:
         """経路を差し替える（実用モードの配車から呼ぶ公開版）。"""
         slot = int(slot)
@@ -806,22 +815,16 @@ class World:
             margin_m=0.0,
         )
 
-    def respawn(self, slot: int, *, at: tuple[float, float] | None = None) -> None:
-        """スロットを再スポーンする。経路生成に失敗した場合は前の経路を保つ。"""
-        self.try_respawn(slot, at=at)
+    def respawn(self, slot: int) -> None:
+        """スロットを街のどこかへ再スポーンする。経路生成に失敗した場合は前の経路を保つ。"""
+        self.try_respawn(slot)
 
-    def try_respawn(self, slot: int, *, at: tuple[float, float] | None = None) -> bool:
+    def try_respawn(self, slot: int) -> bool:
         """respawn の成否を返す版（activate から使う）。"""
         slot = int(slot)
         if not (0 <= slot < config.MAX_VEHICLES):
             return False
-        route = (
-            self._route_from_point(at[0], at[1])
-            if at is not None
-            else self._random_route(exclude=slot)
-        )
-        if route is None:
-            route = self._random_route(exclude=slot)
+        route = self._random_route(exclude=slot)
         if route is None:
             return False
         return self._install_route(slot, route)
@@ -831,11 +834,39 @@ class World:
         slot = int(slot)
         if not (0 <= slot < config.MAX_VEHICLES):
             return False
-        if not self.try_respawn(slot, at=at):
+        if at is not None:
+            return self.activate_at(slot, at, clearance_m=SPAWN_AT_OVERLAP_M) is None
+        if not self.try_respawn(slot):
             self.fleet.active[slot] = False
             return False
         self.fleet.active[slot] = True
         return True
+
+    def activate_at(
+        self, slot: int, at: tuple[float, float], *, clearance_m: float
+    ) -> str | None:
+        """スロットを指定地点の道路から起動する。出せなければ理由を返し、別の場所へは出さない。"""
+        slot = int(slot)
+        if not (0 <= slot < config.MAX_VEHICLES):
+            return f"車両 ID が範囲外です: {slot}"
+        why = self._place_at(slot, (float(at[0]), float(at[1])), float(clearance_m))
+        self.fleet.active[slot] = why is None
+        return why
+
+    def _place_at(self, slot: int, at: tuple[float, float], clearance_m: float) -> str | None:
+        lead = self._road_lead(at[0], at[1], None, 0.0)
+        if lead is None or not lead.polylines or not lead.polylines[0]:
+            return "指定地点の近くに道路が見つかりませんでした"
+        sx, sy = lead.polylines[0][0]
+        if math.hypot(sx - at[0], sy - at[1]) > SPAWN_AT_MAX_OFFSET_M:
+            return f"指定地点から {SPAWN_AT_MAX_OFFSET_M:.0f}m 以内に道路がありません"
+        # 経路を作る前に空きを見る（金沢では経路 1 本に数十 ms かかる）
+        if self._point_clearance(sx, sy, slot) < clearance_m * clearance_m:
+            return f"指定地点の {clearance_m:.0f}m 以内に別の車両がいます"
+        route = self._route_onward_from(sx, sy, lead)
+        if route is None or not self._install_route(slot, route):
+            return "指定地点から到達可能な経路が見つかりませんでした"
+        return None
 
     def deactivate(self, slot: int) -> None:
         """スロットを非アクティブ化する（観測・行動はマスクされる）。"""
@@ -862,11 +893,6 @@ class World:
     @property
     def active_count(self) -> int:
         return int(np.count_nonzero(self.fleet.active))
-
-    def first_inactive_slot(self) -> int | None:
-        """空きスロットの先頭添字。無ければ None。"""
-        idx = np.flatnonzero(~self.fleet.active)
-        return int(idx[0]) if idx.size else None
 
     def _refresh_obstacle_cache(self) -> None:
         if self.obstacles:

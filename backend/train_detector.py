@@ -186,6 +186,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[確認] 読み直して推論できました。検出数 {result.verify_counts}")
     if result.warning:
         print(f"！ {result.warning}")
+    if not result.installed:
+        print(f"！ 検証に通らなかったため {result.path} は差し替えていません")
+        return 1
     return 0
 
 

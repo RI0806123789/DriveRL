@@ -88,7 +88,12 @@ class SimulationEngine:
         self._frame_seq: int = 0
         self._frame_taken_seq: int = -1
         self._unconfirmed_routes: tuple[int, ...] = ()
-        self._want_full_frame: bool = True
+        # 全経路つきの通の要求は「取られた」ときに落とす（作っただけでは上書きされうる）。
+        #   要求の番号と、取られた通がどこまでの要求に応えたかで持つ
+        self._full_requested: int = 1
+        self._full_served: int = 0
+        self._full_frame_seq: int = -1
+        self._full_frame_covers: int = 0
         self._last_frame_at: float = 0.0
         self._map_pending: bool = False
         self._shared_map_index: MapIndex | None = None
@@ -193,9 +198,9 @@ class SimulationEngine:
             self._render_paused = paused
 
     def request_full_frame(self) -> None:
-        """次のフレームに全スロットの経路を載せるよう要求する。"""
+        """全スロットの経路を載せたフレームを、取られるまで作り続けるよう要求する。"""
         with self._lock:
-            self._want_full_frame = True
+            self._full_requested += 1
 
     def set_practical_mode(self, enabled: bool) -> None:
         """実用モードに入る／出る（ステップ境界で適用する）。"""
@@ -271,6 +276,11 @@ class SimulationEngine:
         with self._lock:
             return self._detector_active
 
+    def practical_mode(self) -> bool:
+        """いま実用モード（配車を受け付ける）か。"""
+        with self._lock:
+            return self._practical_mode
+
     def request_export(self, kind: str) -> ExportTicket:
         """モデルの書き出しを依頼する。呼び出し側は `ticket.done` を待つこと。"""
         ticket = ExportTicket(kind=kind)
@@ -320,6 +330,8 @@ class SimulationEngine:
             if self._render_paused or self._map_pending or self._frame_seq == last_seq:
                 return last_seq, None
             self._frame_taken_seq = self._frame_seq
+            if self._frame_seq == self._full_frame_seq:
+                self._full_served = max(self._full_served, self._full_frame_covers)
             return self._frame_seq, self._latest_frame
 
     def metrics_payload(self) -> dict[str, Any]:
@@ -543,6 +555,10 @@ class SimulationEngine:
 
     def _apply_app_mode(self, practical: bool) -> None:
         """開発モードと実用モードを切り替える。**配車は必ずここで畳む。**"""
+        if practical and self.detector_job.running:
+            # 切り替えの要求が学習の開始より先に積まれていた場合（main.py の判定をすり抜ける）
+            self._notify("認識器の学習中は実用モードに切り替えられません。中止するか、終わるまで待ってください")
+            return
         with self._lock:
             if self._practical_mode == practical:
                 return
@@ -620,10 +636,10 @@ class SimulationEngine:
         self._publish_taxi()
 
     def _sync_vehicle_count(self) -> None:
-        """world の実台数を asyncio 側のパラメータへ映す。"""
+        """world の実台数を asyncio 側のパラメータへ映す（再スポーン待ちの車も数える）。"""
         if self._env is None:
             return
-        count = int(self._env.world.active_count)
+        count = int(self._env.vehicle_count)
         with self._lock:
             if int(self._params.vehicle_count) == count:
                 return
@@ -671,7 +687,7 @@ class SimulationEngine:
 
     def _handle_import(self, ticket: ImportTicket) -> None:
         """書き出したモデルを読み込んで学習を再開する。必ず `done` を立てる。"""
-        from app.rl.export import ExportError, export_model
+        from app.rl.export import IMPORT_BACKUP_LABEL, ExportError, export_model
         from app.rl.importer import CheckpointImportError, inspect_checkpoint
 
         started = time.perf_counter()
@@ -700,7 +716,7 @@ class SimulationEngine:
                     preset_id=preset_id,
                     preset_name=preset_name,
                     metrics=metrics,
-                    label="before-import",
+                    label=IMPORT_BACKUP_LABEL,
                     params=self.snapshot_params(),
                 )
             except ExportError:
@@ -811,11 +827,17 @@ class SimulationEngine:
 
     def _install_map(self, map_index: MapIndex, preset_id: str, preset_name: str) -> None:
         started = time.perf_counter()
+        from app.percep.groundtruth import clear_static_cache
         from app.sim.env import SimulationEnv
 
         # 配車は古い env の車両を指しているので、地図ごと入れ替える前に畳む
         self._taxi.cancel(self._env, "エリアを切り替えたため配車を終了しました")
         self._publish_taxi()
+        # 真値の静的キャッシュは前のマップの MapIndex を握っている（金沢の占有グリッドだけで 152MB）。
+        #   CNN で走っている間は真値が呼ばれず、置き換わることもない
+        clear_static_cache()
+        # 新しい env を作る間、古い env（前のマップの擬似カメラと認識器）を並べて持たない
+        self._env = None
 
         params = self.snapshot_params()
         try:
@@ -973,8 +995,8 @@ class SimulationEngine:
         self._last_frame_at = now
 
         with self._lock:
-            want_full = self._want_full_frame
-            self._want_full_frame = False
+            covers = self._full_requested
+            want_full = covers > self._full_served
             delivered = self._frame_taken_seq == self._frame_seq
 
         if delivered and self._unconfirmed_routes:
@@ -991,6 +1013,9 @@ class SimulationEngine:
         with self._lock:
             self._latest_frame = frame
             self._frame_seq += 1
+            if want_full:
+                self._full_frame_seq = self._frame_seq
+                self._full_frame_covers = covers
         self._unconfirmed_routes = frame.routed_slots
 
     def _build_metrics(self, updates: int) -> MetricsSnapshot:

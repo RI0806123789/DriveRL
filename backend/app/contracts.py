@@ -84,6 +84,18 @@ class RoadLead:
     entry_offset: float = 0.0
 
 
+@dataclass(frozen=True)
+class RouteLeg:
+    """経路が通る辺 1 本（進行方向の入口と出口のノード）と、経路上でその車線を走る区間。"""
+
+    edge_id: int
+    entry_node: int
+    exit_node: int
+    #: 経路の始点から測った、この辺の車線に入る弧長と出る弧長 [m]（交差点のつなぎは含まない）
+    start_arc: float
+    end_arc: float
+
+
 @dataclass
 class MapBuilding:
     """建物のフットプリント。outline は閉じない（末尾と先頭は重複させない）。"""
@@ -257,13 +269,13 @@ class MapIndex(Protocol):
         """ノード列をエッジのポリラインに展開し、等間隔にリサンプルした点列を返す。"""
         ...
 
-    def lane_route_polyline(
+    def lane_route(
         self,
         node_path: Sequence[int],
         resample_m: float = 2.0,
         lead: RoadLead | None = None,
-    ) -> list[tuple[float, float]]:
-        """左側通行の車線に沿った走行経路を返す。`lead` があれば車の位置から道なりに始める。"""
+    ) -> tuple[list[tuple[float, float]], list[RouteLeg]]:
+        """左側通行の車線に沿った走行経路と、それが通る辺の列を返す。`lead` があれば車の位置から道なりに始める。"""
         ...
 
     def road_lead(
@@ -273,15 +285,15 @@ class MapIndex(Protocol):
         ...
 
     def signals_on_route(
-        self, points: Sequence[tuple[float, float]]
+        self, points: Sequence[tuple[float, float]], legs: Sequence[RouteLeg]
     ) -> list[tuple[float, int]]:
-        """経路が通過する信号を (経路始点からの弧長 [m], MapData.signals の添字) で返す。"""
+        """経路が通る辺の信号を (経路始点からの弧長 [m], MapData.signals の添字) で返す。"""
         ...
 
     def speed_limits_on_route(
-        self, points: Sequence[tuple[float, float]]
+        self, points: Sequence[tuple[float, float]], legs: Sequence[RouteLeg]
     ) -> list[tuple[float, float]]:
-        """経路に適用される規制速度を (弧長 [m], 規制速度 [m/s]) の区切りで返す。"""
+        """経路が通る辺の規制速度を (弧長 [m], 規制速度 [m/s]) の区切りで返す。"""
         ...
 
     def random_node_pair(

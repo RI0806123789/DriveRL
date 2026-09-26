@@ -23,7 +23,7 @@ from app.percep.encoder import encode_observations
 from app.percep.types import DEFAULT_CAMERA, PerceptionResult
 from app.percep.weather import Weather, auto_weather
 from app.sim.signals import GREEN, STOP_MARGIN_M, constrain_accel, stop_speed_limit
-from app.sim.world import World
+from app.sim.world import SPAWN_CLEARANCE_M2, World
 
 #: 1 ステップで再スポーンに使ってよい時間 [秒]。1 台ぶんは必ず処理するので、
 #: これを超えたら残りは次のステップへ回す（金沢は 1 台 9.9ms、銀座は 1.6ms）
@@ -57,8 +57,13 @@ AUTOPILOT_SAME_WAY_COS = 0.5
 #: 歩道を歩いているだけの人で止まらないよう、車両より狭く取る
 AUTOPILOT_PEDESTRIAN_RANGE_M = 30.0
 AUTOPILOT_PEDESTRIAN_HALF_WIDTH_M = 2.0
-#: 歩行者の手前で空ける距離 [m]。前走車より広く取る（人は急に向きを変える）
-AUTOPILOT_PEDESTRIAN_MARGIN_M = 4.5
+#: 歩行者の手前で、バンパーから人の体までに空ける距離 [m]。前走車（2.5m）より広く取る
+#: （人は急に向きを変える）
+AUTOPILOT_PEDESTRIAN_CLEARANCE_M = 3.0
+#: 上の距離を、車体の中心から歩行者の中心までに直したもの [m]（`_pedestrian_gap` は中心で測る）
+AUTOPILOT_PEDESTRIAN_MARGIN_M = (
+    config.VEHICLE_LENGTH / 2.0 + config.PEDESTRIAN_RADIUS + AUTOPILOT_PEDESTRIAN_CLEARANCE_M
+)
 
 #: 速度上限がこれ以下まで抑えられていたら「交通に止められている」とみなす [m/s]
 TRAFFIC_HOLD_MPS = 1.0
@@ -123,15 +128,37 @@ class SimulationEnv:
         """shape (MAX_VEHICLES, OBS_DIM) float32。"""
         return self._obs.copy()
 
+    @property
+    def vehicle_count(self) -> int:
+        """走っている台数。再スポーン待ちの車も数える（次のステップで起き上がるため）。"""
+        return int(self.world.active_count) + len(self._respawn_queue)
+
+    def _drop_from_respawn_queue(self, slot: int) -> bool:
+        """再スポーン待ちから外す。積まれていたかを返す。"""
+        if slot not in self._respawn_queue:
+            return False
+        self._respawn_queue = [s for s in self._respawn_queue if s != slot]
+        return True
+
+    def _free_slot(self) -> int | None:
+        """新しく車を出せるスロット。再スポーン待ちの枠は次のステップで起き上がるので使わない。"""
+        waiting = set(self._respawn_queue)
+        for slot in np.flatnonzero(~self.world.fleet.active):
+            if int(slot) not in waiting:
+                return int(slot)
+        return None
+
     def relocate_vehicle(self, slot: int, at: tuple[float, float] | None = None) -> bool:
         """スロットを指定地点（省略時はランダム）で起こし直す。成否を返す。"""
         slot = int(slot)
         if not (0 <= slot < config.MAX_VEHICLES):
             return False
+        # 待ちに残すと、次のステップで待ちから起こし直されて別の場所へ飛ぶ
+        self._drop_from_respawn_queue(slot)
         self.world.deactivate(slot)
         ok = self.world.activate(slot, at=at)
         self._reset_slot_stats(slot)
-        self.params.vehicle_count = self.world.active_count
+        self.params.vehicle_count = self.vehicle_count
         return ok
 
     def _autopilot(self, slot: int, target_speed: float) -> tuple[float, float]:
@@ -293,11 +320,19 @@ class SimulationEnv:
             self._reset_slot_stats(int(slot))
 
     def reset_all(self, *, relocate_walkers: bool = True) -> np.ndarray:
-        """全アクティブスロットを再スポーンし、観測を返す。"""
+        """全アクティブスロットと再スポーン待ちのスロットを作り直し、観測を返す。"""
+        waiting = set(self._respawn_queue)
         self._respawn_queue.clear()
         for slot in range(config.MAX_VEHICLES):
             if self.world.fleet.active[slot]:
                 self.world.respawn(slot)
+            elif slot in waiting and not self.world.activate(slot):
+                logger.warning(
+                    "スロット %d の再スポーンに失敗しました（経路を作れず）。"
+                    "このスロットを非アクティブにします",
+                    slot,
+                )
+        self.params.vehicle_count = self.vehicle_count
         if relocate_walkers:
             self.world.relocate_pedestrians()
         self._episode_reward[:] = 0.0
@@ -336,7 +371,7 @@ class SimulationEnv:
         while self._respawn_queue:
             slot = self._respawn_queue.pop(0)
             if not self.world.activate(slot):
-                self.params.vehicle_count = self.world.active_count
+                self.params.vehicle_count = self.vehicle_count
                 logger.warning(
                     "スロット %d の再スポーンに失敗しました（経路を作れず）。"
                     "このスロットを非アクティブにします",
@@ -507,7 +542,7 @@ class SimulationEnv:
     def apply_params(self, params: SimParams) -> None:
         """パラメータの実行時変更を反映する。学習は止めない。"""
         new_count = int(np.clip(int(params.vehicle_count), 0, config.MAX_VEHICLES))
-        count_changed = new_count != int(self.world.active_count)
+        count_changed = new_count != self.vehicle_count
         walkers = int(np.clip(int(params.pedestrian_count), 0, config.MAX_PEDESTRIANS))
         self.params = replace(params)
         self.params.vehicle_count = new_count
@@ -538,24 +573,29 @@ class SimulationEnv:
         payload = event.payload or {}
         try:
             if kind == "spawn_vehicle":
-                slot = self.world.first_inactive_slot()
+                slot = self._free_slot()
                 if slot is None:
                     return f"空きスロットがありません（最大 {config.MAX_VEHICLES} 台）"
                 at = (self._finite(payload, "x"), self._finite(payload, "y"))
-                if not self.world.activate(slot, at=at):
-                    return "指定地点から到達可能な経路が見つかりませんでした"
+                # 利用者が選んだ地点は、再スポーンと同じ空きを求める（真後ろの車が追突する）
+                why = self.world.activate_at(
+                    slot, at, clearance_m=math.sqrt(SPAWN_CLEARANCE_M2)
+                )
+                if why is not None:
+                    return why
                 self._reset_slot_stats(slot)
-                self.params.vehicle_count = self.world.active_count
+                self.params.vehicle_count = self.vehicle_count
 
             elif kind == "despawn_vehicle":
                 slot = int(self._finite(payload, "id"))
                 if not (0 <= slot < config.MAX_VEHICLES):
                     return f"車両 ID が範囲外です: {slot}"
-                if not self.world.fleet.active[slot]:
+                waiting = self._drop_from_respawn_queue(slot)
+                if not self.world.fleet.active[slot] and not waiting:
                     return f"車両 {slot} は既に非アクティブです"
                 self.world.deactivate(slot)
                 self._reset_slot_stats(slot)
-                self.params.vehicle_count = self.world.active_count
+                self.params.vehicle_count = self.vehicle_count
 
             elif kind == "add_obstacle":
                 radius = self._finite(payload, "radius", config.OBSTACLE_RADIUS)

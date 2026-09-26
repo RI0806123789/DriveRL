@@ -31,6 +31,7 @@ from app.percep.types import (
     PerceptionResult,
     facing_viewer,
     pack_by_class_quota,
+    signal_ahead_of_stop,
 )
 from app.percep.weather import CLEAR, Weather
 
@@ -275,9 +276,10 @@ def _detect_signals(
         return out
 
     eye = (pose.eye_x, pose.eye_y)
-    dx = scene.signal_stop[:, 0] - eye[0]
-    dy = scene.signal_stop[:, 1] - eye[1]
-    dist = np.hypot(dx, dy)
+    # 報告する距離は停止線まで（止まる位置）。視程で打ち切るのは、描いて枠を付ける灯器の奥行き
+    #   （擬似カメラの霧と遠方の切り捨てが使うのと同じカメラ座標の奥行き）
+    dist = np.hypot(scene.signal_stop[:, 0] - eye[0], scene.signal_stop[:, 1] - eye[1])
+    _u, _v, head_depth = project_points(pose, spec, head)
     heading = float(world.fleet.heading[slot])
     facing = facing_viewer(
         scene.signal_head[:, 0],
@@ -286,8 +288,10 @@ def _detect_signals(
         eye[0],
         eye[1],
         heading,
+    ) & signal_ahead_of_stop(
+        scene.signal_stop[:, 0], scene.signal_stop[:, 1], scene.signal_heading, eye[0], eye[1]
     )
-    candidates = np.flatnonzero((dist <= max_distance) & facing)
+    candidates = np.flatnonzero((head_depth <= max_distance) & facing)
     if candidates.size == 0:
         return out
 

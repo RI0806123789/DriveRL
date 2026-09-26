@@ -14,7 +14,14 @@ from shapely.geometry import LineString, Point, Polygon
 from shapely.ops import substring
 
 from app import config
-from app.contracts import SIGNAL_MERGE_M, MapData, MapEdge, OccupancyGrid, RoadLead
+from app.contracts import (
+    SIGNAL_MERGE_M,
+    MapData,
+    MapEdge,
+    OccupancyGrid,
+    RoadLead,
+    RouteLeg,
+)
 
 __all__ = ["MapIndexImpl", "build_map_index"]
 
@@ -42,6 +49,8 @@ LEAD_DIRECTION_SPAN_M = 3.0
 ROUTE_MAX_START_TURN_RAD = math.radians(120.0)
 #: 地物が経路の始点より後ろ・終点より先にあるとみなす距離 [m]。経路点の float32 の丸めを吸収する
 ROUTE_END_EPS_M = 0.01
+#: 停止線の位置で、経路の向きと灯器の向きがこれ以上ずれていれば、その灯器に従わない [rad]
+SIGNAL_HEADING_TOLERANCE_RAD = math.radians(35.0)
 
 _WARNED: set[str] = set()
 
@@ -103,13 +112,11 @@ class MapIndexImpl:
             inside = self.edge_inside_building_m.get(int(attrs["edge_id"]), 0.0)
             attrs["cost"] = float(attrs["length"]) + ROUTE_BUILDING_PENALTY * inside
 
-        self._signal_xy, self._signal_heading, self._signal_tree = _point_layer(
-            data.signals
-        )
-        self._sign_xy, self._sign_heading, self._sign_tree = _point_layer(data.signs)
-        self._sign_limit = np.array(
-            [sn.speed_limit for sn in data.signs], dtype=np.float64
-        )
+        self._signal_xy = _xy_of(data.signals)
+        self._signal_heading = np.array([s.heading for s in data.signals], dtype=np.float64)
+        self._sign_xy = _xy_of(data.signs)
+        self._signals_by_hop = self._by_hop(data.signals, at_exit=True)
+        self._signs_by_hop = self._by_hop(data.signs, at_exit=False)
 
         self.occupancy = self._build_occupancy(data)
 
@@ -308,17 +315,18 @@ class MapIndexImpl:
             return points
         return _resample_polyline(points, float(resample_m))
 
-    def lane_route_polyline(
+    def lane_route(
         self,
         node_path: Sequence[int],
         resample_m: float = 2.0,
         lead: RoadLead | None = None,
-    ) -> list[tuple[float, float]]:
-        """左側通行の車線に沿った走行経路を返す（道交法 17 条 4 項 / 34 条）。"""
+    ) -> tuple[list[tuple[float, float]], list[RouteLeg]]:
+        """左側通行の車線に沿った走行経路と、それが通る辺の列を返す（道交法 17 条 4 項 / 34 条）。"""
         path = [int(n) for n in node_path]
         segments: list[RouteSegment] = []
+        hops: list[tuple[int, int]] = []
         if lead is not None:
-            for edge_id, pts in zip(lead.edge_ids, lead.polylines):
+            for edge_id, pts, hop in zip(lead.edge_ids, lead.polylines, self._lead_hops(lead)):
                 edge = self._edges_by_id.get(int(edge_id))
                 if edge is not None and len(pts) >= 2:
                     segments.append(
@@ -328,8 +336,9 @@ class MapIndexImpl:
                             entry_offset=None if segments else lead.entry_offset,
                         )
                     )
+                    hops.append(hop)
         elif len(path) < 2:
-            return self.route_polyline(path, resample_m)
+            return self._centerline_route(path, resample_m)
 
         for a, b in zip(path[:-1], path[1:]):
             attrs = self.graph.get_edge_data(a, b)
@@ -342,14 +351,57 @@ class MapIndexImpl:
             if edge.u != a:
                 pts.reverse()
             segments.append(RouteSegment(edge=edge, points=pts))
+            hops.append((a, b))
 
         if not segments:
-            return self.route_polyline(path, resample_m)
+            return self._centerline_route(path, resample_m)
 
-        route = build_lane_route(segments, float(resample_m))
+        route, spans = build_lane_route(segments, float(resample_m))
         if len(route) < 2:
-            return self.route_polyline(path, resample_m)
-        return route
+            return self._centerline_route(path, resample_m)
+        legs = [
+            RouteLeg(
+                edge_id=int(seg.edge.id),
+                entry_node=int(entry),
+                exit_node=int(exit_),
+                start_arc=float(span[0]),
+                end_arc=float(span[1]),
+            )
+            for seg, (entry, exit_), span in zip(segments, hops, spans)
+            if span is not None
+        ]
+        return route, legs
+
+    def _lead_hops(self, lead: RoadLead) -> list[tuple[int, int]]:
+        """道なりの出だしが通る辺ごとの (入口のノード, 出口のノード)。"""
+        hops: list[tuple[int, int]] = []
+        node = int(lead.exit_node)
+        for edge_id in reversed(lead.edge_ids):
+            edge = self._edges_by_id.get(int(edge_id))
+            if edge is None:
+                hops.append((-1, -1))
+                continue
+            entry = int(edge.u) if int(edge.v) == node else int(edge.v)
+            hops.append((entry, node))
+            node = entry
+        hops.reverse()
+        return hops
+
+    def _centerline_route(
+        self, path: Sequence[int], resample_m: float
+    ) -> tuple[list[tuple[float, float]], list[RouteLeg]]:
+        """車線を引けないときの経路（中心線をたどる）と、それが通る辺の列。"""
+        legs: list[RouteLeg] = []
+        arc = 0.0
+        for a, b in zip(path[:-1], path[1:]):
+            attrs = self.graph.get_edge_data(a, b)
+            edge = None if attrs is None else self._edges_by_id.get(int(attrs["edge_id"]))
+            if edge is None:
+                arc += math.dist(self._node_point(a), self._node_point(b))
+                continue
+            legs.append(RouteLeg(int(edge.id), int(a), int(b), arc, arc + float(edge.length)))
+            arc += float(edge.length)
+        return self.route_polyline(path, resample_m), legs
 
     def road_lead(
         self, x: float, y: float, heading: float | None, min_length_m: float = 0.0
@@ -455,35 +507,21 @@ class MapIndexImpl:
         return best[1], best[2], _direction(best[2], at_end=True)
 
     def signals_on_route(
-        self,
-        points: Sequence[tuple[float, float]],
-        max_lateral: float = 11.0,
-        max_heading_diff: float = math.radians(35.0),
+        self, points: Sequence[tuple[float, float]], legs: Sequence[RouteLeg]
     ) -> list[tuple[float, int]]:
-        """経路が通過する信号を (弧長, MapData.signals の添字) で返す。"""
-        if self._signal_tree is None or len(points) < 2:
+        """経路が通る辺の出口に立つ信号を (弧長, MapData.signals の添字) で返す。"""
+        if len(points) < 2 or not legs or not self._signals_by_hop:
             return []
 
         pts = np.asarray(points, dtype=np.float64)
-        cum, tang = _arc_and_tangent(pts)
-
-        cand = self._near_route(self._signal_tree, pts, float(max_lateral))
-        if cand.size == 0:
-            return []
-
-        xy = self._signal_xy[cand]
-        nearest, dist = _nearest_on_route(pts, xy)
-        sh = self._signal_heading[cand]
-        route_h = tang[nearest]
-        diff = np.abs(np.arctan2(np.sin(sh - route_h), np.cos(sh - route_h)))
-
-        arcs = _arcs_on_route(pts, cum, tang, nearest, xy)
-        hits = (
-            (dist <= float(max_lateral))
-            & (diff <= float(max_heading_diff))
-            & (arcs >= 0.0)
-            & (arcs <= float(cum[-1]))
+        cum = _cumulative_arc(pts)
+        cand, _owner, arcs, route_h = _features_on_legs(
+            pts, cum, legs, self._signals_by_hop, self._signal_xy
         )
+        sh = self._signal_heading[cand]
+        turn = np.abs(np.arctan2(np.sin(sh - route_h), np.cos(sh - route_h)))
+        # 停止線が上流の交差点の中（曲がっている途中）に落ちた灯器は拾わない（#48）
+        hits = (turn <= SIGNAL_HEADING_TOLERANCE_RAD) & (arcs >= 0.0) & (arcs <= float(cum[-1]))
         out = [(float(arcs[i]), int(cand[i])) for i in np.flatnonzero(hits)]
         out.sort(key=lambda item: item[0])
 
@@ -495,44 +533,29 @@ class MapIndexImpl:
         return merged
 
     def speed_limits_on_route(
-        self,
-        points: Sequence[tuple[float, float]],
-        max_lateral: float = 8.0,
-        max_heading_diff: float = math.radians(35.0),
+        self, points: Sequence[tuple[float, float]], legs: Sequence[RouteLeg]
     ) -> list[tuple[float, float]]:
-        """経路に適用される規制速度を (弧長 [m], 規制速度 [m/s]) の区切りで返す。"""
-        if len(points) < 2:
+        """経路が通る辺の規制速度を (弧長 [m], 規制速度 [m/s]) の区切りで返す。"""
+        if len(points) < 2 or not legs:
             return []
 
         pts = np.asarray(points, dtype=np.float64)
-        cum, tang = _arc_and_tangent(pts)
+        cum = _cumulative_arc(pts)
 
-        start_limit = self._edge_speed_limit_at(float(pts[0, 0]), float(pts[0, 1]))
+        # 値は経路が通る辺のもの。標識は「どこから変わるか」にだけ使う
+        #   （同じ 2 ノードを結ぶ辺が 2 本あると、標識は通らない方の辺の値を持つことがある）
+        _cand, owner, arcs, _route_h = _features_on_legs(
+            pts, cum, legs, self._signs_by_hop, self._sign_xy
+        )
+        change_at = {int(k): float(a) for k, a in zip(owner, arcs) if a >= 0.0}
         breaks: list[tuple[float, float]] = []
-        if start_limit is not None:
-            breaks.append((0.0, float(start_limit)))
-
-        cand = self._near_route(self._sign_tree, pts, float(max_lateral))
-        if cand.size:
-            xy = self._sign_xy[cand]
-            nearest, dist = _nearest_on_route(pts, xy)
-            sh = self._sign_heading[cand]
-            route_h = tang[nearest]
-            diff = np.abs(np.arctan2(np.sin(sh - route_h), np.cos(sh - route_h)))
-
-            arcs = _arcs_on_route(pts, cum, tang, nearest, xy)
-            hits = (
-                (dist <= float(max_lateral))
-                & (diff <= float(max_heading_diff))
-                & (arcs >= 0.0)
-                & (arcs <= float(cum[-1]))
-            )
-            found = [
-                (float(arcs[i]), float(self._sign_limit[cand[i]]))
-                for i in np.flatnonzero(hits)
-            ]
-            found.sort(key=lambda item: item[0])
-            breaks.extend(found)
+        for k, leg in enumerate(legs):
+            edge = self._edges_by_id.get(int(leg.edge_id))
+            if edge is None:
+                continue
+            arc = 0.0 if k == 0 else change_at.get(k, float(leg.start_arc))
+            breaks.append((arc, float(edge.speed_limit)))
+        breaks.sort(key=lambda item: item[0])
 
         if not breaks:
             return []
@@ -544,38 +567,19 @@ class MapIndexImpl:
             out.append((arc, limit))
         return out
 
-    @staticmethod
-    def _near_route(
-        tree: "shapely.STRtree | None", pts: np.ndarray, max_lateral: float
-    ) -> np.ndarray:
-        """経路の周り `max_lateral` [m] にある点の添字を返す。"""
-        if tree is None or pts.shape[0] < 2:
-            return np.zeros(0, dtype=np.int64)
-        try:
-            line = LineString(pts)
-            found = tree.query(line, predicate="dwithin", distance=float(max_lateral))
-        except Exception:
-            _warn_once(
-                "near_route",
-                "経路の近傍検索に失敗しました。全件を候補にするため重くなります"
-                "（初回のみ記録）",
-            )
-            return np.arange(int(tree.geometries.size), dtype=np.int64)
-        return np.sort(np.asarray(found, dtype=np.int64).reshape(-1))
-
-    def _edge_speed_limit_at(self, x: float, y: float) -> float | None:
-        """指定座標に最も近い道路の規制速度 [m/s]。道路が引けなければ None。"""
-        try:
-            _sx, _sy, edge_id, _heading = self.nearest_road_point(x, y)
-        except Exception:
-            _warn_once(
-                "edge_speed_limit",
-                "規制速度の引き当てに失敗しました。速度不明として扱うため、"
-                "その区間の速度超過は計上されません（初回のみ記録）",
-            )
-            return None
-        edge = self._edges_by_id.get(int(edge_id))
-        return float(edge.speed_limit) if edge is not None else None
+    def _by_hop(self, items: Sequence, at_exit: bool) -> dict[tuple[int, int], list[int]]:
+        """地物を、それが立つ辺の (入口のノード, 出口のノード) で引けるようにする。"""
+        table: dict[tuple[int, int], list[int]] = {}
+        for i, item in enumerate(items):
+            edge = self._edges_by_id.get(int(item.edge_id))
+            node = int(item.node_id)
+            if edge is None or node not in (int(edge.u), int(edge.v)):
+                continue
+            other = int(edge.u) if int(edge.v) == node else int(edge.v)
+            # 信号は辺の出口（交差点の手前）、標識は辺の入口（交差点を出た先）に立つ
+            key = (other, node) if at_exit else (node, other)
+            table.setdefault(key, []).append(i)
+        return table
 
     def _node_point(self, node_id: int) -> tuple[float, float]:
         if 0 <= node_id < self._node_xy.shape[0]:
@@ -758,74 +762,84 @@ def _sq_dist(a: Sequence[float], b: Sequence[float]) -> float:
     return dx * dx + dy * dy
 
 
-def _point_layer(items: Sequence) -> tuple[np.ndarray, np.ndarray, "shapely.STRtree | None"]:
-    """`x` / `y` / `heading` を持つ地物の列から、座標・方位・STRtree を作る。"""
-    n = len(items)
-    if n == 0:
-        return (
-            np.zeros((0, 2), dtype=np.float64),
-            np.zeros(0, dtype=np.float64),
-            None,
-        )
-    xy = np.array([[it.x, it.y] for it in items], dtype=np.float64)
-    heading = np.array([it.heading for it in items], dtype=np.float64)
-    return xy, heading, shapely.STRtree(shapely.points(xy))
+def _xy_of(items: Sequence) -> np.ndarray:
+    """`x` / `y` を持つ地物の列から座標 (K, 2) を作る。"""
+    if len(items) == 0:
+        return np.zeros((0, 2), dtype=np.float64)
+    return np.array([[it.x, it.y] for it in items], dtype=np.float64)
 
 
-_NEAREST_CHUNK_BYTES = 8 << 20
-
-
-def _arc_and_tangent(pts: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """経路点列から「始点からの弧長」と「各点での進行方位」を返す。"""
+def _cumulative_arc(pts: np.ndarray) -> np.ndarray:
+    """経路点ごとの、始点からの弧長。"""
     seg = np.diff(pts, axis=0)
-    cum = np.concatenate([[0.0], np.cumsum(np.hypot(seg[:, 0], seg[:, 1]))])
-    tang = np.empty(pts.shape[0], dtype=np.float64)
-    tang[:-1] = np.arctan2(seg[:, 1], seg[:, 0])
-    tang[-1] = tang[-2]
-    return cum, tang
+    return np.concatenate([[0.0], np.cumsum(np.hypot(seg[:, 0], seg[:, 1]))])
 
 
-def _nearest_on_route(pts: np.ndarray, xy: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """各地物 `xy` (K, 2) に最も近い経路点の添字と、その距離を返す。"""
-    k = int(xy.shape[0])
-    nearest = np.empty(k, dtype=np.int64)
-    dist = np.empty(k, dtype=np.float64)
-    if k == 0:
-        return nearest, dist
-
-    p = int(pts.shape[0])
-    chunk = max(1, _NEAREST_CHUNK_BYTES // (8 * max(p, 1)))
-    route_x = pts[None, :, 0]
-    route_y = pts[None, :, 1]
-    for lo in range(0, k, chunk):
-        hi = min(lo + chunk, k)
-        d2 = (route_x - xy[lo:hi, 0:1]) ** 2 + (route_y - xy[lo:hi, 1:2]) ** 2
-        idx = np.argmin(d2, axis=1)
-        nearest[lo:hi] = idx
-        dist[lo:hi] = np.sqrt(d2[np.arange(hi - lo), idx])
-    return nearest, dist
-
-
-def _arcs_on_route(
+def _features_on_legs(
     pts: np.ndarray,
     cum: np.ndarray,
-    tang: np.ndarray,
-    nearest: np.ndarray,
+    legs: Sequence[RouteLeg],
+    table: dict[tuple[int, int], list[int]],
     xy: np.ndarray,
-) -> np.ndarray:
-    """地物の弧長。始点より後ろは負、終点より先は全長より大きい値にする（最寄り点のままだと端に張り付く）。"""
-    arcs = cum[nearest].astype(np.float64)
-    last = pts.shape[0] - 1
-    for end in (0, last):
-        at = np.flatnonzero(nearest == end)
-        if at.size == 0:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """経路が通る辺に立つ地物の添字と、それが立つ辺（`legs` の添字）・弧長・そこでの経路の向き。"""
+    cand: list[int] = []
+    owner: list[int] = []
+    lo: list[float] = []
+    hi: list[float] = []
+    n = len(legs)
+    for k, leg in enumerate(legs):
+        found = table.get((int(leg.entry_node), int(leg.exit_node)))
+        if not found:
             continue
-        along = (xy[at, 0] - pts[end, 0]) * math.cos(tang[end]) + (
-            xy[at, 1] - pts[end, 1]
-        ) * math.sin(tang[end])
-        outside = along < -ROUTE_END_EPS_M if end == 0 else along > ROUTE_END_EPS_M
-        arcs[at] = np.where(outside, cum[end] + along, cum[end])
-    return arcs
+        # その辺の車線と、前後の交差点のつなぎの中だけで探す
+        a = float(legs[k - 1].end_arc) if k > 0 else -math.inf
+        b = float(legs[k + 1].start_arc) if k + 1 < n else math.inf
+        for i in found:
+            cand.append(int(i))
+            owner.append(k)
+            lo.append(a)
+            hi.append(b)
+    if not cand:
+        empty = np.zeros(0, dtype=np.float64)
+        return np.zeros(0, dtype=np.int64), np.zeros(0, dtype=np.int64), empty, empty
+    idx = np.asarray(cand, dtype=np.int64)
+    arcs, heading = _project_in_windows(
+        pts, cum, xy[idx], np.asarray(lo, dtype=np.float64), np.asarray(hi, dtype=np.float64)
+    )
+    return idx, np.asarray(owner, dtype=np.int64), arcs, heading
+
+
+def _project_in_windows(
+    pts: np.ndarray, cum: np.ndarray, xy: np.ndarray, lo: np.ndarray, hi: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """地物を、弧長 lo..hi にある経路の線分へ射影した弧長とその線分の向き。始点より後ろは負、終点より先は全長より大きい。"""
+    segs = pts.shape[0] - 1
+    first = np.clip(np.searchsorted(cum, lo, side="right") - 1, 0, segs - 1)
+    last = np.clip(np.searchsorted(cum, hi, side="right") - 1, 0, segs - 1)
+    last = np.maximum(last, first)
+    width = int((last - first).max()) + 1
+    j = first[:, None] + np.arange(width)[None, :]
+    valid = j <= last[:, None]
+    j = np.minimum(j, segs - 1)
+
+    a = pts[j]
+    ab = pts[j + 1] - a
+    len2 = np.maximum((ab * ab).sum(axis=-1), 1e-12)
+    t = ((xy[:, None, :] - a) * ab).sum(axis=-1) / len2
+    # 始点より後ろ・終点より先へは線分を延ばして測る（端の点に張り付かせない）
+    t = np.clip(t, np.where(j == 0, -np.inf, 0.0), np.where(j == segs - 1, np.inf, 1.0))
+    d2 = ((a + ab * t[..., None] - xy[:, None, :]) ** 2).sum(axis=-1)
+    d2[~valid] = np.inf
+    best = np.argmin(d2, axis=1)
+    rows = np.arange(xy.shape[0])
+    arcs = cum[j[rows, best]] + t[rows, best] * np.sqrt(len2[rows, best])
+    heading = np.arctan2(ab[rows, best, 1], ab[rows, best, 0])
+
+    total = float(cum[-1])
+    arcs = np.where((arcs < 0.0) & (arcs > -ROUTE_END_EPS_M), 0.0, arcs)
+    arcs = np.where((arcs > total) & (arcs < total + ROUTE_END_EPS_M), total, arcs)
+    return arcs, heading
 
 
 def _resample_polyline(

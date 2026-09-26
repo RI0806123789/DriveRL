@@ -8,7 +8,13 @@ from typing import Sequence
 
 from app.contracts import MapEdge
 
-__all__ = ["RouteSegment", "build_lane_route", "lane_count_for_direction", "lane_offset_left"]
+__all__ = [
+    "RouteSegment",
+    "Span",
+    "build_lane_route",
+    "lane_count_for_direction",
+    "lane_offset_left",
+]
 
 Point = tuple[float, float]
 
@@ -230,13 +236,18 @@ def _offset_points(
     return out
 
 
+Span = tuple[float, float]
+
+
 def build_lane_route(
     segments: Sequence[RouteSegment], resample_m: float = 2.0
-) -> list[Point]:
-    """区間列から、車線に沿った走行経路を作る。"""
-    usable = [s for s in segments if len(s.points) >= 2]
+) -> tuple[list[Point], list[Span | None]]:
+    """区間列から、車線に沿った走行経路と、各区間の車線を走る弧長の範囲を作る。"""
+    usable_at = [i for i, s in enumerate(segments) if len(s.points) >= 2]
+    usable = [segments[i] for i in usable_at]
+    spans: list[Span | None] = [None] * len(segments)
     if not usable:
-        return []
+        return [], spans
 
     turns: list[str] = []
     for i in range(len(usable) - 1):
@@ -273,16 +284,20 @@ def build_lane_route(
         lane_segments.append(_trim(offset_pts, trim_start, trim_end))
 
     points: list[Point] = []
+    bounds: list[tuple[int, int]] = []
     for i, seg_pts in enumerate(lane_segments):
         if not points:
             points.extend(seg_pts)
+            bounds.append((0, len(points) - 1))
             continue
 
         p0 = points[-1]
         p3 = seg_pts[0]
         gap = math.dist(p0, p3)
         if gap < 0.2:
+            first = len(points) - 1
             points.extend(seg_pts[1:])
+            bounds.append((first, len(points) - 1))
             continue
 
         d0x, d0y = _tangents(points[-3:] if len(points) >= 3 else points)[-1]
@@ -293,13 +308,38 @@ def build_lane_route(
 
         samples = max(4, int(gap / max(resample_m, 0.5)) + 2)
         points.extend(_bezier(p0, p1, p2, p3, samples))
+        first = len(points)
         points.extend(seg_pts)
+        bounds.append((first, len(points) - 1))
 
+    # 重複点は長さ 0 なので、つなぐ前の点列で測った弧長がそのまま使える
+    raw_cum = _cumulative(points)
     cleaned: list[Point] = []
     for p in points:
         if cleaned and math.dist(cleaned[-1], p) <= 1e-6:
             continue
         cleaned.append(p)
     if len(cleaned) < 2:
-        return cleaned
-    return _resample(cleaned, resample_m)
+        for i in usable_at:
+            spans[i] = (0.0, 0.0)
+        return cleaned, spans
+    route = _resample(cleaned, resample_m)
+    to_route = _arc_mapper(raw_cum[-1], _cumulative(route))
+    for i, (a, b) in zip(usable_at, bounds):
+        spans[i] = (to_route(raw_cum[a]), to_route(raw_cum[b]))
+    return route, spans
+
+
+def _arc_mapper(total: float, route_cum: Sequence[float]):
+    """リサンプル前の弧長を、リサンプル後の点列で測った弧長へ写す関数。"""
+    count = len(route_cum) - 1
+
+    def to_route(arc: float) -> float:
+        if count <= 0 or total <= 1e-9:
+            return 0.0
+        # `_resample` は k 番目の点を元の弧長 total * k / count に置く
+        f = min(max(arc / total, 0.0), 1.0) * count
+        k = min(int(f), count - 1)
+        return route_cum[k] + (route_cum[k + 1] - route_cum[k]) * (f - k)
+
+    return to_route
