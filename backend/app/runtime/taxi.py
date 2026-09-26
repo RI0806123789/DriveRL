@@ -20,6 +20,7 @@ from app.contracts import (
 
 if TYPE_CHECKING:
     from app.sim.env import SimulationEnv
+    from app.sim.world import Route
 
 __all__ = ["TaxiService"]
 
@@ -114,7 +115,7 @@ class TaxiService:
             vehicle_id=slot,
             pickup=pick,
             dropoff=drop,
-            route=[(float(px), float(py)) for px, py in route],
+            route=[(float(px), float(py)) for px, py in route.points],
             route_revision=self.status.route_revision + 1,
             message=f"車両 #{slot} が迎えに向かっています",
         )
@@ -149,7 +150,7 @@ class TaxiService:
         world.set_stop_target(slot, float(world.route_total[slot]))
 
         self.status.phase = TAXI_PHASE_RIDING
-        self.status.route = [(float(px), float(py)) for px, py in route]
+        self.status.route = [(float(px), float(py)) for px, py in route.points]
         self.status.route_revision += 1
         self.status.message = "目的地へ向かっています"
         self._refresh_progress(env)
@@ -260,7 +261,7 @@ class TaxiService:
         )
         self.status.phase = TAXI_PHASE_APPROACHING
         self.status.vehicle_id = slot
-        self.status.route = [(float(px), float(py)) for px, py in route]
+        self.status.route = [(float(px), float(py)) for px, py in route.points]
         self.status.route_revision += 1
         self.status.message = (
             f"車両 #{old} が来られなくなったため、車両 #{slot} が向かっています"
@@ -305,7 +306,7 @@ class TaxiService:
         pickup: tuple[float, float],
         *,
         exclude: "set[int] | frozenset[int]" = frozenset(),
-    ) -> tuple[int, np.ndarray | None]:
+    ) -> tuple[int, Route | None]:
         """乗車地点に最も近く、かつそこへ来られる車両を選ぶ（決定 1）。"""
         fleet = world.fleet
         usable = fleet.active & ~world.collided_flags
@@ -327,7 +328,7 @@ class TaxiService:
                 heading=float(fleet.heading[slot]),
                 speed=float(fleet.speed[slot]),
             )
-            if route is not None and route.shape[0] >= 2:
+            if route is not None and route.points.shape[0] >= 2:
                 return slot, route
         return -1, None
 

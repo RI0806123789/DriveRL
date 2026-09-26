@@ -33,7 +33,8 @@ __all__ = [
 
 MIN_VISIBILITY_M = 15.0
 
-FOG_EXTINCTION = 2.0
+#: 視程（`Weather.visibility_m()`）での透過率が 5% になる係数（ln 20）。視程の定義はこれ 1 つ
+FOG_EXTINCTION = math.log(20.0)
 
 _FOG_COLOR = np.array([206.0, 210.0, 214.0], dtype=np.float32)
 

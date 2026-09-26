@@ -27,7 +27,9 @@ __all__ = [
     "preload_keras",
     "prune_exports",
     "EXPORT_KINDS",
+    "IMPORT_BACKUP_LABEL",
     "MAX_EXPORT_FILES",
+    "MAX_IMPORT_BACKUPS",
 ]
 
 logger = logging.getLogger(__name__)
@@ -37,6 +39,11 @@ EXPORT_KINDS = ("checkpoint", "torchscript", "keras")
 METADATA_VERSION = 2
 
 MAX_EXPORT_FILES = 20
+
+#: 読み込む前の重みを退避するときの印（ファイル名に `_before-import_` として入る）
+IMPORT_BACKUP_LABEL = "before-import"
+#: 退避した重みは書き出しの世代（`MAX_EXPORT_FILES`）に数えず、退避どうしでこれだけ残す
+MAX_IMPORT_BACKUPS = 10
 
 
 class ExportError(RuntimeError):
@@ -352,11 +359,16 @@ def _atomic_save(write: Any, path: Path) -> None:
     os.replace(tmp_path, path)
 
 
+def _is_import_backup(name: str) -> bool:
+    return f"_{IMPORT_BACKUP_LABEL}_" in name
+
+
 def prune_exports(
     directory: Path | None = None,
     *,
     keep: int = MAX_EXPORT_FILES,
     protect: Path | None = None,
+    backups: int | None = None,
 ) -> list[str]:
     """書き出しディレクトリを新しい順に `keep` 件だけ残し、古いものを消す。"""
     directory = Path(directory) if directory is not None else config.EXPORT_DIR
@@ -367,19 +379,26 @@ def prune_exports(
     protect_name = protect.name if protect is not None else None
 
     entries: list[tuple[float, Path]] = []
+    kept_backups: list[tuple[float, Path]] = []
     for path in directory.iterdir():
         if not path.is_file():
             continue
         if path.name.endswith(".tmp") or path.name.endswith(".partial.keras"):
             continue
         try:
-            entries.append((path.stat().st_mtime, path))
+            item = (path.stat().st_mtime, path)
         except OSError:
             continue
+        # 読み込み前の退避は書き出しの世代に数えない。数えると 20 回書き出しただけで消える
+        (kept_backups if backups is not None and _is_import_backup(path.name) else entries).append(item)
 
     entries.sort(key=lambda item: item[0], reverse=True)
+    kept_backups.sort(key=lambda item: item[0], reverse=True)
+    stale = entries[keep:]
+    if backups is not None:
+        stale += kept_backups[max(1, int(backups)) :]
     removed: list[str] = []
-    for _mtime, path in entries[keep:]:
+    for _mtime, path in stale:
         if path.name == protect_name:
             continue
         try:
@@ -470,7 +489,7 @@ def export_model(
 
     if directory == config.EXPORT_DIR:
         try:
-            prune_exports(directory, protect=path)
+            prune_exports(directory, protect=path, backups=MAX_IMPORT_BACKUPS)
         except Exception:  # noqa: BLE001
             logger.exception("古い書き出しの整理に失敗しました（書き出し自体は成功しています）")
 

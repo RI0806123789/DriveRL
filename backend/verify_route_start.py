@@ -176,7 +176,7 @@ for preset_id in targets:
             failed += 1
             continue
         made += 1
-        pts = np.asarray(route, dtype=np.float64)
+        pts = np.asarray(route.points, dtype=np.float64)
 
         if math.hypot(pts[0, 0] - x, pts[0, 1] - y) > 4.0:
             far_start += 1

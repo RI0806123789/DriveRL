@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from typing import TYPE_CHECKING
 
@@ -25,6 +26,7 @@ from app.percep.types import (
     SIGNAL_LAMP_RADIUS,
     CameraSpec,
     facing_viewer,
+    signal_ahead_of_stop,
 )
 from app.percep.weather import CLEAR, Weather, apply_weather
 
@@ -33,6 +35,8 @@ if TYPE_CHECKING:
 
 
 __all__ = ["PseudoCamera", "LABELS", "PALETTE"]
+
+logger = logging.getLogger("autoware_sim")
 
 LBL_GROUND = 0
 LBL_ROAD = 1
@@ -141,8 +145,15 @@ _DIGIT_MIN_HW = 0.45
 _DIGIT_MIN_HH = 1.2
 
 _RASTER_CELL_M = 0.25
-_RASTER_MAX_SIDE = 6000
 _RASTER_CHUNK_POINTS = 400_000
+#: 路面ラスタのタイル 1 枚の一辺 [セル]（0.25m で 64m）。引くときにビット演算を使うので 2 の累乗
+_TILE_SHIFT = 8
+_TILE_CELLS = 1 << _TILE_SHIFT
+_TILE_MASK = _TILE_CELLS - 1
+#: タイルがこの枚数以下なら最初に全部焼く（銀座・梅田・栄）。越えるマップは描く所だけ焼く（金沢）
+_TILE_EAGER_MAX = 512
+#: 描く所だけ焼くときに持っておくタイルの枚数（64KB × 384 = 24MB）。8 台の視界は多くて 72 枚
+_TILE_POOL = 384
 
 _MARK_HALF_WIDTH = 0.075
 _MARK_EDGE_INSET = 0.35
@@ -281,7 +292,7 @@ class PseudoCamera:
         self._ray_samples = np.arange(1.0, ray_max + 1e-6, 1.0, dtype=np.float64)
 
     def _build_road_raster(self) -> None:
-        """路面と車線標示を ENU 平面のラベルラスタへ焼く。"""
+        """路面と車線標示を焼く ENU 平面のラベルラスタを、タイルに分けて用意する。"""
         data = self.map_index.data
         bounds = data.bounds
         margin = float(config.GRID_MARGIN)
@@ -289,37 +300,108 @@ class PseudoCamera:
         min_y = bounds.min_y - margin
         span_x = (bounds.max_x + margin) - min_x
         span_y = (bounds.max_y + margin) - min_y
-        span = max(span_x, span_y, 1.0)
 
-        cell = max(_RASTER_CELL_M, span / _RASTER_MAX_SIDE)
+        # セルはどのマップでも同じ細かさにする。広いマップで粗くすると、
+        #   白線が最低 1 セル幅まで太って路面が白で埋まる（code_review Z-02）
+        cell = _RASTER_CELL_M
         self._rcell = cell
         self._rinv = 1.0 / cell
         self._rox = min_x
         self._roy = min_y
         self._rw = max(int(math.ceil(span_x / cell)) + 1, 1)
         self._rh = max(int(math.ceil(span_y / cell)) + 1, 1)
-        self._raster = np.zeros((self._rh, self._rw), dtype=np.uint8)
 
-        segments = self._collect_segments()
+        t = _TILE_CELLS
+        self._tiles_x = (self._rw + t - 1) // t
+        self._tiles_y = (self._rh + t - 1) // t
+        tiles = self._tiles_x * self._tiles_y
+        self._segments = self._collect_segments()
+        self._render_no = 0
+        self._pool_warned = False
+
+        self._lazy = tiles > _TILE_EAGER_MAX
+        if not self._lazy:
+            # 全部焼くなら 1 枚に一度に焼いてから、タイルの並び（タイル番号 = 置き場所）へ組み替える
+            dense = np.zeros((self._tiles_y * t, self._tiles_x * t), dtype=np.uint8)
+            if self._segments is not None:
+                self._paint(dense, (0, 0), np.arange(self._segments[0].size, dtype=np.int64))
+            self._tile_pool = np.ascontiguousarray(
+                dense.reshape(self._tiles_y, t, self._tiles_x, t).swapaxes(1, 2)
+            ).reshape(tiles, t, t)
+            self._tile_slot = np.arange(tiles, dtype=np.int32)
+        else:
+            self._index_tile_segments()
+            self._tile_pool = np.zeros((_TILE_POOL, t, t), dtype=np.uint8)
+            self._tile_slot = np.full(tiles, -1, dtype=np.int32)
+            self._slot_key = np.full(_TILE_POOL, -1, dtype=np.int64)
+            self._slot_used = np.zeros(_TILE_POOL, dtype=np.int64)
+        self._pool_flat = self._tile_pool.reshape(-1)
+
+    def _index_tile_segments(self) -> None:
+        """タイルごとに、そこへ塗る線分の添字を引けるようにする（CSR 形式）。"""
+        tiles = self._tiles_x * self._tiles_y
+        segments = self._segments
         if segments is None:
-            self._raster_flat = self._raster.reshape(-1)
+            self._tile_seg_ptr = np.zeros(tiles + 1, dtype=np.int64)
+            self._tile_seg_idx = np.zeros(0, dtype=np.int64)
             return
-        ax, ay, ux, uy, seg_len, half_w, oneway, arc0 = segments
+        ax, ay, ux, uy, seg_len, half_w, _oneway, _arc0 = segments
+        bx = ax + ux * seg_len
+        by = ay + uy * seg_len
+        pad = half_w + self._rcell * 2.0
+        span = self._rcell * _TILE_CELLS
+        tx0 = np.clip(((np.minimum(ax, bx) - pad - self._rox) // span).astype(np.int64), 0, self._tiles_x - 1)
+        tx1 = np.clip(((np.maximum(ax, bx) + pad - self._rox) // span).astype(np.int64), 0, self._tiles_x - 1)
+        ty0 = np.clip(((np.minimum(ay, by) - pad - self._roy) // span).astype(np.int64), 0, self._tiles_y - 1)
+        ty1 = np.clip(((np.maximum(ay, by) + pad - self._roy) // span).astype(np.int64), 0, self._tiles_y - 1)
+        nx = tx1 - tx0 + 1
+        counts = nx * (ty1 - ty0 + 1)
+        seg = np.repeat(np.arange(ax.size, dtype=np.int64), counts)
+        k = _ragged_arange(counts)
+        key = (ty0[seg] + k // nx[seg]) * self._tiles_x + (tx0[seg] + k % nx[seg])
+        order = np.argsort(key, kind="stable")
+        self._tile_seg_idx = seg[order]
+        self._tile_seg_ptr = np.searchsorted(key[order], np.arange(tiles + 1, dtype=np.int64))
 
+    def _load_tile(self, key: int, slot: int) -> None:
+        """タイル `key` を焼いてプールの `slot` に置く（前に居たタイルは追い出す）。"""
+        prev = int(self._slot_key[slot])
+        if prev >= 0:
+            self._tile_slot[prev] = -1
+        self._slot_key[slot] = key
+        self._tile_slot[key] = slot
+        tile = self._tile_pool[slot]
+        tile.fill(0)
+        segs = self._tile_seg_idx[self._tile_seg_ptr[key] : self._tile_seg_ptr[key + 1]]
+        if segs.size == 0 or self._segments is None:
+            return
+        ty, tx = divmod(int(key), self._tiles_x)
+        self._paint(tile, (tx * _TILE_CELLS, ty * _TILE_CELLS), segs)
+
+    def _paint(self, target: np.ndarray, origin: tuple[int, int], segs: np.ndarray) -> None:
+        """線分 `segs` の路面と車線標示を、左下のセルが `origin` の `target` へ焼く。"""
+        ax, ay, ux, uy, seg_len, half_w, oneway, arc0 = (a[segs] for a in self._segments)
+
+        cell = self._rcell
         step = cell * 0.6
-        self._stamp_band(ax, ay, ux, uy, seg_len, -half_w, half_w, LBL_ROAD, step)
+        self._stamp_band(
+            target, origin, ax, ay, ux, uy, seg_len, -half_w, half_w, LBL_ROAD, step
+        )
 
         edge_off = np.maximum(half_w - _MARK_EDGE_INSET, half_w * 0.5)
         mark_hw = max(_MARK_HALF_WIDTH, cell * 0.6)
         for sign in (1.0, -1.0):
             off = edge_off * sign
             self._stamp_band(
-                ax, ay, ux, uy, seg_len, off - mark_hw, off + mark_hw, LBL_MARKING, step
+                target, origin, ax, ay, ux, uy, seg_len, off - mark_hw, off + mark_hw,
+                LBL_MARKING, step,
             )
 
         two_way = ~oneway
         if bool(two_way.any()):
             self._stamp_band(
+                target,
+                origin,
                 ax[two_way],
                 ay[two_way],
                 ux[two_way],
@@ -331,7 +413,33 @@ class PseudoCamera:
                 step,
                 arc0=arc0[two_way],
             )
-        self._raster_flat = self._raster.reshape(-1)
+
+    def _pooled_slots(self, key: np.ndarray) -> np.ndarray:
+        """タイル番号を、焼いたタイルの置き場所へ引き直す。まだ焼いていなければここで焼く。"""
+        self._render_no += 1
+        slot = self._tile_slot[key]
+        seen = slot[:, self._ground_ok]
+        self._slot_used[seen[seen >= 0]] = self._render_no
+        missing = seen < 0
+        if bool(missing.any()):
+            self._ensure_tiles(key[:, self._ground_ok][missing])
+            slot = self._tile_slot[key]
+        # 視界の外（遠すぎる）画素は塗らないが、引く場所だけは有効にしておく
+        return np.maximum(slot, 0)
+
+    def _ensure_tiles(self, keys: np.ndarray) -> None:
+        """まだ焼いていないタイルを焼く。いちばん長く使っていないタイルから追い出す。"""
+        for key in np.unique(keys):
+            slot = int(np.argmin(self._slot_used))
+            if int(self._slot_used[slot]) == self._render_no and not self._pool_warned:
+                self._pool_warned = True
+                logger.error(
+                    "擬似カメラの路面タイルが足りません（%d 枚）。この画の路面の一部が崩れます"
+                    "（初回のみ記録）",
+                    int(self._tile_pool.shape[0]),
+                )
+            self._load_tile(int(key), slot)
+            self._slot_used[slot] = self._render_no
 
     def _collect_segments(self):
         """全エッジのポリラインを 1 本の線分配列へ展開する。"""
@@ -386,6 +494,8 @@ class PseudoCamera:
 
     def _stamp_band(
         self,
+        tile: np.ndarray,
+        origin: tuple[int, int],
         ax: np.ndarray,
         ay: np.ndarray,
         ux: np.ndarray,
@@ -397,9 +507,11 @@ class PseudoCamera:
         step: float,
         arc0: np.ndarray | None = None,
     ) -> None:
-        """線分に沿った帯（横方向 lo〜hi）をラスタへ塗る。"""
+        """線分に沿った帯（横方向 lo〜hi）を、左下のセルが `origin` のタイルへ塗る。"""
         n_along = np.ceil(seg_len / step).astype(np.int64) + 1
         n_across = np.ceil((hi - lo) / step).astype(np.int64) + 1
+        # タイルにかかる区間だけ標本を打つ。標本の位置はタイルに依らず線分ごとに同じ格子
+        first, n_along = self._along_window(tile, origin, ax, ay, ux, uy, seg_len, lo, hi, step, n_along)
         counts = n_along * n_across
         if counts.size == 0:
             return
@@ -417,15 +529,15 @@ class PseudoCamera:
             chunk_starts.append(end)
             pos = end
 
-        rw, rh = self._rw, self._rh
-        raster = self._raster
+        c0, r0 = origin
+        rows, cols = tile.shape
         for s, e in zip(chunk_starts[:-1], chunk_starts[1:]):
             cnt = counts[s:e]
             k = _ragged_arange(cnt)
             seg = np.repeat(np.arange(s, e, dtype=np.int64), cnt)
             nc = n_across[seg]
-            ia = k // nc
-            ic = k - ia * nc
+            ia = k // nc + first[seg]
+            ic = k - (k // nc) * nc
 
             ta = np.minimum(ia * step, seg_len[seg])
             tc = np.minimum(ic * step, hi[seg] - lo[seg]) + lo[seg]
@@ -440,13 +552,51 @@ class PseudoCamera:
                 if x.size == 0:
                     continue
 
-            ci = ((x - self._rox) * self._rinv).astype(np.int32)
-            ri = ((y - self._roy) * self._rinv).astype(np.int32)
-            inside = (ci >= 0) & (ci < rw) & (ri >= 0) & (ri < rh)
+            ci = ((x - self._rox) * self._rinv).astype(np.int32) - c0
+            ri = ((y - self._roy) * self._rinv).astype(np.int32) - r0
+            inside = (ci >= 0) & (ci < cols) & (ri >= 0) & (ri < rows)
             if not inside.all():
                 ci = ci[inside]
                 ri = ri[inside]
-            raster[ri, ci] = value
+            tile[ri, ci] = value
+
+    def _along_window(
+        self,
+        tile: np.ndarray,
+        origin: tuple[int, int],
+        ax: np.ndarray,
+        ay: np.ndarray,
+        ux: np.ndarray,
+        uy: np.ndarray,
+        seg_len: np.ndarray,
+        lo: np.ndarray,
+        hi: np.ndarray,
+        step: float,
+        n_along: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """線分の標本のうち、タイルに落ちうる範囲 (最初の番号, 個数)。タイルにかからなければ個数 0。"""
+        cell = self._rcell
+        rows, cols = tile.shape
+        pad = np.maximum(np.abs(lo), np.abs(hi)) + cell
+        x0 = self._rox + origin[0] * cell - pad
+        y0 = self._roy + origin[1] * cell - pad
+        x1 = x0 + cols * cell + 2.0 * pad
+        y1 = y0 + rows * cell + 2.0 * pad
+        t_lo = np.zeros_like(seg_len)
+        t_hi = seg_len.copy()
+        for a, u, low, high in ((ax, ux, x0, x1), (ay, uy, y0, y1)):
+            flat = np.abs(u) < 1e-12
+            with np.errstate(divide="ignore", invalid="ignore"):
+                t1 = (low - a) / u
+                t2 = (high - a) / u
+            enter = np.where(flat, np.where((a >= low) & (a <= high), -np.inf, np.inf), np.minimum(t1, t2))
+            leave = np.where(flat, np.where((a >= low) & (a <= high), np.inf, -np.inf), np.maximum(t1, t2))
+            t_lo = np.maximum(t_lo, enter)
+            t_hi = np.minimum(t_hi, leave)
+        first = np.floor(np.maximum(t_lo, 0.0) / step).astype(np.int64)
+        last = np.minimum(np.ceil(np.maximum(t_hi, 0.0) / step).astype(np.int64), n_along - 1)
+        count = np.where(t_hi >= t_lo, np.maximum(last - first + 1, 0), 0)
+        return np.minimum(first, np.maximum(n_along - 1, 0)), count
 
     def _prepare_signals(self) -> None:
         """灯器（3 灯のバー）の中心と向きを求めておく。"""
@@ -479,6 +629,8 @@ class PseudoCamera:
         self._sig_ax = left_x
         self._sig_ay = left_y
         self._sig_heading = heading
+        self._sig_stop_x = np.array([s.x for s in signals], dtype=np.float64)
+        self._sig_stop_y = np.array([s.y for s in signals], dtype=np.float64)
         self._sig_grid = _NeighborIndex(self._sig_x, self._sig_y, self._far)
 
     def _prepare_signs(self) -> None:
@@ -583,9 +735,16 @@ class PseudoCamera:
         ri = ((py - self._roy) * self._rinv).astype(np.int32)
         np.clip(ci, 0, self._rw - 1, out=ci)
         np.clip(ri, 0, self._rh - 1, out=ri)
-        ri *= self._rw
-        ri += ci
-        values = self._raster_flat[ri]
+        slot = (ri >> _TILE_SHIFT) * self._tiles_x + (ci >> _TILE_SHIFT)
+        if self._lazy:
+            slot = self._pooled_slots(slot)
+        # タイルの置き場所・行・列を 1 本の添字にして 1 回で引く
+        slot <<= 2 * _TILE_SHIFT
+        np.bitwise_and(ri, _TILE_MASK, out=ri)
+        ri <<= _TILE_SHIFT
+        slot += ri
+        slot += ci & _TILE_MASK
+        values = self._pool_flat[slot]
         np.copyto(
             label[:, self._horizon_row :, :],
             values,
@@ -919,6 +1078,8 @@ class PseudoCamera:
         ey = eye_y[cam]
         facing = facing_viewer(
             hx, hy, self._sig_heading[sig], ex, ey, heading[cam]
+        ) & signal_ahead_of_stop(
+            self._sig_stop_x[sig], self._sig_stop_y[sig], self._sig_heading[sig], ex, ey
         )
         if not facing.any():
             return None

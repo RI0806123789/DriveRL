@@ -175,6 +175,9 @@ class EngineHooks(Protocol):
     def detector_in_use(self) -> bool:
         """いま観測が CNN 由来か（False なら真値フォールバック）。"""
 
+    def practical_mode(self) -> bool:
+        """いま実用モード（配車を受け付ける）か。"""
+
 
 @dataclass
 class _Progress:
@@ -221,6 +224,12 @@ class DetectorTrainingJob:
         """学習を始める。**始められなければ理由を返す**（空文字なら成功）。"""
         if self.running:
             return "すでに学習を実行中です。完了を待つか中止してください"
+        if self._hooks.practical_mode():
+            # 学習中は物理が止まるので、迎車中・乗車中のタクシーが終わるまで止まってしまう
+            return (
+                "実用モードの間は認識器の学習を始められません。"
+                "開発モードに戻してから始めてください"
+            )
 
         if request.trains and not request.collects:
             if not self._dataset_path().exists():
@@ -597,6 +606,23 @@ class DetectorTrainingJob:
             log=lambda message: logger.info("[認識器の学習] %s", message),
             verbose=2,
         )
+
+        if not result.installed:
+            # 検証に落ちたモデルは保存していない。動いている認識器はそのまま使い続ける
+            self._update(
+                state="error",
+                message=(
+                    "学習した認識器が検証に通らなかったため、保存も載せ替えもしていません。"
+                    f"前の認識器を使い続けます（{result.warning}）"
+                ),
+                warning=result.warning,
+                param_count=result.param_count,
+                finished_at=time.time(),
+            )
+            self._hooks.notify(
+                "認識器の学習は終わりましたが、検証に通らなかったため前の認識器のままです"
+            )
+            return
 
         self._update(
             state="saving",

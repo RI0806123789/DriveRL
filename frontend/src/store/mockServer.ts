@@ -79,7 +79,7 @@ const BRAKE_ACCEL = 4.8
 const CAR_GAP_M = 6.0
 
 /** 徒歩キャラの手前で空ける距離 [m]・見る範囲 [m]・車体中心からの横幅 [m]（env.py と同じ値） */
-const PLAYER_MARGIN_M = 4.5
+const PLAYER_MARGIN_M = 4.4 / 2 + 0.26 + 3.0
 const PLAYER_RANGE_M = 30.0
 const PLAYER_HALF_WIDTH_M = 2.0
 /** 位置が届かなくなってから街から消すまで [ms]（engine.PLAYER_POSE_TTL_SEC と同じ） */

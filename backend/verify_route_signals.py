@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""経路に載せる信号・標識が始点より後ろ・終点より先を含まず、出だしで後ろの赤信号に止められないかを検証する。"""
+"""経路に載せる信号・標識が通る辺のものだけで、始点より後ろ・終点より先を含まず、出だしで後ろの赤信号に止められないかを検証する。"""
 from __future__ import annotations
 
 import math
@@ -20,12 +20,13 @@ from shapely.geometry import LineString, Point
 from app import config
 from app.contracts import SimParams
 from app.map import build_map_index, get_preset, load_map
-from app.map.index import ROUTE_END_EPS_M, _arc_and_tangent, _nearest_on_route
+from app.map.index import ROUTE_END_EPS_M
 from app.map.lanes import lane_offset_left
 from app.map.loader import MapLoadError
 from app.map.presets import list_presets
 from app.sim.env import SimulationEnv
 from app.sim.signals import GREEN, RED
+from app.sim.world import Route
 
 FAILURES: list[str] = []
 #: 金沢は 1 本が重いので本数を減らす
@@ -37,6 +38,8 @@ POSES = 40
 #: 停止線からずらす距離 [m]。越えた直後（配車の作り直し）と、赤で止まっている位置
 PAST_LINE_M = 3.0
 BEFORE_LINE_M = 1.5
+#: 規制速度を比べるとき、交差点からこれだけ離れた経路点だけを見る [m]（標識は交差点を出た先に立つ）
+LIMIT_CHECK_AWAY_M = 25.0
 
 
 def check(label: str, ok: bool, detail: str = "") -> None:
@@ -80,25 +83,40 @@ def behind_start(index, pts: np.ndarray) -> int:
     return int(ok[np.argmin(d[ok])]) if ok.size else -1
 
 
-def behind_signs(index, pts: np.ndarray) -> list[int]:
-    """最寄りの経路点が始点で、始点より後ろにある標識。始点にほかの標識があれば空を返す。"""
-    cand = index._near_route(index._sign_tree, pts, 8.0)
-    if cand.size == 0:
-        return []
-    _cum, tang = _arc_and_tangent(pts)
-    nearest, dist = _nearest_on_route(pts, index._sign_xy[cand])
-    sh = index._sign_heading[cand]
-    diff = np.abs(np.arctan2(np.sin(sh - tang[nearest]), np.cos(sh - tang[nearest])))
-    at_start = [
-        int(cand[k])
-        for k in np.flatnonzero((dist <= 8.0) & (diff <= math.radians(35.0)) & (nearest == 0))
+def limit_mismatches(index, route: Route) -> tuple[int, int]:
+    """交差点から離れた経路点で、表示される規制速度と走っている道の規制が食い違う数と、見た点の数。"""
+    pts = np.asarray(route.points, dtype=np.float64)
+    limits = index.speed_limits_on_route([(float(x), float(y)) for x, y in pts], route.legs)
+    if not limits:
+        return 0, 0
+    arcs = np.array([a for a, _v in limits])
+    cum = np.concatenate([[0.0], np.cumsum(np.hypot(*np.diff(pts, axis=0).T))])
+    nodes = index._node_xy[
+        sorted({lg.entry_node for lg in route.legs} | {lg.exit_node for lg in route.legs})
     ]
-    behind = [
-        k for k in at_start
-        if along(pts, (float(index._sign_xy[k, 0]), float(index._sign_xy[k, 1])), False)
-        < -ROUTE_END_EPS_M
-    ]
-    return behind if len(behind) == len(at_start) else []
+    near = ((pts[:, None, :] - nodes[None, :, :]) ** 2).sum(axis=-1).min(axis=1)
+    bad = seen = 0
+    for k, leg in enumerate(route.legs):
+        edge = index._edges_by_id[leg.edge_id]
+        lo = leg.start_arc
+        hi = route.legs[k + 1].start_arc if k + 1 < len(route.legs) else float(cum[-1])
+        for i in np.flatnonzero((cum >= lo) & (cum < hi) & (near > LIMIT_CHECK_AWAY_M**2)):
+            shown = limits[int(np.searchsorted(arcs, cum[i], side="right")) - 1][1]
+            seen += 1
+            bad += int(abs(shown - edge.speed_limit) > 1e-6)
+    return bad, seen
+
+
+def off_route_signals(index, route: Route, found: list[tuple[float, int]]) -> int:
+    """経路が通らない進入路の灯器の数（通る辺の出口に立つ灯器だけを載せる）。"""
+    hops = {(lg.entry_node, lg.exit_node) for lg in route.legs}
+    bad = 0
+    for _arc, i in found:
+        s = index.data.signals[i]
+        e = index._edges_by_id[int(s.edge_id)]
+        upstream = int(e.u) if int(e.v) == int(s.node_id) else int(e.v)
+        bad += int((upstream, int(s.node_id)) not in hops)
+    return bad
 
 
 def force_phases(world, red: set[int]) -> None:
@@ -115,15 +133,14 @@ def same_phase(data, s) -> set[int]:
     }
 
 
-def found_near_start(pts: np.ndarray, s) -> bool:
-    """経路の最寄り点が出だしにあり、横と向きの条件を満たすか（満たさなければ既存の制約で拾えない）。"""
-    d = np.hypot(pts[:, 0] - s.x, pts[:, 1] - s.y)
-    j = int(np.argmin(d))
-    if j > 2 or float(d[j]) > 11.0:
+def starts_on_approach(index, route: Route, s) -> bool:
+    """経路がその信号の進入路から始まるか。近くを並んで走る別の道から始まる経路は、その信号に従わない。"""
+    if not route.legs:
         return False
-    k = min(j + 1, pts.shape[0] - 1)
-    th = math.atan2(pts[k, 1] - pts[k - 1, 1], pts[k, 0] - pts[k - 1, 0])
-    return abs(math.atan2(math.sin(s.heading - th), math.cos(s.heading - th))) <= math.radians(35.0)
+    e = index._edges_by_id[int(s.edge_id)]
+    upstream = int(e.u) if int(e.v) == int(s.node_id) else int(e.v)
+    first = route.legs[0]
+    return (first.entry_node, first.exit_node) == (upstream, int(s.node_id))
 
 
 def release_phases(world) -> None:
@@ -173,7 +190,7 @@ def approach_pose(index, s, shift: float) -> tuple[float, float, float] | None:
     return c.x - math.sin(h) * off, c.y + math.cos(h) * off, h
 
 
-def spawn_cases(world, index, rng, routes: list[np.ndarray]):
+def spawn_cases(world, index, rng, routes: list[Route]):
     """再スポーンの経路。足りなければ信号のある交差点を始点にして作る（金沢は始点に信号が少ない）。"""
     yield from routes
     nodes = [int(s.node_id) for s in index.data.signals if index._reachable_mask[int(s.node_id)]]
@@ -183,7 +200,7 @@ def spawn_cases(world, index, rng, routes: list[np.ndarray]):
         dst = int(index.nearest_node(*far_node(index, rng, x, y)))
         r = world._route_from_nodes(src, dst)
         if r is not None:
-            yield np.asarray(r, dtype=np.float64)
+            yield r
 
 
 def far_node(index, rng, x: float, y: float) -> tuple[float, float]:
@@ -222,11 +239,11 @@ for preset_id in targets:
     trials = TRIALS.get(preset.id, TRIALS_DEFAULT)
     edges = [e for e in data.edges if len(e.polyline) >= 2 and e.length > 5.0]
 
-    routes: list[np.ndarray] = []
+    routes: list[Route] = []
     for _ in range(trials):
         r = world._random_route()
         if r is not None:
-            routes.append(np.asarray(r, dtype=np.float64))
+            routes.append(r)
     spawned = len(routes)
     weights = np.array([e.length for e in edges], dtype=np.float64)
     for _ in range(trials):
@@ -244,26 +261,23 @@ for preset_id in targets:
         speed = float(rng.uniform(0.0, 13.9))
         r = world.route_between((x, y), far_node(index, rng, x, y), heading=h, speed=speed)
         if r is not None:
-            routes.append(np.asarray(r, dtype=np.float64))
+            routes.append(r)
 
-    bad_sig = had_behind = sign_cases = sign_bad = 0
-    for pts in routes:
+    bad_sig = had_behind = off_route = start_bad = limit_bad = limit_seen = 0
+    for r in routes:
+        pts = np.asarray(r.points, dtype=np.float64)
         route = [(float(px), float(py)) for px, py in pts]
-        sig = index.signals_on_route(route)
+        sig = index.signals_on_route(route, r.legs)
         bad_sig += outside_ends(pts, [(a, (data.signals[i].x, data.signals[i].y)) for a, i in sig])
         had_behind += int(behind_start(index, pts) >= 0)
+        off_route += off_route_signals(index, r, sig)
 
-        start = index._edge_speed_limit_at(float(pts[0, 0]), float(pts[0, 1]))
-        behind = behind_signs(index, pts)
-        if start is None or not behind:
-            continue
-        if all(abs(float(index._sign_limit[k]) - start) < 1e-6 for k in behind):
-            continue
-        sign_cases += 1
-        limits = index.speed_limits_on_route(route)
-        arcs = np.array([a for a, _v in limits])
-        at_start = limits[int(np.searchsorted(arcs, 0.0, side="right")) - 1][1]
-        sign_bad += int(abs(at_start - start) > 1e-6)
+        limits = index.speed_limits_on_route(route, r.legs)
+        first = index._edges_by_id[r.legs[0].edge_id].speed_limit if r.legs else None
+        start_bad += int(first is None or not limits or abs(limits[0][1] - first) > 1e-6)
+        bad, seen = limit_mismatches(index, r)
+        limit_bad += bad
+        limit_seen += seen
     check(
         "経路に載る信号に、始点より後ろ・終点より先のものが無い",
         bad_sig == 0,
@@ -271,9 +285,19 @@ for preset_id in targets:
         f"（始点の後ろに経路の向きの信号がある経路は {had_behind} 本）",
     )
     check(
-        "始点の規制速度は始点の道路のもので、後ろの標識で上書きされない",
-        sign_bad == 0,
-        f"後ろに規制速度の違う標識がある {sign_cases} 本のうち {sign_bad} 本",
+        "経路に載る信号は、経路が通る進入路の灯器だけ",
+        off_route == 0,
+        f"通らない進入路の灯器 {off_route} 基",
+    )
+    check(
+        "始点の規制速度は始点の道路のもので、交差する道や後ろの標識に引きずられない",
+        start_bad == 0,
+        f"{len(routes)} 本のうち {start_bad} 本",
+    )
+    check(
+        f"交差点から {LIMIT_CHECK_AWAY_M:.0f}m 以上離れた所で、規制速度が走っている道のものと一致する",
+        limit_bad == 0 and limit_seen > 0,
+        f"{limit_seen} 点のうち {limit_bad} 点が食い違う",
     )
 
     # 置いた位置で当たってもエピソードを閉じさせない（再スポーンした別の車を測らないため）
@@ -281,15 +305,15 @@ for preset_id in targets:
     cases = 0
     held = 0
     inconsistent = 0
-    for pts in spawn_cases(world, index, rng, routes[:spawned]):
+    for r in spawn_cases(world, index, rng, routes[:spawned]):
         if cases >= CASES:
             break
-        sig = behind_start(index, pts)
+        sig = behind_start(index, np.asarray(r.points, dtype=np.float64))
         if sig < 0:
             continue
         cases += 1
         force_phases(world, {sig})
-        world.install_route(slot, pts.astype(np.float32))
+        world.install_route(slot, r)
         inconsistent += int(not consistent(world, slot))
         if drive(env, slot, 20) <= 0.5:
             held += 1
@@ -319,8 +343,7 @@ for preset_id in targets:
             route = world.route_between((x, y), far_node(index, rng, x, y), heading=h, speed=0.0)
             if route is None:
                 continue
-            pts = np.asarray(route, dtype=np.float64)
-            if kind == "before" and not found_near_start(pts, s):
+            if kind == "before" and not starts_on_approach(index, route, s):
                 before_skipped += 1
                 continue
             world.fleet.reset_slot(slot, x, y, h)
@@ -328,7 +351,7 @@ for preset_id in targets:
                 force_phases(world, {int(i)})
             else:
                 force_phases(world, same_phase(data, s))
-            world.install_route(slot, pts.astype(np.float32), keep_pose=True)
+            world.install_route(slot, route, keep_pose=True)
             inconsistent += int(not consistent(world, slot))
             if kind == "past":
                 past_cases += 1
@@ -353,7 +376,7 @@ for preset_id in targets:
         f"停止線の {BEFORE_LINE_M:.1f}m 手前から経路を作り直しても、赤なら停止線を越えない",
         before_cases > 0 and before_crossed == 0,
         f"{before_cases} 件のうち越えた {before_crossed} 件（同じ交差点・同じ群の灯器を赤に固定。"
-        f"広い道路や経路の往復で、始点の近くに信号を拾えない {before_skipped} 件は対象外）",
+        f"並んで走る別の道から経路が始まった {before_skipped} 件は対象外）",
     )
     check(
         "経路を据え付けた直後、速度の上限と信号無視の判定が同じ信号を見る",

@@ -223,7 +223,7 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
   "weather": {                    // いま効いている天候（weatherAuto の間はサーバーが決める）
     "rain": 0.35,                 // 雨の強さ 0.0〜1.0
     "fog": 0.0,                   // 霧の濃さ 0.0〜1.0
-    "visibility": 120.0           // 有効視程 [m]。擬似カメラと正解ラベルが共有する
+    "visibility": 120.0           // 有効視程 [m]（透過率が 5% に落ちる距離）。擬似カメラと正解ラベルが共有する
   },
   "signals": [0, 2, 2, 1, ...],  // map.signals と同じ並び。0=青 / 1=黄 / 2=赤
   "detections": {                 // 画像認識の検出結果（キーは車両スロット番号の文字列）
@@ -529,7 +529,8 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
 | `DETECTOR_TRAINING` | 認識器の学習中に `load_map` が来た（ジョブが握っているマップと画面がずれるため断る） |
 
 **介入（車両追加・障害物設置）の失敗は `error` ではなく `status` メッセージの
-`message` で返す。** 「スロットが満杯」「その地点から到達可能な経路が無い」
+`message` で返す。** 「スロットが満杯」「その地点から 25m 以内に道路が無い」
+「その地点のすぐ近くに別の車両がいる」「その地点から到達可能な経路が無い」
 「障害物が上限」はいずれも利用者の操作に対する説明であって、
 接続やプロトコルの異常ではないため。フロントは `status.message` を
 そのまま画面に出せばよい。
@@ -622,6 +623,10 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
 `attributeAccuracy` は「検出できたもののうち灯色・規制速度まで合っていた割合」で、
 属性を持たないクラス（車両・障害物・車線）では `attributeTotal` が 0 になる。
 
+**学習した認識器が検証に通らなかったとき（読み直せない・何も検出しない）は、`state` が `error` で
+終わり、`detector.keras` は差し替えない**（前の認識器を使い続ける）。`message` と `warning` に理由が入る。
+実用モードの間に `start_detector_training` が来たときは始めず、理由を `status.message` で返す。
+
 `model.inUse` は**ファイルがあるか**ではなく**いま実際に使っているか**である。
 マップを読み込んだ瞬間（`SimulationEnv` が認識器を読むとき）や、学習完了後の
 載せ替えで変わる。**ジョブが動いていなくても変わりうる**ので、配信側は
@@ -692,7 +697,7 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
 ```jsonc
 { "type": "load_map",     "presetId": "ginza" }
 { "type": "set_params",   "params": { "vehicleCount": 5 } }   // 部分更新。渡したキーのみ反映
-{ "type": "spawn_vehicle","x": 10.0, "y": -20.0 }             // 最寄りの道路上にスナップされる
+{ "type": "spawn_vehicle","x": 10.0, "y": -20.0 }             // 最寄りの道路上にスナップされる。出せなければ断り、別の場所には出さない
 { "type": "despawn_vehicle", "id": 2 }
 { "type": "add_obstacle", "x": 10.0, "y": -20.0, "radius": 0.5 }
 { "type": "remove_obstacle", "id": 3 }
