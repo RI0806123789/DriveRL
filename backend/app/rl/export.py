@@ -81,8 +81,7 @@ class InferencePolicy(nn.Module):
 
     def forward(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Args: obs (B, obs_dim) -> Returns: (action (B, action_dim), value (B,))"""
-        mu = self.mu_head(self.policy_trunk(obs))
-        action = torch.clamp(mu, -1.0, 1.0)
+        action = torch.tanh(self.mu_head(self.policy_trunk(obs)))
         value = self.value_head(self.value_trunk(obs)).squeeze(-1)
         return action, value
 
@@ -213,8 +212,8 @@ def build_metadata(
                     "scaleToPhysical": f"steer * {config.MAX_STEER} [rad]",
                 },
             ],
-            "note": "TorchScript 版と Keras 版はいずれも分布の平均を [-1, 1] にクリップした"
-            "決定論的な行動を返す。学習時と同じ確率的な行動が欲しい場合は "
+            "note": "TorchScript 版と Keras 版はいずれも分布の平均（tanh で [-1, 1] に収めたもの）を"
+            "決定論的な行動として返す。学習時と同じ確率的な行動が欲しい場合は "
             "policy.logStd を使って Normal(action, exp(logStd)) からサンプリングすること。",
         },
         "policy": {
@@ -294,7 +293,7 @@ def _build_keras_model(trainer: Any):
         return x
 
     action = keras.layers.Dense(
-        action_dim, activation="hard_tanh", name="action"
+        action_dim, activation="tanh", name="action"
     )(trunk(inputs, "policy"))
     value_dense = keras.layers.Dense(1, activation=None, name="value")(trunk(inputs, "value"))
     value = keras.layers.Reshape((), name="value_squeezed")(value_dense)

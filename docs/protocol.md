@@ -325,10 +325,12 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
   バックエンドは追従対象（フロント専用の概念）を知らないため、
   絞るには追従対象を伝えるメッセージが要る。代表的な 1 台 8 件で 639B、
   8 台で 5,153B/frame ＝ 20Hz なら 100.6KB/s のうち 12.5KB/s しか読まれていない
-- 座標は擬似カメラの正規化画像座標。**擬似カメラはフロントの運転席カメラと同じ
-  内部パラメータ**（視野角 68 度、前方オフセット 0.35m、右オフセット 0.36m、
-  視点高さ 1.22m）で描いているため、`box` の値に画面の幅・高さを掛けるだけで
-  運転席カメラの映像へそのまま重ねられる
+- 座標は擬似カメラの正規化画像座標（192×144・**水平**視野角 68 度）。視点の位置は
+  フロントの運転席カメラと同じ（前方オフセット 0.35m、右オフセット 0.36m、
+  視点高さ 1.22m）だが、**画角は揃っていない**（運転席カメラは**垂直** 95 度・可変比）。
+  `box` の値に画面の幅・高さを掛けるだけでは重ならないので、フロントは
+  `frontend/src/scene/detectionProjection.ts` の `projectBox()` で tan 空間に換算して重ねる
+  （枠が出るのは画面中央の一部だけ）
 
 検出オブジェクト 1 個のフィールド:
 
@@ -389,8 +391,9 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
 `simSuspended` の間も WebSocket のコマンド・モデルの書き出し・進捗配信は動く。
 完了・中断すると**サーバー側が自動で降ろす**ので、利用者が再開させる操作は無い。
 
-`practicalMode` の間は `trainer.store()` / `maybe_update()` を呼ばない。全車が
-**その時点までに学習した重みの推論だけ**で走る（決定 5）。`metrics` は送られ続けるが
+`practicalMode` の間は `trainer.store()` / `maybe_update()` を呼ばない（決定 5）。
+方策の推論は毎ステップ回るが、**全車の行動は経路追従の操作で上書きされる**
+（`SimulationEnv.autopilot_all`。2.10）。`metrics` は送られ続けるが
 `updates` が増えないのが正常。
 
 ### 2.5 `params` — パラメータ変更が反映されたときに送信
@@ -483,7 +486,7 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
     {
       "name": "policy_trunk.0",   // パラメータ名から `.weight` を除いたもの
       "role": "policy",           // "policy" | "value"
-      "inDim": 57,
+      "inDim": 66,
       "outDim": 128,
       "weightAbsMean": 0.0421,    // |w| の平均。学習が進むと動く
       "weightStd": 0.0688,
@@ -594,7 +597,8 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
     "objectCellRatio": 0.107,
     "objectsPerImage": 5.1,
     "classCounts": { "TRAFFIC_LIGHT": 2700, "SPEED_SIGN": 600,
-                     "VEHICLE": 1800, "OBSTACLE": 4800, "LANE": 2400 },
+                     "VEHICLE": 1800, "OBSTACLE": 4800, "LANE": 2400,
+                     "PEDESTRIAN": 1500 },
     "weatherCounts": { "clear": 720, "drizzle": 300, "rain": 300,
                        "fog": 780, "heavy_fog": 300 }
   },
@@ -688,12 +692,14 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
   引き継ぎは**乗せる前（`approaching` / `waiting`）だけ**で、
   `riding` / `arrived` は車内に乗客がいるので従来どおり打ち切る（`phase` が `idle` へ戻る）。
   引き継ぎの上限は 3 回。尽きたら打ち切って `message` に理由が入る。
-- **徴用中の 1 台だけは PPO ではなく経路追従で走る**（`SimulationEnv._autopilot`）。
+- **実用モードの間は、徴用中の車も含めて全車が PPO ではなく経路追従で走る**
+  （`SimulationEnv.autopilot_all` → `_autopilot_slots` → `_autopilot`）。
   呼んでも来ないと実用モードが成立しないためで、**方策の出来に関わらず必ず迎えに来る**。
+  徴用中の車だけを経路追従にすると、止まったままの街の車が道を塞いでその後ろで詰まる。
   信号・規制速度・カーブ・前走車との車間・**歩行者との距離**・乗降地点での停車は
   `constrain_accel` がそのまま効くので、赤信号は守るし制限速度も超えない。
   歩行者には NPC だけでなく**利用者が操作する徒歩キャラも含む**（3 章 `player_pose`）。
-  徴用していない車両は従来どおり PPO の推論で走る。
+  開発モードへ戻すと全車が PPO の推論で走る。
 - 乗降地点の手前で止めるのに、赤信号と同じ速度上限（`u^2/(2a) + u·dt <= 距離`）を掛けている。
   実測の停車精度は**乗車地点 0.05m / 降車地点 0.12m**（銀座）。
 
@@ -738,7 +744,7 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
 asyncio 側から触ると更新中の重みを壊す）。
 入力（`obsDim`）と出力（`actionDim`）は変わらない。
 
-`start_detector_training` は擬似カメラ画像から信号・標識・車線・車両・障害物を
+`start_detector_training` は擬似カメラ画像から信号・標識・車線・車両・障害物・歩行者を
 検出する CNN を学習する（CLI の `backend/train_detector.py` と**同じ実装**を呼ぶ）。
 
 | `mode` | 何をするか | CLI での相当 |
@@ -886,7 +892,9 @@ TorchScript の入出力：
 forward(obs: float32[B, 66]) -> (action: float32[B, 2], value: float32[B])
 ```
 
-`action` は方策分布の平均を `[-1, 1]` にクリップした決定論的な行動。
+観測の次元（66）は `config.OBS_DIM` が出典で、書き出したメタデータの `model.obsDim` にも入る。
+
+`action` は方策分布の平均（学習時と同じく `tanh` で `[-1, 1]` に収めたもの）で、決定論的な行動。
 学習時と同じ確率的な行動が欲しい場合は、同梱の buffer `log_std` を使って
 `Normal(action, exp(log_std))` からサンプリングする。
 `log_std` は学習時と同じ可動域（`PPO_LOG_STD_MIN`〜`MAX` = -5.0〜0.0）へ
@@ -901,11 +909,11 @@ model(obs: float32[B, 66]) -> [action: float32[B, 2], value: float32[B]]
 
 `value` の Dense(1) 出力は素のままだと `[B, 1]` になるが、TorchScript 版
 （`squeeze(-1)`）と揃えるため `Reshape` で `[B]` に落としてある
-（code_review L-09。以前はここに shape の違いを明記するだけだった）。
+（以前はここに shape の違いを明記するだけだった）。
 
 `keras.saving.load_model()` で読める。**標準の Dense 層だけで構成しているので
-`custom_objects` は不要**。行動のクリップは `hard_tanh` 活性で表しており、
-`clip(x, -1, 1)` と厳密に一致する。`.keras` は zip なので、メタデータは
+`custom_objects` は不要**。行動の出力は `tanh` 活性で表しており、
+学習時の方策の平均（`rl/policy.py` の `_distribution`）と同じ式になる。`.keras` は zip なので、メタデータは
 `autoware_sim_metadata.json` として同じ zip に同梱している（Keras は自分が知っている
 エントリしか読まないため、追記しても読み込みには影響しない）。
 `log_std` は Keras の層として表せないので、このメタデータの `policy.logStd` に入れている。
@@ -1027,7 +1035,7 @@ TorchScript や Keras 形式を渡した場合は、その旨を説明する `40
 
 ---
 
-## 6. 設計上の約束（memo/memo_x.x/memo_1.0.md 5章の反映）
+## 6. 設計上の約束
 
 | 約束 | 実装箇所 |
 |---|---|
