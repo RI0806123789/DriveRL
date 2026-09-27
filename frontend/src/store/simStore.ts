@@ -79,7 +79,9 @@ export interface ViewToggles {
 /** サーバーから来たエラーを画面に出すためのログ 1 行 */
 export interface ErrorEntry {
   id: number
-  code: ErrorMessage['code']
+  /** `error` はサーバーの `error`、`notice` は `status` の知らせ（`notice: true`。数秒で消す） */
+  kind: 'error' | 'notice'
+  code: ErrorMessage['code'] | null
   message: string
   at: number
 }
@@ -212,6 +214,16 @@ export interface SimStore {
 
 let errorSeq = 0
 
+/** モードが変わるときに一緒に書き換える値。ボタン・init・status のどれで変わっても同じ後始末をする */
+function modeChange(s: Pick<SimStore, 'mode'>, mode: AppMode): Partial<SimStore> {
+  if (s.mode === mode) return { mode }
+  // 開発モードへ戻ったら車載カメラも自動操作も畳む（どちらも相手がいなくなる）。
+  // 実用モードへ入ったら 3D 画面のクリックでの介入をやめる（障害物を置いたままにしない）
+  return mode === 'dev'
+    ? { mode, taxiCameraOn: false, taxiAutoOn: false }
+    : { mode, interaction: 'none' }
+}
+
 export type { ThemeName }
 
 /** <html data-theme="..."> を書き換える。tokens.css の変数がこれで切り替わる */
@@ -271,9 +283,7 @@ export const useSimStore = create<SimStore>((set, get) => ({
 
   setPanelOpen: (open) => set({ panelOpen: open }),
   togglePanel: () => set((s) => ({ panelOpen: !s.panelOpen })),
-  // 開発モードへ戻ったら車載カメラも自動操作も畳む（どちらも相手がいなくなる）
-  setMode: (mode) =>
-    set(mode === 'dev' ? { mode, taxiCameraOn: false, taxiAutoOn: false } : { mode }),
+  setMode: (mode) => set((s) => modeChange(s, mode)),
   setTaxiCameraOn: (taxiCameraOn) => set({ taxiCameraOn }),
   setTaxiAutoOn: (taxiAutoOn) => set({ taxiAutoOn }),
   setTab: (tab) => set({ tab }),
@@ -302,7 +312,7 @@ export const useSimStore = create<SimStore>((set, get) => ({
         const init = msg as InitMessage
         resetFrameBuffer()
         const status = init.status ?? DEFAULT_STATUS
-        set({
+        set((s) => ({
           handshaked: true,
           protocolMismatch: init.protocolVersion !== PROTOCOL_VERSION,
           presets: init.presets ?? [],
@@ -311,11 +321,13 @@ export const useSimStore = create<SimStore>((set, get) => ({
           params: init.params ?? DEFAULT_PARAMS,
           status,
           // リロードしてもサーバーのモードへ戻す（配車の途中で開発モードに落とさない）
-          mode: status.practicalMode ? 'taxi' : 'dev',
+          ...modeChange(s, status.practicalMode ? 'taxi' : 'dev'),
           taxiCameraOn: false,
           taxiAutoOn: false,
           pendingPresetId: null,
-        })
+          // 再起動したサーバーはマップを持っていない（map を送ってこない）。前のマップを残さない
+          map: status.mapLoaded ? s.map : null,
+        }))
         const cfg = init.config ?? DEFAULT_CONFIG
         if (get().followTarget >= cfg.maxVehicles) set({ followTarget: 0 })
         break
@@ -342,16 +354,25 @@ export const useSimStore = create<SimStore>((set, get) => ({
 
       case 'status': {
         const { type: _t, ...payload } = msg
+        if (payload.notice && payload.message) {
+          // 受信ごとに別の項目にする（同じ文面が続けて届いても出し直す）
+          errorSeq += 1
+          const entry: ErrorEntry = {
+            id: errorSeq,
+            kind: 'notice',
+            code: null,
+            message: payload.message,
+            at: Date.now(),
+          }
+          set((s) => ({ errors: [...s.errors, entry].slice(-5) }))
+        }
         set((s) => ({
           status: payload as StatusPayload,
           pendingPresetId: payload.state === 'loading_map' ? s.pendingPresetId : null,
-          // モードはサーバーが正。トグルの楽観的更新はここで確定する
-          mode:
-            payload.practicalMode === undefined
-              ? s.mode
-              : payload.practicalMode
-                ? 'taxi'
-                : 'dev',
+          // モードはサーバーが正。トグルの楽観的更新はここで確定する（別のタブで変わったときも同じ後始末）
+          ...(payload.practicalMode === undefined
+            ? {}
+            : modeChange(s, payload.practicalMode ? 'taxi' : 'dev')),
         }))
         break
       }
@@ -402,6 +423,7 @@ export const useSimStore = create<SimStore>((set, get) => ({
         errorSeq += 1
         const entry: ErrorEntry = {
           id: errorSeq,
+          kind: 'error',
           code: msg.code,
           message: msg.message,
           at: Date.now(),

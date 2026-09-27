@@ -6,6 +6,7 @@ import type { ThreeEvent } from '@react-three/fiber'
 import * as THREE from 'three'
 import { send } from '../store/connection'
 import { frameBuffer } from '../store/frameBuffer'
+import { useSimStore } from '../store/simStore'
 import { usePalette } from './usePalette'
 
 /** バックエンドの config.MAX_OBSTACLES と揃える */
@@ -70,6 +71,8 @@ export function Obstacles({ castShadow }: ObstaclesProps) {
 
   /** パイロンをクリックしたらその 1 個だけ消す。 */
   const handleClick = (e: ThreeEvent<MouseEvent>) => {
+    // 実用モードでは介入しない（歩いていてパイロンをクリックしただけで消える）
+    if (useSimStore.getState().mode !== 'dev') return
     const index = e.instanceId
     if (index === undefined) return
     const target = frameBuffer.obstacles[index]

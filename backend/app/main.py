@@ -177,6 +177,7 @@ async def broadcast_loop() -> None:
             for notice in engine.drain_notices():
                 payload = {"type": "status", **engine.status_payload()}
                 payload["message"] = notice["message"]
+                payload["notice"] = True
                 await manager.broadcast(payload)
 
         except asyncio.CancelledError:
@@ -228,6 +229,7 @@ async def handle_load_map(preset_id: str) -> None:
                 "type": "status",
                 **engine.status_payload(),
                 "message": "別のマップを読み込み中です。完了までお待ちください",
+                "notice": True,
             }
         )
         return
@@ -365,6 +367,7 @@ async def handle_client_message(websocket: WebSocket, message: dict[str, Any]) -
         payload["message"] = (
             "描画を一時停止しました（学習は継続しています）" if paused else "描画を再開しました"
         )
+        payload["notice"] = True
         await manager.broadcast(payload)
         return
 
@@ -376,7 +379,14 @@ async def handle_client_message(websocket: WebSocket, message: dict[str, Any]) -
     if kind == "set_app_mode":
         mode = message.get("mode")
         if mode == "taxi" and engine.detector_job.running:
-            await send_json(websocket, _detector_training_error())
+            await send_json(
+                websocket,
+                _detector_training_error(
+                    "認識器の学習中は物理が止まっているため、実用モードに切り替えられません"
+                ),
+            )
+            # 画面はボタンを押した時点で切り替えている。status を送らないと戻らない
+            await send_json(websocket, {"type": "status", **engine.status_payload()})
             return
         if mode not in ("dev", "taxi"):
             await send_json(
@@ -449,7 +459,7 @@ async def handle_client_message(websocket: WebSocket, message: dict[str, Any]) -
         problem = engine.detector_job.start(request)
         if problem:
             await manager.broadcast(
-                {"type": "status", **engine.status_payload(), "message": problem}
+                {"type": "status", **engine.status_payload(), "message": problem, "notice": True}
             )
         await broadcast_detector(force=True)
         return
@@ -458,7 +468,7 @@ async def handle_client_message(websocket: WebSocket, message: dict[str, Any]) -
         problem = engine.detector_job.cancel()
         if problem:
             await manager.broadcast(
-                {"type": "status", **engine.status_payload(), "message": problem}
+                {"type": "status", **engine.status_payload(), "message": problem, "notice": True}
             )
         await broadcast_detector(force=True)
         return

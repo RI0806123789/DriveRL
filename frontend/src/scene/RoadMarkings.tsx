@@ -1,6 +1,6 @@
 /** 道路標示（区画線・停止線・横断歩道）。 */
 
-import { useEffect, useMemo } from 'react'
+import { useEffect, useLayoutEffect, useMemo } from 'react'
 import * as THREE from 'three'
 import type { MapEdge, MapSignal, Vec2 } from '../types/protocol'
 import { usePalette } from './usePalette'
@@ -207,25 +207,25 @@ export function RoadMarkings({ edges, signals }: RoadMarkingsProps) {
   const palette = usePalette()
   const geometry = useMemo(() => buildMarkings(edges, signals), [edges, signals])
 
+  // マテリアルは作り直さず色だけ差し替える
   const material = useMemo(
     () =>
       new THREE.MeshStandardMaterial({
-        color: palette.marking,
         roughness: 0.85,
         metalness: 0,
         polygonOffset: true,
         polygonOffsetFactor: -3,
         polygonOffsetUnits: -6,
       }),
-    [palette.marking],
+    [],
   )
+  useLayoutEffect(() => {
+    material.color.set(palette.marking)
+  }, [material, palette.marking])
 
-  useEffect(() => {
-    return () => {
-      geometry?.dispose()
-      material.dispose()
-    }
-  }, [geometry, material])
+  // 後始末は資源ごとに分ける。まとめると、片方が変わっただけで使用中のもう片方まで破棄する
+  useEffect(() => () => geometry?.dispose(), [geometry])
+  useEffect(() => () => material.dispose(), [material])
 
   if (!geometry) return null
 

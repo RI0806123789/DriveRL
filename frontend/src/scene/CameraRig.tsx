@@ -87,7 +87,8 @@ export const CameraRig = memo(function CameraRig({ bounds }: CameraRigProps) {
   }, [camera, mode, taxiWalk])
 
   // 実用モードでも、立つ場所が決まるまでは俯瞰へ置いておく
-  // （置かないとカメラが初期位置のまま街を向かず、真っ白な画面になる）
+  // （置かないとカメラが初期位置のまま街を向かず、真っ白な画面になる）。
+  // 歩き終えたとき（実用モードを抜けたとき）も置き直す。歩いている間も cameraMode は 'orbit' のまま
   useEffect(() => {
     if (mode !== 'orbit') return
     camera.position.copy(overview.position)
@@ -98,7 +99,7 @@ export const CameraRig = memo(function CameraRig({ bounds }: CameraRigProps) {
     } else {
       camera.lookAt(overview.target)
     }
-  }, [overview, camera, mode])
+  }, [overview, camera, mode, taxiWalk])
 
   useEffect(() => {
     initialised.current = false

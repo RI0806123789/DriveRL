@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 
+import { useSimStore } from '../store/simStore'
 import { feedSizeFor, taxiCamera } from '../store/taxiCamera'
 
 /** 「映像が来ているか」を見に行く間隔 [ms]。表示は 1 行なので粗くてよい */
@@ -17,10 +18,13 @@ export interface TaxiCameraViewProps {
 export function TaxiCameraView({ on, vehicleId, plate }: TaxiCameraViewProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const [live, setLive] = useState(false)
+  // パネルは畳んでもアンマウントされない。見えない間は貸さない（code_review F-10 と同じ約束）
+  const panelOpen = useSimStore((s) => s.panelOpen)
+  const shown = on && panelOpen
 
   // 転送先を貸し出す。閉じたら必ず返す（返さないと畳んだ裏で描き続ける）
   useEffect(() => {
-    if (!on || vehicleId < 0) return
+    if (!shown || vehicleId < 0) return
     const el = canvasRef.current
     if (!el) return
 
@@ -45,11 +49,11 @@ export function TaxiCameraView({ on, vehicleId, plate }: TaxiCameraViewProps) {
       taxiCamera.vehicleId = -1
       taxiCamera.live = false
     }
-  }, [on, vehicleId])
+  }, [shown, vehicleId])
 
   // 中身が変わったときだけ state を触る（code_review F-11）
   useEffect(() => {
-    if (!on) {
+    if (!shown) {
       setLive(false)
       return
     }
@@ -57,7 +61,7 @@ export function TaxiCameraView({ on, vehicleId, plate }: TaxiCameraViewProps) {
       setLive((prev) => (prev === taxiCamera.live ? prev : taxiCamera.live))
     }, LIVE_POLL_MS)
     return () => window.clearInterval(timer)
-  }, [on])
+  }, [shown])
 
   return (
     <div className="taxi-camera" data-on={on ? 'true' : 'false'} aria-hidden={!on}>

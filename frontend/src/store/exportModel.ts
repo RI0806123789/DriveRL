@@ -1,5 +1,7 @@
 /** 学習済みモデルの書き出し（ダウンロード）と読み込み（アップロード）。 */
 
+import { create } from 'zustand'
+
 export type ExportKind = 'checkpoint' | 'torchscript' | 'keras'
 
 export interface ExportOutcome {
@@ -132,6 +134,47 @@ export async function importModel(file: File): Promise<ImportOutcome> {
     return { ok: false, error: body.error ?? `読み込みに失敗しました（HTTP ${response.status}）` }
   }
   return body
+}
+
+export interface ModelTransferState {
+  /** 書き出し中の形式。null なら書き出していない */
+  exporting: ExportKind | null
+  exportResult: (ExportOutcome & { kind: ExportKind }) | null
+  importing: boolean
+  importResult: (ImportOutcome & { name: string }) | null
+}
+
+/** 書き出し・読み込みの進み具合と結果。**タブのローカル state に置かないこと** */
+// タブは key で作り直されるので、最大 120 秒の読み込みの途中で移ると結果が消え、二重に送れる
+export const useModelTransfer = create<ModelTransferState>(() => ({
+  exporting: null,
+  exportResult: null,
+  importing: false,
+  importResult: null,
+}))
+
+/** 書き出す。すでに書き出している間は何もしない */
+export async function startExport(kind: ExportKind): Promise<void> {
+  if (useModelTransfer.getState().exporting !== null) return
+  useModelTransfer.setState({ exporting: kind, exportResult: null })
+  try {
+    const outcome = await downloadModel(kind)
+    useModelTransfer.setState({ exportResult: { ...outcome, kind } })
+  } finally {
+    useModelTransfer.setState({ exporting: null })
+  }
+}
+
+/** 読み込む。すでに読み込んでいる間は何もしない */
+export async function startImport(file: File): Promise<void> {
+  if (useModelTransfer.getState().importing) return
+  useModelTransfer.setState({ importing: true, importResult: null })
+  try {
+    const outcome = await importModel(file)
+    useModelTransfer.setState({ importResult: { ...outcome, name: file.name } })
+  } finally {
+    useModelTransfer.setState({ importing: false })
+  }
 }
 
 /** バイト数を人が読める形にする */

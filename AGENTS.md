@@ -205,6 +205,10 @@ npm run verify      # 幾何検証と規約の検査（ブラウザ不要。一�
   （`signal_ahead_of_stop`）、霧の打ち切りは描く灯器の奥行きで測る。片方だけ変えると「描いた物体にラベルが無い」
 - **学習した認識器は一時ファイルで確かめてから差し替える**（`percep/trainer.py` の `fit_detector`）。
   保存先へ直接書くと、何も検出しない認識器が動いている認識器を上書きする
+- **補間の時刻は `state.clock.oldTime` を渡す**（`computeAlpha()` は表示の区間を進めるので、1 か所でも
+  `performance.now()` を渡すと、あとで描くカメラの区間まで進んで車内が跳ぶ）
+- **モードが変わるときの後始末は `store/simStore.ts` の `modeChange()` 1 か所**（ボタン・`init`・`status` の
+  どれで変わっても同じ）。`status.message` は `notice: true` の通だけバナーにする（`docs/protocol.md` 2.4）
 
 ---
 

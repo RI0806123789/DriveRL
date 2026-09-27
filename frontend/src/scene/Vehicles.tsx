@@ -126,6 +126,9 @@ const DOOR_CLOSE_SEC = 1.0
 /** これより遅ければ止まっているとみなしてドアを開ける [m/s] */
 const DOOR_STOPPED_MPS = 0.3
 
+/** 車輪の回転角を折り返す周期 [rad]（積み上げて精度を落とさない） */
+const TWO_PI = Math.PI * 2
+
 /** メーターの針が指す割合 0..1。POWER は慣性を付けた割合（`dampNeedle`）を渡す */
 function gaugeRatio(kind: (typeof GAUGE_KINDS)[number], speed: number, power: number): number {
   return kind === 'speed' ? speedRatio(speed) : power
@@ -231,12 +234,13 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
   useHiddenFromMirrors(pinRef)
 
   const pose = useMemo(createPose, [])
-  const spin = useRef(0)
 
   /** 車ごとの状態。台数が変わったら作り直す */
   const perCar = useMemo(
     () => ({
       tilt: Array.from({ length: count }, (): TiltState => createTiltState()),
+      /** 車輪の回転角 [rad]。**車ごとに**その車の速さで進める（止まっている車の車輪は回らない） */
+      spin: new Float64Array(count),
       lod: new Uint8Array(count).fill(LOD_FAR),
       door: new Float32Array(count),
       /** 直前に書いた値。変わったときだけ GPU へ送る（-1 は未送信） */
@@ -427,7 +431,6 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
     let highlightX = 0
     let highlightY = 0
     let hasHighlight = false
-    let rollSpeed = 0
 
     const hide = (key: PartKey, id: number, per: number) => {
       const mesh = get(key)!
@@ -452,7 +455,8 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
         continue
       }
       maxAny = id
-      if (rollSpeed === 0 || id === followTarget) rollSpeed = pose.speed
+      if (!paused) perCar.spin[id] = (perCar.spin[id] - (pose.speed * delta) / WHEEL_RADIUS) % TWO_PI
+      const spin = perCar.spin[id]
 
       // 傾き。**補間済みの速度**から加速度を出して均す（指令の throttle は 20Hz の段差なので使わない）
       if (pose.teleported) resetTilt(tilt, pose.speed)
@@ -528,7 +532,7 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
 
         // 車輪は路面に残す（傾きを掛けない）
         for (let k = 0; k < WHEELS_PER_VEHICLE; k++) {
-          composeWheelMatrix(scratch.transform, scratch.base, k, pose.steer, spin.current, scratch.out)
+          composeWheelMatrix(scratch.transform, scratch.base, k, pose.steer, spin, scratch.out)
           get('tyre')!.setMatrixAt(id * WHEELS_PER_VEHICLE + k, scratch.out)
           get('rim')!.setMatrixAt(id * WHEELS_PER_VEHICLE + k, scratch.out)
           composeCaliperMatrix(scratch.transform, scratch.base, k, pose.steer, CALIPER_ANGLE, scratch.out)
@@ -546,7 +550,7 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
         perCar.powerNeedle[id] = -1
         get('bodyFar')!.setMatrixAt(id, scratch.body)
         for (let k = 0; k < WHEELS_PER_VEHICLE; k++) {
-          composeWheelMatrix(scratch.transform, scratch.base, k, pose.steer, spin.current, scratch.out)
+          composeWheelMatrix(scratch.transform, scratch.base, k, pose.steer, spin, scratch.out)
           get('wheelFar')!.setMatrixAt(id * WHEELS_PER_VEHICLE + k, scratch.out)
         }
       }
@@ -644,8 +648,6 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
         highlightY = pose.y
       }
     }
-
-    if (!paused) spin.current -= (rollSpeed * delta) / WHEEL_RADIUS
 
     // 使っていない段は描かない（三角形も数えさせない）。台数の上限まで回さず、使っている最後の車までにする
     for (const p of VEHICLE_PARTS) {

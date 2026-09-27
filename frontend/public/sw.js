@@ -106,16 +106,25 @@ self.addEventListener('fetch', (event) => {
     return
   }
 
+  // stale-while-revalidate。**保存の waitUntil は同期的に先に呼ぶこと。** キャッシュがあると
+  //   respondWith の Promise がすぐ解決するので、そのあとネットワークの .then から呼ぶと
+  //   イベントがもう有効でなく InvalidStateError になる（保存が黙って捨てられる）
+  const network = fetch(request)
+    .then((fresh) => ({ fresh, copy: isCacheable(fresh) ? fresh.clone() : null }))
+    .catch(() => ({ fresh: null, copy: null }))
+  event.waitUntil(
+    network.then(async ({ copy }) => {
+      if (!copy) return
+      const cache = await caches.open(CACHE_NAME)
+      await cache.put(request, copy)
+    }).catch(() => {}),
+  )
   event.respondWith(
     (async () => {
       const cached = await caches.match(request)
-      const network = fetch(request)
-        .then((fresh) => {
-          putInCache(event, request, fresh)
-          return fresh
-        })
-        .catch(() => null)
-      return cached ?? (await network) ?? Response.error()
+      if (cached) return cached
+      const { fresh } = await network
+      return fresh ?? Response.error()
     })(),
   )
 })

@@ -65,7 +65,9 @@ export function StageHud() {
       const curr = frameBuffer.curr
       const now = performance.now()
       const dt = (now - lastSample.current.at) / 1000
-      const hz = dt > 0 ? (frameBuffer.received - lastSample.current.received) / dt : 0
+      // マップの切り替えや切断で received は 0 に戻る（resetFrameBuffer）。その区間は負にしない
+      const got = frameBuffer.received - lastSample.current.received
+      const hz = dt > 0 && got > 0 ? got / dt : 0
       lastSample.current = { received: frameBuffer.received, at: now }
 
       const next: HudState = {

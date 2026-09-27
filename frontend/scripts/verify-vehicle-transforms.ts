@@ -1886,6 +1886,20 @@ function countStrokes(rain: number, sec: number): number {
   advanceWiper(ws, 0.3, 0)
   check('雨がやんでも往復の途中なら振り切ってから止まる', wiperAngle(ws, 0.3) > 0 && wiperAngle(ws, 5) === 0)
 
+  // 雨がやんで間が空いた後に降り出しても、車ごとにずれて動き出す（最初の 1 回だけずらすと、2 回目以降はそろう）
+  const early = createWiperState(0)
+  const late = createWiperState(0.4)
+  for (const w of [early, late]) {
+    advanceWiper(w, 0, 0.95)
+    advanceWiper(w, 3, 0)
+    advanceWiper(w, 60, 0.95)
+  }
+  check(
+    '雨が降り直したとき、止まっていた車のワイパーがそろって動き出さない',
+    Math.abs(late.start - early.start - 0.4) < 1e-9,
+    `動き出しの差 ${(late.start - early.start).toFixed(2)} 秒（ずれ 0.40 秒）`,
+  )
+
   // 拭いた跡：ブレードが通った直後は 0 秒、届かない所は拭かれない
   const wa = createWiperState(0)
   advanceWiper(wa, 0, 0.95)

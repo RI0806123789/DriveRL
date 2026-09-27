@@ -90,7 +90,7 @@ export function ViewTab() {
             </div>
             <div className="m3-note">
               {cameraMode === 'driver'
-                ? '右ハンドル（日本仕様）の運転席から見た視点です。進路は太い矢印で示されます。自車の車体は視界を塞ぐため非表示になります。'
+                ? '右ハンドル（日本仕様）の運転席から見た視点です。進路は太い矢印で示されます。ダッシュボード・メーター・ハンドルなどの内装も描きます。'
                 : '車両の後方上空から追いかけます。'}
               <br />
               追従中は手動のカメラ操作を受け付けません。「シミュレーション」タブの
@@ -125,7 +125,7 @@ export function ViewTab() {
           label="信号機"
           description={
             map?.signals?.length
-              ? `${map.signals.length} 基。青25秒→黄3秒→全赤2秒で交互に変わります`
+              ? `${map.signals.length} 基。60 秒を現示の数で分け合い、青→黄3秒→全赤2秒で順に変わります（2 現示なら青25秒）`
               : '車両用の横型3灯式（運転者から見て左から青・黄・赤）'
           }
           checked={view.signals}
