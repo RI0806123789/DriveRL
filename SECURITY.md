@@ -3,7 +3,7 @@
 ## 前提となる利用形態
 
 DriveRL は **手元のマシンで単一ユーザーが動かす** ことを前提に作られています
-（`memo/memo.md` 5章「マルチユーザー対応: 単一ユーザー想定」）。
+（`memo/memo_x.x/memo_1.0.md` 5章「マルチユーザー対応: 単一ユーザー想定」。`memo/` は git 管理外）。
 
 そのため、次のものを **実装していません**。
 
@@ -66,8 +66,12 @@ PyTorch の `torch.load` は既定で pickle を実行するため、細工さ�
 `exports/` は最新 20 世代だけ残し、それより古いものは書き出しのたびに自動で消します
 （`backend/app/rl/export.py` の `MAX_EXPORT_FILES`）。読み込み前の退避（`before-import`）は
 この 20 世代に数えず、退避どうしで最新 10 世代を残します（`MAX_IMPORT_BACKUPS`）。
-`uploads/` は読み込みが終わった時点で削除します。失敗した場合も、サイズ超過で
-打ち切った部分ファイルも含めて必ず消します（`backend/app/main.py` の `/api/import`）。
+`uploads/` は読み込みが終わった時点で削除します。失敗した場合も必ず消します。
+消すのは**読み終えたエンジンスレッド**です（`backend/app/runtime/engine.py` の `_handle_import`）。
+HTTP 側で消すと、時間切れ（504）を返した後にエンジンが読みにいって失敗するためです。
+エンジンへ渡す前に打ち切ったもの（サイズ超過の部分ファイルなど）は `/api/import`
+（`backend/app/main.py`）がその場で消します。それでも残った残骸は、サーバーの起動時に
+新しい 3 件（`MAX_UPLOAD_FILES`）を残して片付けます。
 読み込み前の重みは `exports/` に `before-import` として退避されるので、
 `uploads/` を消しても取り戻せます。
 
