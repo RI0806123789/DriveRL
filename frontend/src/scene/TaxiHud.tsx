@@ -5,6 +5,7 @@ import { useEffect, useState } from 'react'
 import { frameBuffer } from '../store/frameBuffer'
 import { pedestrian } from '../store/pedestrian'
 import { useSimStore } from '../store/simStore'
+import { formatEta } from '../store/taxiFormat'
 import { isBoardablePhase, isRidingPhase } from '../types/protocol'
 
 /** ポーリング間隔 [ms]。pedestrian は 60fps で動くので、表示だけ間引いて読む */
@@ -28,14 +29,6 @@ function readSample(vehicleId: number): HudSample {
 
 function same(a: HudSample, b: HudSample): boolean {
   return a.locked === b.locked && a.aimed === b.aimed && a.speedKph === b.speedKph
-}
-
-/** 残り時間を「1 分 20 秒」の形にする */
-export function formatEta(seconds: number): string {
-  if (!Number.isFinite(seconds) || seconds <= 0) return 'まもなく'
-  const total = Math.round(seconds)
-  if (total < 60) return `${total} 秒`
-  return `${Math.floor(total / 60)} 分 ${total % 60} 秒`
 }
 
 export function TaxiHud() {

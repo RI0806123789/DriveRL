@@ -2,7 +2,10 @@
 /memo
 /data
 
-# --- モデルの重みファイル ---
+# -- AI Agent --
+.claude
+
+# --- model weights files ---
 *.pt
 *.keras
 *.torchscript.pt
@@ -14,7 +17,7 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 
-# --- 生成データ（OSM キャッシュ・学習チェックポイント・書き出し・認識器）---
+# --- backend data ---
 backend/data/
 
 # --- Node (frontend) ---
@@ -22,10 +25,10 @@ frontend/node_modules/
 frontend/dist/
 *.local
 
-# --- 環境変数 ---
+# --- environment variables ---
 .env
 
-# --- エディタ / OS ---
+# --- editor / OS ---
 .vscode/
 .idea/
 Thumbs.db

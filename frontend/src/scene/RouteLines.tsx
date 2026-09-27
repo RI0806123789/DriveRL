@@ -30,7 +30,7 @@ export function RouteLines({ showRoutes, showGoals, maxVehicles }: RouteLinesPro
   const lastRouteVersion = useRef(-1)
   /** id -> 生成済みジオメトリ。React の外で持ち、差分だけ差し替える */
   const held = useRef<Map<number, HeldEntry>>(new Map())
-  /** 解放待ちのジオメトリ。useFrame の中で即 dispose すると、React が */
+  /** 解放待ちのジオメトリ。反映前の描画で作り直させないよう、コミット後の useEffect でまとめて解放する */
   const pendingDispose = useRef<THREE.BufferGeometry[]>([])
 
   const retire = (entry: RouteEntry | undefined) => {

@@ -8,8 +8,6 @@ export const FEED_MAX_H = 720
 export interface TaxiCameraLink {
   /** スマホ画面側の 2D キャンバス。出していない間は null */
   canvas: HTMLCanvasElement | null
-  /** 映す車両スロット。-1 なら映さない */
-  vehicleId: number
   /** 直近で 1 枚でも転送できたか（「接続中」の表示に使う） */
   live: boolean
   /** 描いてほしい解像度。**表示側が実寸×dpr で入れる**（荒さの出どころはここ） */
@@ -19,7 +17,6 @@ export interface TaxiCameraLink {
 
 export const taxiCamera: TaxiCameraLink = {
   canvas: null,
-  vehicleId: -1,
   live: false,
   width: 640,
   height: 360,
@@ -34,10 +31,4 @@ export function feedSizeFor(cssWidth: number, cssHeight: number, dpr: number): [
     Math.min(FEED_MAX_W, Math.max(FEED_MIN_PX, w)),
     Math.min(FEED_MAX_H, Math.max(FEED_MIN_PX, h)),
   ]
-}
-
-export function resetTaxiCamera(): void {
-  taxiCamera.canvas = null
-  taxiCamera.vehicleId = -1
-  taxiCamera.live = false
 }

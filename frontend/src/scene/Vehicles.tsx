@@ -192,6 +192,8 @@ function makeGeometries(count: number) {
       doorChrome: attr('chrome', 'instanceDoor', 1, 1),
       doorGlass: attr('glass', 'instanceDoor', 1, 1),
       doorInterior: attr('interior', 'instanceDoor', 1, 1),
+      // ワイパーは開かない。ドアの差し込みが読む属性を 0 のまま持たせるだけ
+      doorWiper: attr('wiper', 'instanceDoor', 1, WIPERS_PER_VEHICLE),
       lampEmissive: attr('lamp', 'instanceEmissive', 3, LIGHTS_PER_VEHICLE),
       indicatorEmissive: attr('indicator', 'instanceEmissive', 3, INDICATORS_PER_VEHICLE),
       gaugeRows: attr('gauge', 'instanceGaugeRow', 1, GAUGES_PER_VEHICLE),

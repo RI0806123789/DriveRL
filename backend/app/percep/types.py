@@ -71,10 +71,6 @@ class CameraSpec:
         """水平方向の焦点距離 [px]。透視投影の基準になる。"""
         return (self.width * 0.5) / math.tan(math.radians(self.fov_deg) * 0.5)
 
-    @property
-    def aspect(self) -> float:
-        return self.width / max(self.height, 1)
-
     def to_wire(self) -> dict[str, Any]:
         """フロントが投影を再現できるだけの情報を返す。"""
         return {
@@ -197,7 +193,7 @@ SIGNAL_HEAD_Z = SIGNAL_MOUNT_HEIGHT + SIGNAL_HOUSING_H * 0.5
 SIGNAL_BEYOND_MARGIN = 2.0
 
 PEDESTRIAN_HEIGHT = config.PEDESTRIAN_HEIGHT
-PEDESTRIAN_HALF_WIDTH = config.PEDESTRIAN_WIDTH * 0.5
+PEDESTRIAN_HALF_WIDTH = config.PEDESTRIAN_RADIUS
 PEDESTRIAN_HEAD_Z = PEDESTRIAN_HEIGHT - 0.11
 PEDESTRIAN_HEAD_RADIUS = 0.105
 

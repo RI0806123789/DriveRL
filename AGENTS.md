@@ -24,6 +24,7 @@ Three.js で 3D 描画・介入できるシミュレーターです。
 | `docs/protocol.md` | **フロント ↔ バックの唯一の契約**（WebSocket メッセージ・座標系）|
 | `backend/app/contracts.py` | **バックエンド内部の契約**。`map` / `sim` / `rl` / `runtime` / `percep` はここ経由でのみやり取りする |
 | `SECURITY.md` | モデルの読み込み・外部通信・ディスク書き込みの方針と「やってはいけないこと」 |
+| `docs/system-flow.drawio` | システム全体のフロー図（draw.io・9 ページ）。起動・マップ読込・メインループ・観測・配信・介入・歩行者・実用モード |
 
 `docs/protocol.md` / `frontend/src/types/protocol.ts` / `backend/app/contracts.py` の 3 つは
 **セットで直すこと。** 片方だけ変えると、型チェックは通るのに実行時に食い違います。
@@ -216,14 +217,16 @@ npm run verify      # 幾何検証と規約の検査（ブラウザ不要。一�
 
 `memo/` は **`.gitignore` されています**（`.gitignore` の `/memo`）。開発者の手元にしかありません。
 
-- `memo/code_review.md` — 過去のレビュー指摘が番号付き（`B` / `F` / `X` / `P` / `Q` / `R` / `W` /
-  `L` / `M` / `C` / `S` / `D` / `A` / `U`）で蓄積されている。コード中のコメントはこの番号を引いて
-  参照している（例: 「`code_review B-15`」）
+- `memo/code_review.md` — 過去のレビュー指摘が番号付き（英大文字 1 字と連番。例: `B-15` / `Z-05`。
+  接頭辞は追補のたびに増えるので、一覧はここに書かない）で蓄積されている。コード中のコメントは
+  この番号を引いて参照している（例: 「`code_review B-15`」）
 - `memo/memo_x.x/memo_1.0.md` — 要件定義。**コード中の「memo 5章」という参照の出典**で、
   `contracts.py`（2 か所）/ `map/loader.py` / `runtime/engine.py` の docstring から参照されている
   （件数の出典は `grep -rn "memo [0-9]章" backend/app`）
 - `memo/memo_x.x/memo_2.0.md` — 実用モード（自動運転タクシー）の要件定義
-- `memo/system_flow/system-flow.drawio` — システム構成図（6 ページ）
+
+システム構成図は以前 `memo/system_flow/` にありましたが、いまは `docs/system-flow.drawio`
+としてリポジトリに入っています（上の「最初に読むもの」）。
 
 **クローンしただけの環境にこれらは存在せず、その参照は追えません。**
 その場合は `README.md`「設計上の要点」と `CLAUDE.md` の不変条件を一次情報としてください。

@@ -110,9 +110,12 @@ const DEFAULT_PARAMS: SimParams = {
   weatherAuto: false,
 }
 
+/** `init` の `config.maxPedestrians` が無い（古いサーバー）ときの上限 */
+export const DEFAULT_MAX_PEDESTRIANS = 64
+
 const DEFAULT_CONFIG: SimConfig = {
   maxVehicles: 8,
-  maxPedestrians: 64,
+  maxPedestrians: DEFAULT_MAX_PEDESTRIANS,
   simHz: 20,
   obsDim: 66,
   actionDim: 2,

@@ -171,7 +171,8 @@ export function makeWiperGeometry(): THREE.BufferGeometry {
     b.geometry(g)
     g.dispose()
   }
-  return b.build()
+  // 黒い樹脂（ドアの差し込みあり）で描くので、回らない印（すべて 0）を持たせる
+  return b.build({ door: true })
 }
 
 /** ワイパー 1 本の姿勢（車両ローカル）。`angle` は振り上げた角度 */

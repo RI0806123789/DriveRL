@@ -284,7 +284,7 @@ function SceneLights() {
   )
 }
 
-/** three の DirectionalLight は **target がシーングラフに入っていないと */
+/** 日差し。three の DirectionalLight は target がシーングラフに無いと原点を向くので、target をシーンへ置いて差し込む */
 function SunLight({ cx, cz, extent, castShadow }: SunLightProps) {
   const palette = usePalette()
   const light = useRef<THREE.DirectionalLight>(null)

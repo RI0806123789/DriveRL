@@ -8,9 +8,8 @@ export const EYE_HEIGHT = 1.58
 /** 目を前へ出す量 [m]。頭のメッシュがニアクリップに被らない距離 */
 export const EYE_FORWARD = 0.16
 
-/** 歩く速さ [m/s] と、走る（Shift）ときの倍率 */
+/** 歩く速さ [m/s] */
 export const WALK_SPEED_MPS = 2.2
-export const RUN_MULTIPLIER = 2.1
 
 /** 手足の振れ幅 [rad] */
 export const SWING_MAX_RAD = 0.62
@@ -99,12 +98,12 @@ export function npcHueOffset(id: number): number {
   return (id * 0.6180339887498949) % 1
 }
 
-/** 関節 1 つぶんの振り角を `LIMB_SWING` から引く */
 /** その関節を描く腕／脚インスタンスの列（0=左 / 1=右）。並び順に依存しない */
 export function limbSlot(index: number): number {
   return LIMB_JOINTS[index].side < 0 ? 0 : 1
 }
 
+/** 関節 1 つぶんの振り角を `LimbSwing` から引く */
 export function swingFor(index: number, swing: LimbSwing): number {
   const joint = LIMB_JOINTS[index]
   if (joint.kind === 'arm') return joint.side < 0 ? swing.armLeft : swing.armRight
