@@ -67,8 +67,8 @@ OBSTACLE_RADIUS = 0.35
 OBSTACLE_HEIGHT = 0.75
 
 PEDESTRIAN_HEIGHT = 1.68
-PEDESTRIAN_WIDTH = 0.52
 PEDESTRIAN_RADIUS = 0.26
+PEDESTRIAN_WIDTH = PEDESTRIAN_RADIUS * 2.0
 PEDESTRIAN_SPEED = 1.35
 PEDESTRIAN_SPEED_SPREAD = 0.35
 PEDESTRIAN_SIDEWALK_MARGIN = 1.7
@@ -100,18 +100,21 @@ OBS_PEDESTRIAN_DIM = OBS_PEDESTRIAN_COUNT * OBS_PEDESTRIAN_FIELDS
 
 OBS_FREESPACE_DIM = 9
 
-OBS_DIM = (
-    OBS_SELF_DIM
-    + OBS_GOAL_DIM
-    + OBS_ROUTE_DIM
-    + OBS_LANE_DIM
-    + OBS_SIGNAL_DIM
-    + OBS_SIGN_DIM
-    + OBS_VEHICLE_DIM
-    + OBS_OBSTACLE_DIM
-    + OBS_PEDESTRIAN_DIM
-    + OBS_FREESPACE_DIM
+# 観測ベクトルの連結順と区画の大きさ。percep/encoder.py の添字と書き出しのメタデータはここから導く
+OBS_LAYOUT: tuple[tuple[str, int], ...] = (
+    ("self", OBS_SELF_DIM),
+    ("goal", OBS_GOAL_DIM),
+    ("route", OBS_ROUTE_DIM),
+    ("lane", OBS_LANE_DIM),
+    ("signal", OBS_SIGNAL_DIM),
+    ("sign", OBS_SIGN_DIM),
+    ("vehicles", OBS_VEHICLE_DIM),
+    ("obstacles", OBS_OBSTACLE_DIM),
+    ("pedestrians", OBS_PEDESTRIAN_DIM),
+    ("freespace", OBS_FREESPACE_DIM),
 )
+
+OBS_DIM = sum(size for _name, size in OBS_LAYOUT)
 
 ACTION_DIM = 2
 

@@ -44,7 +44,7 @@ export interface ViewportRect {
 }
 
 
-/** 検出のバウンディングボックス（擬似カメラの正規化座標）を */
+/** 検出のバウンディングボックス（擬似カメラの正規化座標）をキャンバスの矩形へ写す。はみ出した分は 0〜1 に切り詰める */
 export function projectBox(
   box: readonly [number, number, number, number],
   aspect: number,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from typing import Sequence
 
@@ -12,6 +13,18 @@ from app.contracts import MapData, MapIndex, PedestrianSnapshot
 from app.sim.signals import RED
 
 __all__ = ["PedestrianCrowd", "SidewalkNetwork", "build_sidewalk_network"]
+
+logger = logging.getLogger("autoware_sim")
+
+_WARNED: set[str] = set()
+
+
+def _warn_once(key: str, message: str) -> None:
+    """同じ失敗を初回だけログに残す（code_review B-15）。"""
+    if key in _WARNED:
+        return
+    _WARNED.add(key)
+    logger.exception(message)
 
 #: 歩道の候補から外す短すぎるエッジ [m]。端点だけで構成される路地に溜まるのを防ぐ
 MIN_WALKABLE_M = 8.0
@@ -518,6 +531,10 @@ class PedestrianCrowd:
         try:
             snap_x, snap_y, edge_id, _heading = self.map_index.nearest_road_point(x, y)
         except Exception:
+            _warn_once(
+                "place_at",
+                "歩行者を置く道路を探せませんでした。車の近くへ回さずに続けます（初回のみ記録）",
+            )
             return False
         edge = self.net.index_of(int(edge_id))
         if edge < 0:

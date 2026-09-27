@@ -10,7 +10,7 @@ import numpy as np
 
 from app import config
 from app.contracts import MapIndex
-from app.percep.geometry import project_components
+from app.percep.geometry import eye_position, project_components
 from app.percep.types import (
     DEFAULT_CAMERA,
     PEDESTRIAN_HALF_WIDTH,
@@ -679,8 +679,13 @@ class PseudoCamera:
         heading = fleet.heading[slots].astype(np.float64)
         cos_h = np.cos(heading)
         sin_h = np.sin(heading)
-        eye_x = fleet.x[slots].astype(np.float64) + cos_h * self.spec.forward + sin_h * self.spec.right
-        eye_y = fleet.y[slots].astype(np.float64) + sin_h * self.spec.forward - cos_h * self.spec.right
+        eye_x, eye_y = eye_position(
+            fleet.x[slots].astype(np.float64),
+            fleet.y[slots].astype(np.float64),
+            cos_h,
+            sin_h,
+            self.spec,
+        )
 
         label = np.empty((n, h, w), dtype=np.uint8)
         label[:, : self._horizon_row, :] = LBL_SKY
@@ -861,17 +866,17 @@ class PseudoCamera:
         corners = world.fleet.corners()[active].astype(np.float64)
         k = active.size
 
-        cxw = corners[None, :, :, 0]
-        cyw = corners[None, :, :, 1]
-        rel_x = cxw - eye_x[:, None, None]
-        rel_y = cyw - eye_y[:, None, None]
-        fwd = rel_x * cos_h[:, None, None] + rel_y * sin_h[:, None, None]
-        lat = rel_x * sin_h[:, None, None] - rel_y * cos_h[:, None, None]
-
-        heights = np.array([0.0, config.VEHICLE_HEIGHT], dtype=np.float64) - self._eye_h
-        zc = self._cp * fwd[..., None] + self._sp * heights
-        yc = -self._sp * fwd[..., None] + self._cp * heights
-        xc = np.broadcast_to(lat[..., None], zc.shape)
+        # 車体の外接直方体の 8 頂点 (n, k, 4 隅, 2 高さ)
+        heights = np.array([0.0, config.VEHICLE_HEIGHT], dtype=np.float64)
+        u, v, zc = self._project(
+            corners[None, :, :, 0, None],
+            corners[None, :, :, 1, None],
+            heights,
+            eye_x[:, None, None, None],
+            eye_y[:, None, None, None],
+            cos_h[:, None, None, None],
+            sin_h[:, None, None, None],
+        )
 
         flat_zc = zc.reshape(n, k, -1)
         in_front = flat_zc > self._near
@@ -880,9 +885,8 @@ class PseudoCamera:
         if not visible.any():
             return None
 
-        safe = np.maximum(flat_zc, 1e-3)
-        u = self._cx + self._focal * xc.reshape(n, k, -1) / safe
-        v = self._cy - self._focal * yc.reshape(n, k, -1) / safe
+        u = u.reshape(n, k, -1)
+        v = v.reshape(n, k, -1)
         u0 = np.where(in_front, u, np.inf).min(axis=2)
         u1 = np.where(in_front, u, -np.inf).max(axis=2)
         v0 = np.where(in_front, v, np.inf).min(axis=2)

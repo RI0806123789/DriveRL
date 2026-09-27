@@ -5,7 +5,7 @@ import { useFrame } from '@react-three/fiber'
 import * as THREE from 'three'
 
 import { frameBuffer } from '../store/frameBuffer'
-import { useSimStore } from '../store/simStore'
+import { DEFAULT_MAX_PEDESTRIANS, useSimStore } from '../store/simStore'
 import type { NpcPedestrianState } from '../types/protocol'
 import { computeAlpha, createPedestrianPose, samplePedestrian } from './interpolation'
 import {
@@ -24,9 +24,6 @@ import {
   swingFor,
 } from './pedestrianGeometry'
 import { usePalette } from './usePalette'
-
-/** バックエンドの `config.MAX_PEDESTRIANS` と揃える */
-const MAX_PEDESTRIANS = 64
 
 /** 手足の本数（腕 2 本・脚 2 本） */
 const LIMBS_PER_SIDE = 2
@@ -56,6 +53,8 @@ export interface NpcPedestriansProps {
 export function NpcPedestrians({ castShadow }: NpcPedestriansProps) {
   const palette = usePalette()
   const renderPaused = useSimStore((s) => s.status.renderPaused)
+  // 描ける人数はサーバーの上限（`init` の `config.maxPedestrians`）に合わせる
+  const capacity = useSimStore((s) => s.config.maxPedestrians ?? DEFAULT_MAX_PEDESTRIANS)
 
   const headRef = useRef<THREE.InstancedMesh>(null)
   const torsoRef = useRef<THREE.InstancedMesh>(null)
@@ -122,7 +121,7 @@ export function NpcPedestrians({ castShadow }: NpcPedestriansProps) {
     const top = new THREE.Color(palette.pedestrianTop)
     const bottom = new THREE.Color(palette.pedestrianBottom)
     const c = scratch.color
-    for (let i = 0; i < MAX_PEDESTRIANS; i++) {
+    for (let i = 0; i < capacity; i++) {
       head.setColorAt(i, shade(skin, i, c))
       torso.setColorAt(i, shade(top, i, c))
       hip.setColorAt(i, shade(bottom, i, c))
@@ -134,7 +133,7 @@ export function NpcPedestrians({ castShadow }: NpcPedestriansProps) {
     for (const mesh of [head, torso, hip, arm, leg]) {
       if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true
     }
-  }, [palette, scratch])
+  }, [palette, scratch, capacity])
 
   useFrame((state) => {
     const head = headRef.current
@@ -166,7 +165,7 @@ export function NpcPedestrians({ castShadow }: NpcPedestriansProps) {
       for (const p of prevFrame) prev.set(p.id, p)
     }
 
-    const n = Math.min(people.length, MAX_PEDESTRIANS)
+    const n = Math.min(people.length, capacity)
     for (let i = 0; i < n; i++) {
       const p = people[i]
       samplePedestrian(p, prevFrame ? prev.get(p.id) : undefined, alpha, scratch.pose)
@@ -203,35 +202,35 @@ export function NpcPedestrians({ castShadow }: NpcPedestriansProps) {
     <group>
       <instancedMesh
         ref={headRef}
-        args={[resources.head, resources.skin, MAX_PEDESTRIANS]}
+        args={[resources.head, resources.skin, capacity]}
         count={0}
         frustumCulled={false}
         castShadow={castShadow}
       />
       <instancedMesh
         ref={torsoRef}
-        args={[resources.torso, resources.top, MAX_PEDESTRIANS]}
+        args={[resources.torso, resources.top, capacity]}
         count={0}
         frustumCulled={false}
         castShadow={castShadow}
       />
       <instancedMesh
         ref={hipRef}
-        args={[resources.hip, resources.bottom, MAX_PEDESTRIANS]}
+        args={[resources.hip, resources.bottom, capacity]}
         count={0}
         frustumCulled={false}
         castShadow={castShadow}
       />
       <instancedMesh
         ref={armRef}
-        args={[resources.arm, resources.top, MAX_PEDESTRIANS * LIMBS_PER_SIDE]}
+        args={[resources.arm, resources.top, capacity * LIMBS_PER_SIDE]}
         count={0}
         frustumCulled={false}
         castShadow={castShadow}
       />
       <instancedMesh
         ref={legRef}
-        args={[resources.leg, resources.bottom, MAX_PEDESTRIANS * LIMBS_PER_SIDE]}
+        args={[resources.leg, resources.bottom, capacity * LIMBS_PER_SIDE]}
         count={0}
         frustumCulled={false}
         castShadow={castShadow}

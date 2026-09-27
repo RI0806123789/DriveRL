@@ -2141,6 +2141,19 @@ console.log('='.repeat(70))
     check(`${name}：ドアの印は左後席ドアの範囲だけ`, stray === 0, `${stray} 頂点がはみ出す`)
     dg.dispose()
   }
+  // ワイパーは黒い樹脂（ドアの差し込みあり）で描く。印が無いと汎用の頂点属性の値で回りうる
+  {
+    const wg = makeWiperGeometry()
+    const flag = wg.attributes.doorPart
+    let worst = 0
+    for (let i = 0; flag && i < flag.count; i++) worst = Math.max(worst, Math.abs(flag.getX(i)))
+    check(
+      'ワイパー：ドアの印を全頂点に持ち、すべて 0',
+      !!flag && flag.count === wg.attributes.position.count && worst === 0,
+      flag ? `${flag.count} 頂点・最大 ${worst}` : '印が無い',
+    )
+    wg.dispose()
+  }
   check('蝶番はドアの前の縁（左側）', Math.abs(TAXI_DOOR_HINGE[0] - REAR_DOOR_X[1]) < 0.05 && TAXI_DOOR_HINGE[1] < 0)
   // シェーダー（vehicleMaterials の DOOR）と同じ式で回す
   const a = -TAXI_DOOR_OPEN

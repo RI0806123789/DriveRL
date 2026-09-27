@@ -199,12 +199,6 @@ class MapIndexImpl:
 
         return grid
 
-    def _iter_edge_lines(self):
-        for edge_id, line in zip(self._edge_line_ids, self._edge_lines):
-            edge = self._edges_by_id.get(edge_id)
-            if edge is not None:
-                yield edge, line
-
     def nearest_node(self, x: float, y: float) -> int:
         """指定座標に最も近い道路ノード ID を返す。"""
         if self._node_xy.shape[0] == 0:
@@ -689,33 +683,6 @@ class MapIndexImpl:
                     "建物とのバッチ衝突判定に失敗しました。衝突なしとして続行します"
                 )
         return out
-
-    def collides_with_building(self, corners: np.ndarray) -> bool:
-        """車両の外接矩形（shape (4, 2)）が建物と重なるかを厳密に判定する。"""
-        if self._building_tree is None:
-            return False
-        pts = np.asarray(corners, dtype=np.float64).reshape(-1, 2)
-        if pts.shape[0] < 3:
-            return False
-        try:
-            rect = Polygon(pts)
-        except Exception:
-            _warn_once(
-                "collision_polygon",
-                "車両の外接矩形を作れませんでした。衝突なしとして扱います（初回のみ記録）",
-            )
-            return False
-        if rect.is_empty:
-            return False
-        if not rect.is_valid:
-            _warn_once(
-                "collision_polygon_invalid",
-                "車両の外接矩形が不正です（角に NaN / inf が入った可能性）。"
-                "衝突判定の結果は保証されません（初回のみ記録）",
-            )
-            return False
-        found = self._building_tree.query(rect, predicate="intersects")
-        return int(np.asarray(found).size) > 0
 
 
 def build_map_index(data: MapData) -> MapIndexImpl:

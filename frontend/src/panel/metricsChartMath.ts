@@ -37,7 +37,6 @@ export interface ChartOptions {
   showZero?: boolean
 }
 
-/** 値の列から SVG のパスと目盛りを作る。 */
 /** 添字 `i` のバケツ中心の x。 */
 export function xForIndex(i: number, n: number): number {
   if (n <= 1) return 0
