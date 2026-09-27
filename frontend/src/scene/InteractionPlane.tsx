@@ -42,7 +42,9 @@ export function InteractionPlane({ bounds }: InteractionPlaneProps) {
   const cursor = useRef<{ x: number; z: number } | null>(null)
   const ghostRef = useRef<THREE.Group>(null)
 
-  const active = interaction !== 'none' && mapLoaded
+  // 実用モードでは介入しない（案内どおり 3D 画面をクリックするたびに障害物が置かれる）
+  const devMode = useSimStore((s) => s.mode === 'dev')
+  const active = interaction !== 'none' && mapLoaded && devMode
 
   const handlePointerDown = (e: ThreeEvent<PointerEvent>) => {
     down.current = { x: e.nativeEvent.clientX, y: e.nativeEvent.clientY, t: performance.now() }

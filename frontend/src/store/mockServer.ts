@@ -46,6 +46,17 @@ function makeRng(seed: number) {
   }
 }
 
+const MASK64 = (1n << 64n) - 1n
+
+/** 交差点のキーを 0〜1 の実数へ散らす（backend/app/sim/signals.py の `_scatter01`。splitmix64 の finalizer） */
+function scatter01(key: number): number {
+  let z = (BigInt.asUintN(64, BigInt(key)) + 0x9e3779b97f4a7c15n) & MASK64
+  z = ((z ^ (z >> 30n)) * 0xbf58476d1ce4e5b9n) & MASK64
+  z = ((z ^ (z >> 27n)) * 0x94d049bb133111ebn) & MASK64
+  z = z ^ (z >> 31n)
+  return Number(z >> 11n) / 2 ** 53
+}
+
 const GRID_N = 9
 const GRID_SPACING = 100
 const GRID_HALF = ((GRID_N - 1) * GRID_SPACING) / 2
@@ -705,7 +716,8 @@ class MockServer {
 
   private sendStatus(patch?: Partial<StatusPayload>): void {
     if (patch) this.status = { ...this.status, ...patch }
-    this.send({ type: 'status', ...this.status })
+    // message を渡したときは 1 回きりの知らせ（本物のサーバーの notice と同じ扱い）
+    this.send({ type: 'status', ...this.status, notice: patch?.message !== undefined })
   }
 
   private sendParams(): void {
@@ -933,7 +945,8 @@ class MockServer {
       this.signalTiming.push({
         green,
         cycle,
-        offset: (sg.nodeId * 7919) % Math.max(1, Math.floor(cycle)),
+        // 整数の剰余で散らすと、番号が隣り合う交差点が 1 秒ずつずれた「波」になる（CLAUDE.md）
+        offset: scatter01(sg.nodeId) * cycle,
         shift: slot * sg.group,
       })
     }
@@ -1556,7 +1569,8 @@ class MockServer {
           1,
           Math.min(MOCK_CONFIG.maxVehicles, Math.round(this.params.vehicleCount)),
         )
-        this.params.simSpeed = Math.max(0.25, Math.min(4, this.params.simSpeed))
+        // 値域は実機（contracts.SimParams の simSpeed）と同じ 0.25〜8
+        this.params.simSpeed = Math.max(0.25, Math.min(8, this.params.simSpeed))
         this.params.rewardOverspeed = Math.max(
           -1000,
           Math.min(0, this.params.rewardOverspeed),

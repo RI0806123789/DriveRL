@@ -92,6 +92,8 @@ export interface StatusPayload {
   /** 配車で徴用中の車両スロット。-1 なら無し */
   taxiVehicleId?: number
   message?: string
+  /** `message` が 1 回きりの知らせ（介入や配車を断った理由など）か。真なら画面にバナーで出す */
+  notice?: boolean
 }
 
 /** 2.1 init — 接続確立直後に 1 回だけ */

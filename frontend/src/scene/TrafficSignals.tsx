@@ -1,6 +1,6 @@
 /** 交通信号機（車両用・横型3灯式）の描画。 */
 
-import { useEffect, useMemo, useRef } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef } from 'react'
 import { useFrame } from '@react-three/fiber'
 import * as THREE from 'three'
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
@@ -31,21 +31,27 @@ export function TrafficSignals({ signals, nodes, castShadow }: TrafficSignalsPro
 
   const lampMeshRef = useRef<THREE.InstancedMesh>(null)
   const lastVersion = useRef(-1)
+  /** 灯火ごとに直前に塗った点灯状態（0=消灯 / 1=点灯 / 255=未塗り）。変わった灯火だけ塗り替える */
+  const lastLit = useMemo(() => new Uint8Array(lamps.length).fill(255), [lamps])
 
   useEffect(() => {
     lastVersion.current = -1
-  }, [colorOff])
+    lastLit.fill(255)
+  }, [colorOff, lastLit])
 
+  // マテリアルは作り直さず色だけ差し替える（作り直すと使用中のものまで破棄することになる）
   const structureMaterial = useMemo(
     () =>
       new THREE.MeshStandardMaterial({
-        color: palette.signalHousing,
         roughness: 0.72,
         metalness: 0.35,
         side: THREE.DoubleSide,
       }),
-    [palette.signalHousing],
+    [],
   )
+  useLayoutEffect(() => {
+    structureMaterial.color.set(palette.signalHousing)
+  }, [structureMaterial, palette.signalHousing])
 
   const lampMaterial = useMemo(
     () => new THREE.MeshBasicMaterial({ toneMapped: false, vertexColors: true }),
@@ -54,14 +60,16 @@ export function TrafficSignals({ signals, nodes, castShadow }: TrafficSignalsPro
 
   const lampGeometry = useMemo(() => createLampGeometry(), [])
 
-  useEffect(() => {
-    return () => {
-      structure?.dispose()
+  // 後始末は資源ごとに分ける。まとめると、どれか 1 つが変わっただけで使用中の残りまで破棄する
+  useEffect(() => () => structure?.dispose(), [structure])
+  useEffect(
+    () => () => {
       structureMaterial.dispose()
       lampMaterial.dispose()
       lampGeometry.dispose()
-    }
-  }, [structure, structureMaterial, lampMaterial, lampGeometry])
+    },
+    [structureMaterial, lampMaterial, lampGeometry],
+  )
 
   useEffect(() => {
     const mesh = lampMeshRef.current
@@ -80,7 +88,8 @@ export function TrafficSignals({ signals, nodes, castShadow }: TrafficSignalsPro
     if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true
     mesh.computeBoundingSphere()
     lastVersion.current = -1
-  }, [lamps])
+    lastLit.fill(255)
+  }, [lamps, lastLit])
 
   useFrame(() => {
     const mesh = lampMeshRef.current
@@ -88,14 +97,19 @@ export function TrafficSignals({ signals, nodes, castShadow }: TrafficSignalsPro
     if (frameBuffer.signalVersion === lastVersion.current) return
     lastVersion.current = frameBuffer.signalVersion
 
+    // 変わった灯火だけ塗り替える（金沢は 2,528 基 × 3 灯あり、どこかの灯器はほぼ毎回変わる）
     const phases = frameBuffer.signals
+    let changed = false
     for (let i = 0; i < lamps.length; i++) {
       const lamp = lamps[i]
       const phase = phases[lamp.signalIndex]
-      const lit = phase !== undefined && phase === lamp.role
+      const lit = phase !== undefined && phase === lamp.role ? 1 : 0
+      if (lastLit[i] === lit) continue
+      lastLit[i] = lit
       mesh.setColorAt(i, lit ? PHASE_COLORS[lamp.role] : colorOff)
+      changed = true
     }
-    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true
+    if (changed && mesh.instanceColor) mesh.instanceColor.needsUpdate = true
   })
 
   if (signals.length === 0) return null

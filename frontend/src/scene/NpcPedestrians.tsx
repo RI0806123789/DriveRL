@@ -136,7 +136,7 @@ export function NpcPedestrians({ castShadow }: NpcPedestriansProps) {
     }
   }, [palette, scratch])
 
-  useFrame(() => {
+  useFrame((state) => {
     const head = headRef.current
     const torso = torsoRef.current
     const hip = hipRef.current
@@ -144,8 +144,9 @@ export function NpcPedestrians({ castShadow }: NpcPedestriansProps) {
     const leg = legRef.current
     if (!head || !torso || !hip || !arm || !leg) return
 
-    // 表示の区間を先に進めてから prev / curr を読む（逆だと別の区間の係数で補間する）
-    const alpha = computeAlpha(performance.now(), renderPaused)
+    // 表示の区間を先に進めてから prev / curr を読む（逆だと別の区間の係数で補間する）。
+    // 時刻はそのフレームで共通の oldTime（後の時刻を渡すと、あとで描くカメラの区間まで進む）
+    const alpha = computeAlpha(state.clock.oldTime, renderPaused)
     const curr = frameBuffer.curr
     const people = curr?.pedestrians
     if (!people || people.length === 0) {

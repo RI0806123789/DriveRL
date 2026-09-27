@@ -602,6 +602,8 @@ export function ModelTab() {
             .venv\Scripts\python.exe train_detector.py
             {collects && ` --preset ${effectivePresetId ?? 'ginza'}`}
             {collects && ` --samples ${samples} --seed ${seed}`}
+            {collects && !weatherMix && ' --no-weather'}
+            {collects && !focusWeak && ' --no-focus'}
             {trains && ` --epochs ${epochs} --batch-size ${batchSize} --width ${width}`}
             {mode === 'collect' && ' --collect-only'}
             {mode === 'train' && ' --train-only'}

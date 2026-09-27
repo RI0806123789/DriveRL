@@ -74,7 +74,9 @@ export function advanceWiper(s: WiperState, now: number, rain: number): void {
   } else {
     const ready = s.start + s.period + (s.mode === WIPER_INT ? WIPER_INT_PAUSE : 0)
     if (now < ready) return
-    next = now - ready > period ? now : ready
+    // 間が空いていた（雨が降り直した・一時停止から戻った）ときも車ごとにずらす。
+    //   now のままだと、止まっていた全車が同じフレームで動き出す
+    next = now - ready > period ? now + s.offset : ready
   }
   s.prevStart = s.start
   s.prevPeriod = s.period

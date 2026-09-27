@@ -2,8 +2,8 @@
 
 import { useRef, useState } from 'react'
 import { send } from '../store/connection'
-import { downloadModel, formatBytes, importModel } from '../store/exportModel'
-import type { ExportKind, ExportOutcome, ImportOutcome } from '../store/exportModel'
+import { formatBytes, startExport, startImport, useModelTransfer } from '../store/exportModel'
+import type { ExportKind } from '../store/exportModel'
 import { useSimStore } from '../store/simStore'
 import { MetricsChart } from './MetricsChart'
 import { NetworkGraph } from './NetworkGraph'
@@ -38,40 +38,17 @@ export function LearningTab() {
   const connection = useSimStore((s) => s.connection)
 
   const [confirmReset, setConfirmReset] = useState(false)
-  const [exporting, setExporting] = useState<ExportKind | null>(null)
-  const [exportResult, setExportResult] = useState<(ExportOutcome & { kind: ExportKind }) | null>(
-    null,
-  )
-
-  const handleExport = async (kind: ExportKind) => {
-    if (exporting !== null) return
-    setExporting(kind)
-    setExportResult(null)
-    try {
-      const outcome = await downloadModel(kind)
-      setExportResult({ ...outcome, kind })
-    } finally {
-      setExporting(null)
-    }
-  }
+  // 実行中かどうかと結果はタブの外に置く（タブを替えても消えず、二重に送れない）
+  const exporting = useModelTransfer((s) => s.exporting)
+  const exportResult = useModelTransfer((s) => s.exportResult)
+  const importing = useModelTransfer((s) => s.importing)
+  const importResult = useModelTransfer((s) => s.importResult)
+  const handleExport = (kind: ExportKind) => void startExport(kind)
+  const handleImportFile = (file: File) => void startImport(file)
 
   const fileInputRef = useRef<HTMLInputElement>(null)
-  const [importing, setImporting] = useState(false)
-  const [importResult, setImportResult] = useState<(ImportOutcome & { name: string }) | null>(null)
-
-  const handleImportFile = async (file: File) => {
-    setImporting(true)
-    setImportResult(null)
-    try {
-      const outcome = await importModel(file)
-      setImportResult({ ...outcome, name: file.name })
-    } finally {
-      setImporting(false)
-    }
-  }
 
   const exportDisabled = usingMock || connection !== 'open'
-
 
   return (
     <>

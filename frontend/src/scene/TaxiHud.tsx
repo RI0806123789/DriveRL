@@ -70,7 +70,7 @@ export function TaxiHud() {
   } else if (taxi.phase === 'riding') {
     hint = `目的地まで ${formatEta(taxi.etaSeconds)}　[Space] で緊急停止`
   } else {
-    hint = 'スマホの「乗車する」から、地図で乗車地点と降車地点を選んでください'
+    hint = 'スマホの地図で行き先を選び「ここまで呼ぶ」を押してください（いまいる場所まで迎えに来ます）'
   }
 
   return (

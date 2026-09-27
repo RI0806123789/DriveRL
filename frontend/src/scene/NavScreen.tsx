@@ -6,6 +6,7 @@ import * as THREE from 'three'
 
 import { frameBuffer } from '../store/frameBuffer'
 import { useSimStore } from '../store/simStore'
+import { taxiCamera } from '../store/taxiCamera'
 import {
   createProjection,
   drawBuildings,
@@ -112,9 +113,10 @@ export function NavScreen() {
 
     // 車内にしか無いので、運転席から見ていない間は中身を描き直さない（俯瞰・追従
     // では見えない 256x160 のために、金沢なら道路 58,120 本・建物 35,607 棟を
-    // 12fps でなぞることになる）。車載カメラは運転席視点で撮るので、そちらも見る。
+    // 12fps でなぞることになる）。車載カメラは運転席視点で撮るので、映像を実際に
+    // 転送している間（キャンバスを借りている間。パネルを畳めば返る）も描く。
     // **位置合わせは上で済ませること** — 止めると車だけ動いて画面が取り残される
-    if (store.cameraMode !== 'driver' && !store.taxiCameraOn) {
+    if (store.cameraMode !== 'driver' && taxiCamera.canvas === null) {
       // 次に運転席へ戻ったとき、古い縮尺から寄り直さないよう捨てておく
       view.current = null
       return

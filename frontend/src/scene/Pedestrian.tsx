@@ -63,11 +63,15 @@ function isTypingTarget(target: EventTarget | null): boolean {
 }
 
 /** いま画面に出ているアクティブ車両を、当たり判定用の形で集める */
-function collectBlockers(out: VehicleBlocker[], pose: ReturnType<typeof createPose>): VehicleBlocker[] {
+function collectBlockers(
+  out: VehicleBlocker[],
+  pose: ReturnType<typeof createPose>,
+  nowMs: number,
+): VehicleBlocker[] {
   out.length = 0
+  const alpha = computeAlpha(nowMs, useSimStore.getState().status.renderPaused)
   const curr = frameBuffer.curr
   if (!curr) return out
-  const alpha = computeAlpha(performance.now(), useSimStore.getState().status.renderPaused)
   for (const v of curr.vehicles) {
     if (!v.active) continue
     if (!sampleVehicle(v.id, alpha, pose)) continue
@@ -307,7 +311,7 @@ export function Pedestrian() {
     }
   }, [gl])
 
-  useFrame((_state, delta) => {
+  useFrame((state, delta) => {
     const root = rootRef.current
     if (!root) return
 
@@ -326,7 +330,7 @@ export function Pedestrian() {
       }
     }
 
-    const blockers = collectBlockers(scratch.blockers, scratch.pose)
+    const blockers = collectBlockers(scratch.blockers, scratch.pose, state.clock.oldTime)
 
     if (!pedestrian.placed) {
       root.visible = false

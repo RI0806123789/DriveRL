@@ -19,11 +19,15 @@ import {
   CameraIcon,
   CloseIcon,
   EyeIcon,
+  InfoIcon,
   MapIcon,
   PlayIcon,
   PlugIcon,
   WarningIcon,
 } from '../ui/Icons'
+
+/** 知らせのバナーを出しておく時間 [ms]。エラーは閉じるまで残す */
+const NOTICE_MS = 6000
 
 const TABS: TabItem<PanelTab>[] = [
   { id: 'simulation', label: 'シミュレーション', icon: <PlayIcon size={16} /> },
@@ -54,6 +58,8 @@ export function ControlPanel() {
   const dismissError = useSimStore((s) => s.dismissError)
 
   const disabled = connection !== 'open'
+  // 認識器の学習中はサーバーが切り替えを断る（物理が止まっていて配車できない）
+  const simSuspended = useSimStore((s) => s.status.simSuspended === true)
 
   const prevTab = useRef<PanelTab>(tab)
   const paneDir = useRef<'next' | 'prev'>('next')
@@ -84,6 +90,33 @@ export function ControlPanel() {
     },
     [],
   )
+  // 知らせは時間が来たら自分で消える（届くたびに別の項目なので、同じ文面でも出し直す）。
+  // タイマーから呼ぶので、描き直しで変わった最新の dismissWithExit を見る
+  const dismissRef = useRef<(id: number) => void>(() => {})
+  const noticeTimers = useRef(new Map<number, number>())
+  useEffect(() => {
+    const live = new Set(errors.map((e) => e.id))
+    for (const [id, timer] of noticeTimers.current) {
+      if (live.has(id)) continue
+      window.clearTimeout(timer)
+      noticeTimers.current.delete(id)
+    }
+    for (const e of errors) {
+      if (e.kind !== 'notice' || noticeTimers.current.has(e.id)) continue
+      noticeTimers.current.set(
+        e.id,
+        window.setTimeout(() => dismissRef.current(e.id), NOTICE_MS),
+      )
+    }
+  }, [errors])
+  useEffect(
+    () => () => {
+      for (const timer of noticeTimers.current.values()) window.clearTimeout(timer)
+      noticeTimers.current.clear()
+    },
+    [],
+  )
+
   const dismissWithExit = (id: number) => {
     if (prefersReducedMotion()) {
       dismissError(id)
@@ -105,6 +138,7 @@ export function ControlPanel() {
       }, 180),
     )
   }
+  dismissRef.current = dismissWithExit
 
   return (
     <div className="panel-wrap">
@@ -119,7 +153,11 @@ export function ControlPanel() {
               <span className="panel-brand-sub">マルチエージェント強化学習 自動運転</span>
             </span>
 
-            <ModeSwitch mode={mode} disabled={disabled} onToggle={toggleMode} />
+            <ModeSwitch
+              mode={mode}
+              disabled={disabled || (simSuspended && mode === 'dev')}
+              onToggle={toggleMode}
+            />
           </div>
 
           <div className="panel-header-row">
@@ -166,13 +204,16 @@ export function ControlPanel() {
           {errors.map((e) => (
             <div
               key={e.id}
-              className={`m3-banner m3-banner--error${leaving.has(e.id) ? ' is-leaving' : ''}`}
+              className={`m3-banner m3-banner--${e.kind === 'notice' ? 'info' : 'error'}${
+                leaving.has(e.id) ? ' is-leaving' : ''
+              }`}
+              role={e.kind === 'notice' ? 'status' : 'alert'}
             >
               <span className="m3-banner-icon">
-                <WarningIcon size={16} />
+                {e.kind === 'notice' ? <InfoIcon size={16} /> : <WarningIcon size={16} />}
               </span>
               <span className="m3-grow">
-                <span className="m3-banner-title">{e.code}</span>
+                {e.code && <span className="m3-banner-title">{e.code}</span>}
                 {e.message}
               </span>
               <IconButton label="閉じる" onClick={() => dismissWithExit(e.id)}>
