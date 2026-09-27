@@ -29,7 +29,6 @@ export function TaxiCameraView({ on, vehicleId, plate }: TaxiCameraViewProps) {
     if (!el) return
 
     taxiCamera.canvas = el
-    taxiCamera.vehicleId = vehicleId
 
     // 描く解像度は**表示の実寸 × dpr**。固定にすると拡大されて荒く見える
     const measure = () => {
@@ -46,7 +45,6 @@ export function TaxiCameraView({ on, vehicleId, plate }: TaxiCameraViewProps) {
     return () => {
       observer.disconnect()
       taxiCamera.canvas = null
-      taxiCamera.vehicleId = -1
       taxiCamera.live = false
     }
   }, [shown, vehicleId])

@@ -536,7 +536,7 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
 |---|---|
 | `MAP_LOAD_FAILED` | 未知のプリセット ID、Overpass API への接続失敗 |
 | `INVALID_MESSAGE` | JSON として読めない、オブジェクトでない、未知の `type`、必須項目の欠落、`set_params` の値が非有限または型違い |
-| `DETECTOR_TRAINING` | 認識器の学習中に `load_map` が来た（ジョブが握っているマップと画面がずれるため断る） |
+| `DETECTOR_TRAINING` | 認識器の学習中に `load_map`・`set_app_mode`（`taxi` へ）・`request_taxi`・`board_taxi` が来た（`load_map` はジョブが握っているマップと画面がずれるため、残りは物理が止まっていて車が動かないため断る） |
 
 **介入（車両追加・障害物設置）の失敗は `error` ではなく `status` メッセージの
 `message` で返す。** 「スロットが満杯」「その地点から 25m 以内に道路が無い」

@@ -104,7 +104,8 @@ export function startConnection(): void {
   started = true
   disposed = false
 
-  if (isMockRequested()) {
+  // DEV を呼び出し側でも見るのは、本番のビルドから動的 import ごとモックを消させるため
+  if (import.meta.env.DEV && isMockRequested()) {
     mockMode = true
     useSimStore.getState().setUsingMock(true)
     useSimStore.getState().setConnection('connecting')

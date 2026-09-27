@@ -30,11 +30,11 @@ export interface SimConfig {
 
 /** 実行時に変更できるパラメータ一式（2.5 params） */
 export interface SimParams {
-  /** アクティブにする車両数 (1..maxVehicles) */
+  /** アクティブにする車両数 (0..maxVehicles) */
   vehicleCount: number
   /** 街を歩く NPC 歩行者の数 (0..maxPedestrians) */
   pedestrianCount: number
-  /** 実時間に対する倍率 (0.25..4.0) */
+  /** 実時間に対する倍率 (0.25..8.0) */
   simSpeed: number
   learningRate: number
   gamma: number
@@ -83,7 +83,7 @@ export interface StatusPayload {
   /** 「一時停止」は描画のみ。学習は継続している */
   renderPaused: boolean
   learning: boolean
-  /** **物理と PPO ごと止まっているか。** `renderPaused` とは別物で、 */
+  /** **物理と PPO ごと止まっているか。** `renderPaused` とは別物で、認識器の学習中だけ true（古いサーバーには無い） */
   simSuspended?: boolean
   /** `simSuspended` が true のときの理由 */
   suspendReason?: string
@@ -171,7 +171,7 @@ export interface MapSignal {
   y: number
   /** 進入車両の進行方向 [rad]。灯器は heading + PI を向く */
   heading: number
-  /** 0 か 1。同じ値どうしが同時に青になる */
+  /** 交差点ごとの現示の番号（0..N-1）。同じ交差点で同じ値どうしが同時に青になる */
   group: number
   /** 進入路の幅 [m]。停止線・横断歩道の長さに使う */
   roadWidth: number
@@ -306,7 +306,7 @@ export interface Detection {
 /** 2.3 frame — 毎シミュレーションステップ（既定 20Hz） */
 export interface FrameMessage {
   type: 'frame'
-  /** 起動からの通算ステップ数 */
+  /** マップ読込からの通算ステップ数（切り替えると 0 に戻る） */
   tick: number
   /** シミュレーション内経過秒 */
   simTime: number
@@ -394,7 +394,7 @@ export interface DetectorRequest {
   batchSize: number
   /** モデルのチャンネル倍率 */
   width: number
-  /** 収集の乱数種。`SimulationEnv` と行動のランダム化の両方に渡るので、 */
+  /** 収集の乱数種。`SimulationEnv` と行動のランダム化の両方に渡るので、同じ種なら同じ画が集まる */
   seed: number
   /** 晴れ以外の天候も混ぜて集めるか。走行中の天候とは無関係。 */
   weatherMix: boolean
@@ -543,10 +543,10 @@ export interface TaxiMessage {
 export type ErrorCode =
   | 'MAP_LOAD_FAILED'
   | 'INVALID_MESSAGE'
-  /** 認識器の学習中に `load_map` が来た（学習が終わるまでエリアは変えられない） */
+  /** 認識器の学習中に `load_map`・`set_app_mode`（taxi へ）・`request_taxi`・`board_taxi` が来た */
   | 'DETECTOR_TRAINING'
 
-/** 2.7 error */
+/** 2.8 error */
 export interface ErrorMessage {
   type: 'error'
   code: ErrorCode
@@ -560,7 +560,6 @@ export interface PongMessage {
   t: number
 }
 
-/** サーバー → クライアントの全メッセージ（type による判別可能ユニオン） */
 /** ネットワークの 1 層ぶんの要約 */
 export interface NetworkLayer {
   /** パラメータ名（`.weight` を除いたもの）。例: `policy_trunk.0` */
@@ -578,7 +577,7 @@ export interface NetworkLayer {
   deltaNorm: number
 }
 
-/** ネットワークの状態（既定 1Hz）。 */
+/** 2.7 network — ネットワークの状態（既定 1Hz） */
 export interface NetworkMessage {
   type: 'network'
   updates: number
@@ -600,6 +599,7 @@ export interface NetworkMessage {
   gradMaxNorm?: number
 }
 
+/** サーバー → クライアントの全メッセージ（type による判別可能ユニオン） */
 export type ServerMessage =
   | InitMessage
   | MapMessage
@@ -709,7 +709,7 @@ export interface RequestTaxiMessage {
   dropoff: Vec2
 }
 
-/** 乗車する（phase=waiting のときだけ通る） */
+/** 乗車する（phase=waiting / approaching で通る） */
 export interface BoardTaxiMessage {
   type: 'board_taxi'
 }

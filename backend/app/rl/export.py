@@ -86,90 +86,79 @@ class InferencePolicy(nn.Module):
         return action, value
 
 
-def _observation_layout() -> list[dict[str, Any]]:
-    """観測ベクトルの構成。app/percep/encoder.py の連結順と一致していること。"""
-    return [
-        {
-            "name": "self",
-            "size": config.OBS_SELF_DIM,
-            "source": "vehicle_sensor",
-            "description": "速度計と舵角センサー。"
+def _layout_notes() -> dict[str, tuple[str, str]]:
+    """観測の区画ごとの (出どころ, 説明)。並びと大きさは `config.OBS_LAYOUT` が持つ。"""
+    return {
+        "self": (
+            "vehicle_sensor",
+            "速度計と舵角センサー。"
             f"[速度 / max_speed, 舵角 / {config.MAX_STEER}rad]",
-        },
-        {
-            "name": "goal",
-            "size": config.OBS_GOAL_DIM,
-            "source": "navigation",
-            "description": "ナビが与える目的地の自車座標系相対位置 "
+        ),
+        "goal": (
+            "navigation",
+            "ナビが与える目的地の自車座標系相対位置 "
             f"(dx, dy) / {config.OBS_GOAL_RANGE}m と正規化した距離。"
             "カメラでは原理的に得られないので真値を使う",
-        },
-        {
-            "name": "route",
-            "size": config.OBS_ROUTE_DIM,
-            "source": "navigation",
-            "description": f"ナビの経路案内点 {config.OBS_ROUTE_POINTS} 個を "
+        ),
+        "route": (
+            "navigation",
+            f"ナビの経路案内点 {config.OBS_ROUTE_POINTS} 個を "
             f"{config.OBS_ROUTE_SPACING}m 間隔でサンプルし、自車座標系"
             "（前方 +x / 左 +y）へ変換して正規化したもの",
-        },
-        {
-            "name": "lane",
-            "size": config.OBS_LANE_DIM,
-            "source": "camera",
-            "description": "認識した走行車線。[車線中心からの横方向偏差 / "
+        ),
+        "lane": (
+            "camera",
+            "認識した走行車線。[車線中心からの横方向偏差 / "
             f"{config.OBS_LATERAL_RANGE}m, 車線方向とのずれ sin, cos, 信頼度]。"
             "検出できなければ信頼度 0",
-        },
-        {
-            "name": "signal",
-            "size": config.OBS_SIGNAL_DIM,
-            "source": "camera",
-            "description": "認識した前方の信号。[停止線までの推定距離 / "
+        ),
+        "signal": (
+            "camera",
+            "認識した前方の信号。[停止線までの推定距離 / "
             f"{config.OBS_SIGNAL_RANGE}m, 青, 黄, 赤, 信頼度]。"
             "検出できなければ距離 1.0・灯色フラグはすべて 0・信頼度 0。"
             "**「信号が無い」と「青」は別物**",
-        },
-        {
-            "name": "sign",
-            "size": config.OBS_SIGN_DIM,
-            "source": "camera",
-            "description": "認識した最高速度標識（道交法 22 条）。"
+        ),
+        "sign": (
+            "camera",
+            "認識した最高速度標識（道交法 22 条）。"
             "[規制速度 / max_speed, (speed - 規制速度) / max_speed, 信頼度]。"
             "2 番目は正なら超過。標識を検出できていない間は "
             "規制速度 = max_speed として扱う",
-        },
-        {
-            "name": "vehicles",
-            "size": config.OBS_VEHICLE_DIM,
-            "source": "camera",
-            "description": f"認識した前方車両 {config.OBS_VEHICLE_COUNT} 台について "
+        ),
+        "vehicles": (
+            "camera",
+            f"認識した前方車両 {config.OBS_VEHICLE_COUNT} 台について "
             f"(dx, dy) / {config.OBS_VEHICLE_RANGE}m、推定距離、信頼度。"
             "距離は既知の車幅とバウンディングボックスの大きさから推定した単眼測距",
-        },
-        {
-            "name": "obstacles",
-            "size": config.OBS_OBSTACLE_DIM,
-            "source": "camera",
-            "description": f"認識した障害物 {config.OBS_OBSTACLE_COUNT} 個について "
+        ),
+        "obstacles": (
+            "camera",
+            f"認識した障害物 {config.OBS_OBSTACLE_COUNT} 個について "
             f"(dx, dy) / {config.OBS_OBSTACLE_RANGE}m と信頼度",
-        },
-        {
-            "name": "pedestrians",
-            "size": config.OBS_PEDESTRIAN_DIM,
-            "source": "camera",
-            "description": f"認識した歩行者 {config.OBS_PEDESTRIAN_COUNT} 人について "
+        ),
+        "pedestrians": (
+            "camera",
+            f"認識した歩行者 {config.OBS_PEDESTRIAN_COUNT} 人について "
             f"(dx, dy) / {config.OBS_PEDESTRIAN_RANGE}m と信頼度。"
             "距離は既知の肩幅とバウンディングボックスの大きさから推定した単眼測距",
-        },
-        {
-            "name": "freespace",
-            "size": config.OBS_FREESPACE_DIM,
-            "source": "camera",
-            "description": "認識した走行可能領域。自車 heading を中心に ±90 度を "
+        ),
+        "freespace": (
+            "camera",
+            "認識した走行可能領域。自車 heading を中心に ±90 度を "
             f"{config.OBS_FREESPACE_DIM} 方向に等分し、各方向へ進める距離 / "
             f"{config.OBS_FREESPACE_MAX_DISTANCE}m。"
             "以前の建物レイキャストに相当するが、値は画像からの推定",
-        },
+        ),
+    }
+
+
+def _observation_layout() -> list[dict[str, Any]]:
+    """観測ベクトルの構成。`config.OBS_LAYOUT` の並び（`percep/encoder.py` の添字と同じ出典）。"""
+    notes = _layout_notes()
+    return [
+        {"name": name, "size": size, "source": notes[name][0], "description": notes[name][1]}
+        for name, size in config.OBS_LAYOUT
     ]
 
 

@@ -12,6 +12,7 @@ from app.percep.types import CameraSpec
 __all__ = [
     "CameraPose",
     "camera_pose",
+    "eye_position",
     "project_components",
     "project_points",
 ]
@@ -30,12 +31,19 @@ class CameraPose:
     sin_pitch: float
 
 
+def eye_position(x, y, cos_yaw, sin_yaw, spec: CameraSpec):
+    """車両の位置と向きから運転席の目の水平位置 (x, y) を出す。スカラーでも配列でもよい。"""
+    return (
+        x + cos_yaw * spec.forward + sin_yaw * spec.right,
+        y + sin_yaw * spec.forward - cos_yaw * spec.right,
+    )
+
+
 def camera_pose(x: float, y: float, heading: float, spec: CameraSpec) -> CameraPose:
     """車両の姿勢から運転席カメラの姿勢を作る。"""
     cos_h = math.cos(heading)
     sin_h = math.sin(heading)
-    eye_x = x + cos_h * spec.forward + sin_h * spec.right
-    eye_y = y + sin_h * spec.forward - cos_h * spec.right
+    eye_x, eye_y = eye_position(x, y, cos_h, sin_h, spec)
     pitch = spec.pitch
     return CameraPose(
         eye_x=float(eye_x),

@@ -116,8 +116,17 @@ GET 以外のリクエストも素通しします。WebSocket（`/ws`）も Serv
 
 | 対象 | 固定の仕方 | 再現インストール |
 |---|---|---|
-| `requirements.txt` | `==` で完全固定 | `pip install -r requirements.txt` |
+| `requirements.txt` | **直接の依存だけ** `==` で固定。推移的な依存（`starlette`・`anyio`・`h11`・`pydantic` など）は固定しておらず、ハッシュも付けていない | `pip install -r requirements.txt`（推移的な依存は**入れた日によって変わりうる**）|
 | `frontend/package.json` | `^` の範囲指定（マイナー・パッチが上がりうる）| **`npm ci`**（`package-lock.json` の内容を厳密に再現）|
+
+バックエンドはロックファイルを置いていないので、`pip install -r requirements.txt` で
+まったく同じ環境が再現できるわけではありません。動いている環境を控えておきたいときは、
+`backend/.venv/Scripts/python.exe -m pip freeze` の結果を手元に保存してください。
+
+`requirements.txt` は PyTorch の CPU 版（`+cpu`）を入れるために `--extra-index-url` で
+PyTorch の索引も見ています。pip は PyPI とこの索引の両方から候補を集めるので、
+**同じ名前のパッケージがもう一方の索引にあると、そちらが選ばれうる**（依存関係の混同）点に
+注意してください。直接の依存は `==` で版を固定しているので、その範囲の外の版は入りません。
 
 フロントエンドで `npm install` を使うと、`package-lock.json` が更新されて
 実際に入るバージョンが変わることがあります。**同じ環境を再現したいときは `npm ci` を

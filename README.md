@@ -277,7 +277,7 @@ cd frontend; npm run dev                          # 2 つ目
 </details>
 
 **バックエンドを起動せずにフロントだけ触る**こともできます。`npm run dev` で開いた URL に
-`?mock=1` を付けると、`store/mockServer.ts` が frame / metrics / network と、認識器の学習、
+`?mock=1` を付けると、`store/mockServer.ts`（中身は `store/mock/`）が frame / metrics / network と、認識器の学習、
 実用モードの配車（迎車 → 乗車 → 到着 → 降車）まで返します。見た目と画面遷移の確認に使えます
 （**開発ビルドのみ**。本番ビルドでは常に無効です）。実物のモデルが無いので、
 モデルの書き出しと読み込みだけは塞いであります。

@@ -149,6 +149,16 @@ class SlotState:
 
 logger = logging.getLogger("autoware_sim")
 
+_WARNED: set[str] = set()
+
+
+def _warn_once(key: str, message: str) -> None:
+    """同じ失敗を初回だけログに残す（code_review B-15）。"""
+    if key in _WARNED:
+        return
+    _WARNED.add(key)
+    logger.exception(message)
+
 
 class World:
     """マップ上の車両群・障害物・衝突判定を保持する。"""
@@ -285,7 +295,10 @@ class World:
         try:
             return self.map_index.road_lead(float(x), float(y), heading, need)
         except Exception:
-            logger.debug("道路の特定に失敗しました: (%.1f, %.1f)", x, y, exc_info=True)
+            _warn_once(
+                "road_lead",
+                f"いまいる道路を特定できませんでした: ({x:.1f}, {y:.1f})。経路を作らずに続けます（初回のみ記録）",
+            )
             return None
 
     def _route_from_lead(self, lead: RoadLead, dst: int) -> Route | None:
@@ -446,11 +459,6 @@ class World:
         self._player_xy = player
 
     @property
-    def has_player(self) -> bool:
-        """徒歩キャラが街に立っているか。"""
-        return bool(self._player_xy.shape[0] > 0)
-
-    @property
     def pedestrian_xy(self) -> np.ndarray:
         """いる歩行者の座標 (K, 2) float64。"""
         key = (self.crowd.revision, self._player_rev)
@@ -502,10 +510,6 @@ class World:
             if 0 <= index < len(phases):
                 phase[slot] = phases[index]
         return distance, phase
-
-    def next_signals(self) -> tuple[np.ndarray, np.ndarray]:
-        """全スロットの前方直近の信号を (停止線までの距離 [m], 灯色) の配列で返す。"""
-        return self.nth_signals(0)
 
     @staticmethod
     def _build_speed_profile(route: np.ndarray, cum: np.ndarray) -> np.ndarray:

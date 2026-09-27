@@ -159,11 +159,6 @@ class SimulationEngine:
         with self._lock:
             self._map_pending = True
 
-    def resume_frames(self) -> None:
-        """`pause_frames()` を取り消す。マップ差し替えを中断したときに呼ぶ。"""
-        with self._lock:
-            self._map_pending = False
-
     def set_loading(self, preset_id: str, preset_name: str) -> None:
         with self._lock:
             self._state = "loading_map"

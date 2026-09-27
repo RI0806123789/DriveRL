@@ -27,6 +27,16 @@ from app.contracts import (
 
 logger = logging.getLogger("autoware_sim")
 
+_WARNED: set[str] = set()
+
+
+def _warn_once(key: str, message: str) -> None:
+    """同じ失敗を初回だけログに残す（code_review B-15）。"""
+    if key in _WARNED:
+        return
+    _WARNED.add(key)
+    logger.exception(message)
+
 
 class MapLoadError(RuntimeError):
     """OSM の取得・正規化に失敗したときに投げる。"""
@@ -644,7 +654,10 @@ def _collect_buildings(
         try:
             polygon = polygon.simplify(config.BUILDING_SIMPLIFY_TOLERANCE, preserve_topology=True)
         except Exception:
-            continue
+            _warn_once(
+                "building_simplify",
+                "建物の輪郭を簡略化できませんでした。簡略化せずに使います（初回のみ記録）",
+            )
         if polygon is None or polygon.is_empty:
             continue
         polygon = _largest_polygon(polygon)

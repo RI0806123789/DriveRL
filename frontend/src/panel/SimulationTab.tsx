@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react'
 import { send } from '../store/connection'
 import { frameBuffer } from '../store/frameBuffer'
-import { useSimStore } from '../store/simStore'
+import { DEFAULT_MAX_PEDESTRIANS, useSimStore } from '../store/simStore'
 import type { InteractionMode } from '../store/simStore'
 import { WEATHER_LABELS } from '../types/protocol'
 import { vehicleColor } from '../scene/vehicleColors'
@@ -184,7 +184,7 @@ export function SimulationTab() {
           hint="人"
           value={params.pedestrianCount}
           min={0}
-          max={config.maxPedestrians ?? 64}
+          max={config.maxPedestrians ?? DEFAULT_MAX_PEDESTRIANS}
           step={1}
           format={(v) => `${v} 人`}
           onChange={(v) => patchParamsLocal({ pedestrianCount: v })}

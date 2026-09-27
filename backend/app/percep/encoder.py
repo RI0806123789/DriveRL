@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Iterator
+from itertools import accumulate
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -25,32 +26,23 @@ if TYPE_CHECKING:
 
 __all__ = ["OBS_OFFSETS", "encode_observations"]
 
-_OFF_SELF = 0
-_OFF_GOAL = _OFF_SELF + config.OBS_SELF_DIM
-_OFF_ROUTE = _OFF_GOAL + config.OBS_GOAL_DIM
-_OFF_LANE = _OFF_ROUTE + config.OBS_ROUTE_DIM
-_OFF_SIGNAL = _OFF_LANE + config.OBS_LANE_DIM
-_OFF_SIGN = _OFF_SIGNAL + config.OBS_SIGNAL_DIM
-_OFF_VEHICLE = _OFF_SIGN + config.OBS_SIGN_DIM
-_OFF_OBSTACLE = _OFF_VEHICLE + config.OBS_VEHICLE_DIM
-_OFF_PEDESTRIAN = _OFF_OBSTACLE + config.OBS_OBSTACLE_DIM
-_OFF_FREESPACE = _OFF_PEDESTRIAN + config.OBS_PEDESTRIAN_DIM
-assert (
-    _OFF_FREESPACE + config.OBS_FREESPACE_DIM == config.OBS_DIM
-), "OBS_* の内訳が OBS_DIM と一致しない"
+OBS_OFFSETS: dict[str, int] = dict(
+    zip(
+        (name for name, _size in config.OBS_LAYOUT),
+        accumulate((size for _name, size in config.OBS_LAYOUT), initial=0),
+    )
+)
 
-OBS_OFFSETS: dict[str, int] = {
-    "self": _OFF_SELF,
-    "goal": _OFF_GOAL,
-    "route": _OFF_ROUTE,
-    "lane": _OFF_LANE,
-    "signal": _OFF_SIGNAL,
-    "sign": _OFF_SIGN,
-    "vehicles": _OFF_VEHICLE,
-    "obstacles": _OFF_OBSTACLE,
-    "pedestrians": _OFF_PEDESTRIAN,
-    "freespace": _OFF_FREESPACE,
-}
+_OFF_SELF = OBS_OFFSETS["self"]
+_OFF_GOAL = OBS_OFFSETS["goal"]
+_OFF_ROUTE = OBS_OFFSETS["route"]
+_OFF_LANE = OBS_OFFSETS["lane"]
+_OFF_SIGNAL = OBS_OFFSETS["signal"]
+_OFF_SIGN = OBS_OFFSETS["sign"]
+_OFF_VEHICLE = OBS_OFFSETS["vehicles"]
+_OFF_OBSTACLE = OBS_OFFSETS["obstacles"]
+_OFF_PEDESTRIAN = OBS_OFFSETS["pedestrians"]
+_OFF_FREESPACE = OBS_OFFSETS["freespace"]
 
 _ROUTE_OFFSETS = np.arange(1, config.OBS_ROUTE_POINTS + 1, dtype=np.float32) * np.float32(
     config.OBS_ROUTE_SPACING

@@ -316,10 +316,6 @@ class MapIndex(Protocol):
         """占有グリッド上で建物までの距離を測る。"""
         ...
 
-    def collides_with_building(self, corners: np.ndarray) -> bool:
-        """車両の外接矩形（shape (4, 2) の頂点列）が建物と重なるかを厳密に判定する。"""
-        ...
-
     def collides_with_buildings(
         self, corners: np.ndarray, mask: np.ndarray
     ) -> np.ndarray:
@@ -716,14 +712,6 @@ TAXI_PHASE_APPROACHING = "approaching"
 TAXI_PHASE_WAITING = "waiting"
 TAXI_PHASE_RIDING = "riding"
 TAXI_PHASE_ARRIVED = "arrived"
-
-TAXI_PHASES: tuple[str, ...] = (
-    TAXI_PHASE_IDLE,
-    TAXI_PHASE_APPROACHING,
-    TAXI_PHASE_WAITING,
-    TAXI_PHASE_RIDING,
-    TAXI_PHASE_ARRIVED,
-)
 
 
 def _point_wire(point: tuple[float, float] | None) -> list[float] | None:
