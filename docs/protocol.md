@@ -909,7 +909,7 @@ model(obs: float32[B, 66]) -> [action: float32[B, 2], value: float32[B]]
 
 `value` の Dense(1) 出力は素のままだと `[B, 1]` になるが、TorchScript 版
 （`squeeze(-1)`）と揃えるため `Reshape` で `[B]` に落としてある
-（code_review L-09。以前はここに shape の違いを明記するだけだった）。
+（以前はここに shape の違いを明記するだけだった）。
 
 `keras.saving.load_model()` で読める。**標準の Dense 層だけで構成しているので
 `custom_objects` は不要**。行動の出力は `tanh` 活性で表しており、
@@ -1035,7 +1035,7 @@ TorchScript や Keras 形式を渡した場合は、その旨を説明する `40
 
 ---
 
-## 6. 設計上の約束（memo/memo_x.x/memo_1.0.md 5章の反映）
+## 6. 設計上の約束
 
 | 約束 | 実装箇所 |
 |---|---|

@@ -5,9 +5,9 @@
 
 **「作業の進め方」は `CLAUDE.md` にも一字一句同じものを置いてあります。
 片方を直したら必ずもう片方も直すこと。**
-（検証スクリプトの本数が 3 つの文書でずれた実績があります。`code_review` U-10）
-「コードの書き方」も大部分が共通です。アーキテクチャと不変条件の詳しい説明、
-および `memo/code_review.md` との付き合い方は `CLAUDE.md` にあります。
+（検証スクリプトの本数が 3 つの文書でずれた実績があります）
+「コードの書き方」も大部分が共通です。アーキテクチャと不変条件の詳しい説明は
+`CLAUDE.md` にあります。
 
 DriveRL は、OpenStreetMap の実地図上でマルチエージェント強化学習（自作 PPO）の車両を走らせ、
 Three.js で 3D 描画・介入できるシミュレーターです。
@@ -210,23 +210,3 @@ npm run verify      # 幾何検証と規約の検査（ブラウザ不要。一�
   `performance.now()` を渡すと、あとで描くカメラの区間まで進んで車内が跳ぶ）
 - **モードが変わるときの後始末は `store/simStore.ts` の `modeChange()` 1 か所**（ボタン・`init`・`status` の
   どれで変わっても同じ）。`status.message` は `notice: true` の通だけバナーにする（`docs/protocol.md` 2.4）
-
----
-
-## 手元にしかないもの
-
-`memo/` は **`.gitignore` されています**（`.gitignore` の `/memo`）。開発者の手元にしかありません。
-
-- `memo/code_review.md` — 過去のレビュー指摘が番号付き（`B` / `F` / `X` / `P` / `Q` / `R` / `W` /
-  `L` / `M` / `C` / `S` / `D` / `A` / `U` / `T` / `V` / `E` / `Z`）で蓄積されている。コード中のコメントはこの番号を引いて
-  参照している（例: 「`code_review B-15`」）
-- `memo/memo_x.x/memo_1.0.md` — 要件定義。**コード中の「memo 5章」という参照の出典**で、
-  `contracts.py`（2 か所）/ `map/loader.py` / `runtime/engine.py` の docstring から参照されている
-  （件数の出典は `grep -rn "memo [0-9]章" backend/app`）
-- `memo/memo_x.x/memo_2.0.md` — 実用モード（自動運転タクシー）の要件定義
-
-システム構成図は `memo/` ではなく `docs/system-flow.drawio` にあり、リポジトリに入っています
-（ページの一覧はファイルの `<diagram name=...>` が出典）。
-
-**クローンしただけの環境にこれらは存在せず、その参照は追えません。**
-その場合は `README.md`「設計上の要点」と `CLAUDE.md` の不変条件を一次情報としてください。
