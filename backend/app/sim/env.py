@@ -998,6 +998,18 @@ class SimulationEnv:
                 self.latest_surround.pop(slot, None)
                 self._surround_taken.pop(slot, None)
                 self._rear_free.pop(slot, None)
+                continue
+            # 経路が変わった（再スポーンで別の場所へ移った）車の結果は、前の場所で写したもの
+            serial = int(self.world.route_serial[slot])
+            kept = self.latest_surround[slot]
+            stamps = self._surround_taken.setdefault(slot, {})
+            for key in [k for k in kept if stamps.get(k, (0.0, -1))[1] != serial]:
+                kept.pop(key, None)
+                stamps.pop(key, None)
+                if key == REAR_CAMERA.key:
+                    self._rear_free.pop(slot, None)
+            if not kept:
+                self.latest_surround.pop(slot, None)
         for slot, cams in fresh.items():
             serial = int(self.world.route_serial[slot])
             kept = self.latest_surround.setdefault(slot, {})

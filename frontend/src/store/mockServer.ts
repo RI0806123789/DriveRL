@@ -452,6 +452,12 @@ class MockServer {
           this.sendStatus({ message: '（モック）すでに学習を実行中です' })
           return
         }
+        if (this.status.state === 'loading_map') {
+          this.sendStatus({
+            message: '（モック）エリアを読み込んでいる間は認識器の学習を始められません',
+          })
+          return
+        }
         this.detector.start(msg.request)
         break
       }

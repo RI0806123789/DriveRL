@@ -691,7 +691,8 @@ true のときの学習中の車だけ。判断は検出枠と推定距離から
 
 **学習した認識器が検証に通らなかったとき（読み直せない・何も検出しない）は、`state` が `error` で
 終わり、`detector.keras` は差し替えない**（前の認識器を使い続ける）。`message` と `warning` に理由が入る。
-実用モードの間に `start_detector_training` が来たときは始めず、理由を `status.message` で返す。
+実用モードの間と、地図の読み込み中（`status.state` が `loading_map`）に `start_detector_training` が
+来たときは始めず、理由を `status.message` で返す。
 
 `model.inUse` は**ファイルがあるか**ではなく**いま実際に使っているか**である。
 マップを読み込んだ瞬間（`SimulationEnv` が認識器を読むとき）や、学習完了後の
@@ -832,6 +833,8 @@ asyncio 側から触ると更新中の重みを壊す）。
 - **認識器の学習中は `load_map` を受け付けない**（`DETECTOR_TRAINING` で断る）。
   ジョブは開始時に借りたマップの参照を握り続けるので、通すと
   「収集は元のエリアのまま、画面だけ新しいエリア」という食い違いが起きる。
+  受け付けた後、読み込みが終わるまでに学習が始まっていた場合も地図を差し込まず、
+  元のエリアのまま `status`（`notice: true`）で知らせる。
 - **実行中は `status.simSuspended` が true になり、物理と PPO が止まる。**
   完了・中断でサーバーが自動的に降ろす。
 - 二重起動・教師データ不足は `error` ではなく `status.message` で返す
@@ -1031,7 +1034,8 @@ TorchScript や Keras 形式を渡した場合は、その旨を説明する `40
 
 **上書きの扱い**: 読み込みは現在の学習状態を不可逆に置き換えるため、
 載せ替える直前に現在のモデルを `backend/data/exports/` へ
-`..._before-import_...pt` という名前で自動退避する。
+`..._before-import_...pt` という名前で自動退避する。**退避できなかったとき（ディスクの空きが無いなど）は
+読み込まずに失敗を返す**（`{"ok": false, "error": ...}`。学習はいまのモデルのまま続く）。
 また、読み込み後ただちに `backend/data/checkpoints/shared_policy.pt` を更新するので、
 サーバーを再起動しても読み込んだ状態が残る。
 

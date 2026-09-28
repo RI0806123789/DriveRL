@@ -104,6 +104,7 @@ export function ModelTab() {
   const effectivePresetId = presetId ?? status.presetId ?? presets[0]?.id ?? null
 
   const disabled = connection !== 'open'
+  const loadingMap = status.state === 'loading_map'
   const collects = mode !== 'train'
   const trains = mode !== 'collect'
 
@@ -202,7 +203,10 @@ export function ModelTab() {
               disabled={disabled || running || presets.length === 0}
               options={presets.map((p) => ({
                 value: p.id,
-                label: p.id === status.presetId ? `${p.name}（読み込み済み）` : p.name,
+                label:
+                  p.id === status.presetId
+                    ? `${p.name}（${loadingMap ? '読み込み中' : '読み込み済み'}）`
+                    : p.name,
               }))}
               onChange={setPresetId}
             />
@@ -346,11 +350,16 @@ export function ModelTab() {
             variant="filled"
             block
             icon={<PlayIcon size={18} />}
-            disabled={disabled || (collects && !effectivePresetId)}
+            disabled={disabled || loadingMap || (collects && !effectivePresetId)}
             onClick={handleStart}
           >
             {MODES.find((m) => m.id === mode)?.label}を開始
           </Button>
+        )}
+        {!running && loadingMap && (
+          <div className="m3-note">
+            エリアを読み込んでいる間は始められません。読み込みが終わるまでお待ちください。
+          </div>
         )}
         {running && (
           <div className="m3-note">

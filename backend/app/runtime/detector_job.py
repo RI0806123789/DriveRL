@@ -178,6 +178,9 @@ class EngineHooks(Protocol):
     def practical_mode(self) -> bool:
         """いま実用モード（配車を受け付ける）か。"""
 
+    def map_loading(self) -> bool:
+        """地図を読み込んでいる最中か（差し込み終わるまで真）。"""
+
 
 @dataclass
 class _Progress:
@@ -230,6 +233,9 @@ class DetectorTrainingJob:
                 "実用モードの間は認識器の学習を始められません。"
                 "開発モードに戻してから始めてください"
             )
+        if self._hooks.map_loading():
+            # 読み込みが終わるとエンジンの地図が差し替わり、収集と画面のエリアが食い違う
+            return "エリアを読み込んでいる間は認識器の学習を始められません。読み込みが終わってから始めてください"
 
         if request.trains and not request.collects:
             if not self._dataset_path().exists():

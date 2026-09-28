@@ -22,6 +22,7 @@ from shapely.geometry import LineString
 
 from app import config
 from app.map import build_map_index, get_preset, load_map
+from app.map.index import LEAD_DIRECTION_SPAN_M, _direction
 from app.map.lanes import lane_offset_left
 from app.map.loader import MapLoadError
 from app.map.presets import list_presets
@@ -32,6 +33,8 @@ TRIALS = 400
 #: これ以上建物の中を通っていたら「突き抜けた」とみなす [m]。角をかすめるだけのものは除く
 PIERCE_M = 1.0
 TOP_SPEED = 13.9
+#: 配車の目的地の距離 [m]（自動操作の行き先と同じくらい）
+NEAR_M = (150.0, 1500.0)
 
 
 def check(label: str, ok: bool, detail: str = "") -> None:
@@ -118,6 +121,14 @@ def avoidable(index, path, bad: set[int]) -> bool:
     return nx.has_path(view, path[0], path[-1])
 
 
+# 27m の直線の先で 2.6m だけ曲がって交差点に着く道（金沢で手前で曲がっていた形）
+bend = math.degrees(_direction([(0.0, 0.0), (27.0, 0.0), (29.3, 1.2)], at_end=True))
+check(
+    f"道の端の向きは、頂点が疎でも端から {LEAD_DIRECTION_SPAN_M:.0f}m の点で測る（遠い頂点との弦で曲がりを消さない）",
+    abs(bend - 23.9) < 0.5,
+    f"{bend:.1f}°（端の 3m の向き 23.9° / 27m 先の頂点との弦なら 2.3°）",
+)
+
 targets = sys.argv[1:] or [p.id for p in list_presets()]
 
 for preset_id in targets:
@@ -162,10 +173,10 @@ for preset_id in targets:
     for _ in range(TRIALS):
         x, y, h = pose_on_road(rng, edges)
         speed = float(rng.uniform(0.0, TOP_SPEED))
-        for _k in range(30):
-            dst = int(reach[int(rng.integers(0, reach.size))])
-            if 150.0 <= math.hypot(nodes[dst, 0] - x, nodes[dst, 1] - y) <= 1500.0:
-                break
+        # 引き直しで探すと、金沢では 30 回外れることが 2 割あり、遠い目的地のまま測っていた
+        gap = np.hypot(nodes[reach, 0] - x, nodes[reach, 1] - y)
+        ring = reach[(gap >= NEAR_M[0]) & (gap <= NEAR_M[1])]
+        dst = int(ring[int(rng.integers(0, ring.size))])
         target = (float(nodes[dst, 0]), float(nodes[dst, 1]))
         gc.disable()
         t0 = time.perf_counter()
@@ -248,9 +259,28 @@ for preset_id in targets:
     check("出口で、ほかに道があるのに 120° を超えて折り返さない", uturn == 0, f"{uturn} 本")
     ms = np.array(times)
     check(
-        "配車の経路 1 本の作成が 1 ステップの予算（50ms）に収まり、95% は 35ms 未満（GC を止めて測る）",
+        f"{NEAR_M[0]:.0f}〜{NEAR_M[1]:.0f}m 先への配車の経路 1 本の作成が 1 ステップの予算（50ms）に収まり、"
+        "95% は 35ms 未満（GC を止めて測る）",
         float(ms.max()) < 50.0 and float(np.percentile(ms, 95)) < 35.0,
         f"中央値 {np.median(ms):.1f}ms・95% {np.percentile(ms, 95):.1f}ms・最大 {ms.max():.1f}ms",
+    )
+
+    far: list[float] = []
+    for _ in range(TRIALS // 2):
+        x, y, h = pose_on_road(rng, edges)
+        dst = int(reach[int(rng.integers(0, reach.size))])
+        gc.disable()
+        t0 = time.perf_counter()
+        world.route_between(
+            (x, y), (float(nodes[dst, 0]), float(nodes[dst, 1])), heading=h, speed=TOP_SPEED
+        )
+        far.append((time.perf_counter() - t0) * 1000)
+        gc.enable()
+    fm = np.array(far)
+    check(
+        "地図のどこへの配車でも、経路 1 本の作成は 95% が 35ms 未満・最大でも 2 ステップ（100ms）未満",
+        float(fm.max()) < 100.0 and float(np.percentile(fm, 95)) < 35.0,
+        f"中央値 {np.median(fm):.1f}ms・95% {np.percentile(fm, 95):.1f}ms・最大 {fm.max():.1f}ms",
     )
 
     detour = checked = 0

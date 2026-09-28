@@ -27,6 +27,7 @@ class RolloutBuffer:
         self.truncated = np.zeros(shape, dtype=bool)
         self.truncated_values = np.zeros(shape, dtype=np.float32)
         self.active = np.zeros(shape, dtype=bool)
+        self.learn = np.zeros(shape, dtype=bool)
         self.advantages = np.zeros(shape, dtype=np.float32)
         self.returns = np.zeros(shape, dtype=np.float32)
 
@@ -56,6 +57,7 @@ class RolloutBuffer:
         active: np.ndarray,
         truncated: np.ndarray | None = None,
         truncated_values: np.ndarray | None = None,
+        learn: np.ndarray | None = None,
     ) -> None:
         """1 ステップ分を追加する。満杯なら何もしない（実行ループを止めないため）。"""
         if self.full:
@@ -79,6 +81,12 @@ class RolloutBuffer:
             else np.asarray(truncated_values, dtype=np.float32).reshape(n)
         )
         self.active[i] = np.asarray(active, dtype=bool).reshape(n)
+        # 生きていても、方策が出していない操作（安全ギミックの引き受け）は損失に入れない
+        self.learn[i] = (
+            self.active[i]
+            if learn is None
+            else self.active[i] & np.asarray(learn, dtype=bool).reshape(n)
+        )
         self.ptr = i + 1
 
     def compute_returns_and_advantages(
@@ -103,19 +111,21 @@ class RolloutBuffer:
         next_active = np.asarray(last_active, dtype=bool).reshape(n)
 
         for t in range(size - 1, -1, -1):
-            non_terminal = ((~self.dones[t]) & next_active).astype(np.float32)
+            # 続いているかは `active`（生きているか）で見る。学習から外したステップ
+            # （安全ギミックの引き受け）の手前は、次の状態の価値で補う。連鎖は外した
+            # ステップの `adv` が 0 なのでそこで切れる（打ち切りと同じ形）
+            continues = (~self.dones[t]) & next_active
+            non_terminal = continues.astype(np.float32)
             # 打ち切りは「続いていたはずの先」の価値で補う。ただし `next_values` は
             # 再スポーン後（別のエピソード）の価値なので、打ち切った時点で評価した
             # 値に差し替える
-            bootstrap = (
-                ((~self.dones[t]) & next_active) | self.truncated[t]
-            ).astype(np.float32)
+            bootstrap = (continues | self.truncated[t]).astype(np.float32)
             boot_values = np.where(
                 self.truncated[t], self.truncated_values[t], next_values
             ).astype(np.float32)
             delta = self.rewards[t] + gamma * boot_values * bootstrap - self.values[t]
             adv = delta + gamma * lam * non_terminal * adv
-            adv = np.where(self.active[t], adv, np.float32(0.0)).astype(np.float32)
+            adv = np.where(self.learn[t], adv, np.float32(0.0)).astype(np.float32)
             self.advantages[t] = adv
             next_values = self.values[t]
             next_active = self.active[t]
@@ -124,12 +134,12 @@ class RolloutBuffer:
         self._ready = True
 
     def flat_dataset(self) -> dict[str, torch.Tensor] | None:
-        """active=True のサンプルだけを平坦化した学習データを 1 つ返す。"""
+        """学習に使うサンプル（`learn`）だけを平坦化した学習データを 1 つ返す。"""
         size = self.ptr
         if size == 0 or not self._ready:
             return None
 
-        mask = self.active[:size].reshape(-1)
+        mask = self.learn[:size].reshape(-1)
         idx = np.flatnonzero(mask)
         if idx.size == 0:
             return None

@@ -42,7 +42,7 @@ class MapLoadError(RuntimeError):
     """OSM の取得・正規化に失敗したときに投げる。"""
 
 
-CACHE_VERSION = 9
+CACHE_VERSION = 10
 
 _DEFAULT_LANES: dict[str, int] = {
     "motorway": 3,
@@ -79,6 +79,26 @@ _DEFAULT_MAXSPEED_KPH: dict[str, float] = {
     "service": 20.0,
 }
 _FALLBACK_MAXSPEED_KPH = 40.0
+
+# osmnx がまとめた道のタグはリストで来て、並びは実行ごとに変わる（集合から戻すため）。
+# `highway` はこの順で幹線に近いものを採る（表に無いものは後ろ・同順位は名前順）
+_HIGHWAY_PRIORITY: tuple[str, ...] = (
+    "motorway",
+    "trunk",
+    "primary",
+    "secondary",
+    "tertiary",
+    "motorway_link",
+    "trunk_link",
+    "primary_link",
+    "secondary_link",
+    "tertiary_link",
+    "unclassified",
+    "residential",
+    "living_street",
+    "service",
+)
+_HIGHWAY_RANK = {name: rank for rank, name in enumerate(_HIGHWAY_PRIORITY)}
 
 _KPH_TO_MPS = 1.0 / 3.6
 _MPH_TO_MPS = 0.44704
@@ -248,7 +268,7 @@ def _collect_edges(
         if previous is not None and previous["length"] <= length:
             continue
 
-        highway = _first_tag(row.get("highway"))
+        highway = _highway_class(row.get("highway"))
         oneway = _parse_oneway(row.get("oneway"))
         lanes_value, lanes_from_tag = _parse_lanes(row.get("lanes"), highway)
 
@@ -741,11 +761,13 @@ def _iter_tag_values(value: Any) -> Iterable[Any]:
     yield value
 
 
-def _first_tag(value: Any) -> str:
-    """highway のようなカテゴリタグから代表値 1 個を取り出す。"""
-    for item in _iter_tag_values(value):
-        return str(item).strip().lower()
-    return ""
+def _highway_class(value: Any) -> str:
+    """highway から代表値 1 個を取り出す。リストなら並びに依らず `_HIGHWAY_PRIORITY` で選ぶ。"""
+    names = {str(item).strip().lower() for item in _iter_tag_values(value)}
+    names.discard("")
+    if not names:
+        return ""
+    return min(names, key=lambda name: (_HIGHWAY_RANK.get(name, len(_HIGHWAY_RANK)), name))
 
 
 def _parse_float_tag(value: Any) -> float | None:
@@ -791,32 +813,35 @@ def _parse_lanes(value: Any, highway: str) -> tuple[int, bool]:
 
 
 def _parse_maxspeed(value: Any, highway: str) -> float:
-    """制限速度を m/s で返す。`'50'` / `'50 km/h'` / `'30 mph'` / リストに対応。"""
+    """制限速度を m/s で返す。`'50'` / `'50 km/h'` / `'30 mph'` / リストに対応（リストは最も低い値）。"""
+    speeds: list[float] = []
     for item in _iter_tag_values(value):
         text = str(item).strip().lower()
         number = _parse_float_tag(text)
         if number is None or number <= 0.0:
             continue
         if "mph" in text:
-            return float(number) * _MPH_TO_MPS
-        if "knot" in text:
-            return float(number) * 0.514444
-        return float(number) * _KPH_TO_MPS
+            speeds.append(float(number) * _MPH_TO_MPS)
+        elif "knot" in text:
+            speeds.append(float(number) * 0.514444)
+        else:
+            speeds.append(float(number) * _KPH_TO_MPS)
+    if speeds:
+        return min(speeds)
 
     kph = _DEFAULT_MAXSPEED_KPH.get(highway, _FALLBACK_MAXSPEED_KPH)
     return float(kph) * _KPH_TO_MPS
 
 
 def _parse_oneway(value: Any) -> bool:
-    """oneway を bool に正規化する。`True` / `'yes'` / `'-1'` / リストに対応。"""
+    """oneway を bool に正規化する。`True` / `'yes'` / `'-1'` / リストに対応（リストはどれかが一方通行なら一方通行）。"""
     for item in _iter_tag_values(value):
         if isinstance(item, (bool, np.bool_)):
-            return bool(item)
-        text = str(item).strip().lower()
-        if text in ("yes", "true", "1", "-1", "reversible"):
+            if bool(item):
+                return True
+            continue
+        if str(item).strip().lower() in ("yes", "true", "1", "-1", "reversible"):
             return True
-        if text in ("no", "false", "0"):
-            return False
     return False
 
 

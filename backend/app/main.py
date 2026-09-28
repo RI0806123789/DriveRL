@@ -277,6 +277,19 @@ async def handle_load_map(preset_id: str) -> None:
 
         wire = await asyncio.to_thread(data.to_wire)
 
+        # 受け付けた後に学習が始まっていたら差し込まない（収集は元のエリアの地図で進んでいる）
+        if engine.detector_job.running:
+            engine.abort_loading()
+            await manager.broadcast(
+                {
+                    "type": "status",
+                    **engine.status_payload(),
+                    "message": f"認識器の学習中のため {preset.name} へは切り替えませんでした",
+                    "notice": True,
+                }
+            )
+            return
+
         engine.pause_frames()
         _current_map_wire = wire
         await manager.broadcast({"type": "map", **_current_map_wire})
