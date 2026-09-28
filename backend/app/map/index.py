@@ -26,6 +26,7 @@ from app.contracts import (
 __all__ = ["MapIndexImpl", "build_map_index"]
 
 from app.map.lanes import RouteSegment, build_lane_route
+from app.warn import warn_once
 
 logger = logging.getLogger("autoware_sim")
 
@@ -54,16 +55,6 @@ ROUTE_MAX_START_TURN_RAD = math.radians(120.0)
 ROUTE_END_EPS_M = 0.01
 #: 停止線の位置で、経路の向きと灯器の向きがこれ以上ずれていれば、その灯器に従わない [rad]
 SIGNAL_HEADING_TOLERANCE_RAD = math.radians(35.0)
-
-_WARNED: set[str] = set()
-
-
-def _warn_once(key: str, message: str) -> None:
-    """同じ失敗を初回だけログに残す（code_review B-15 / E-06 / E-10）。"""
-    if key in _WARNED:
-        return
-    _WARNED.add(key)
-    logger.exception(message)
 
 
 class MapIndexImpl:
@@ -173,8 +164,8 @@ class MapIndexImpl:
             inside = np.zeros(len(self._edge_lines), dtype=np.float64)
             np.add.at(inside, pairs[0], shapely.length(parts))
         except Exception:
-            _warn_once(
-                "edge_building_overlap",
+            warn_once(
+                "map.index.edge_building_overlap",
                 "建物の中を通る道路の判定に失敗しました。経路は建物を避けずに作ります",
             )
             return {}

@@ -24,18 +24,9 @@ from app.contracts import (
     MapSign,
     MapSignal,
 )
+from app.warn import warn_once
 
 logger = logging.getLogger("autoware_sim")
-
-_WARNED: set[str] = set()
-
-
-def _warn_once(key: str, message: str) -> None:
-    """同じ失敗を初回だけログに残す（code_review B-15）。"""
-    if key in _WARNED:
-        return
-    _WARNED.add(key)
-    logger.exception(message)
 
 
 class MapLoadError(RuntimeError):
@@ -674,8 +665,8 @@ def _collect_buildings(
         try:
             polygon = polygon.simplify(config.BUILDING_SIMPLIFY_TOLERANCE, preserve_topology=True)
         except Exception:
-            _warn_once(
-                "building_simplify",
+            warn_once(
+                "map.loader.building_simplify",
                 "建物の輪郭を簡略化できませんでした。簡略化せずに使います（初回のみ記録）",
             )
         if polygon is None or polygon.is_empty:

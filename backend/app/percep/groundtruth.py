@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import logging
 import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Sequence
@@ -40,6 +39,7 @@ from app.percep.types import (
     signal_ahead_of_stop,
 )
 from app.percep.weather import CLEAR, Weather
+from app.warn import warn_once
 
 if TYPE_CHECKING:
     from app.sim.world import World
@@ -52,18 +52,6 @@ __all__ = [
     "detect_ground_truth_views",
     "freespace_ground_truth",
 ]
-
-logger = logging.getLogger("autoware_sim")
-
-_WARNED: set[str] = set()
-
-
-def _warn_once(key: str, message: str) -> None:
-    """同じ失敗を初回だけログに残す（code_review B-15 / E-01 / E-02）。"""
-    if key in _WARNED:
-        return
-    _WARNED.add(key)
-    logger.exception(message)
 
 
 MIN_BOX_PX = 1.5
@@ -279,8 +267,8 @@ def _line_of_sight(
     try:
         blocked = grid.sample_building(sample_x, sample_y)
     except Exception:
-        _warn_once(
-            "line_of_sight",
+        warn_once(
+            "percep.groundtruth.line_of_sight",
             "遮蔽判定に失敗しました。以後この画では遮蔽を考えず、"
             "建物の裏の物体にも正解ラベルが付きます（初回のみ記録）",
         )
@@ -819,8 +807,8 @@ def freespace_ground_truth(
         )
         out[:] = np.asarray(hit, dtype=np.float32).reshape(-1)
     except Exception:
-        _warn_once(
-            "freespace_raycast",
+        warn_once(
+            "percep.groundtruth.freespace_raycast",
             "走行可能距離のレイキャストに失敗しました。全方向が "
             "max_distance（＝前方はすべて空いている）のまま観測と教師データに入ります"
             "（初回のみ記録）",

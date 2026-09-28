@@ -21,7 +21,7 @@ import numpy as np
 import torch
 
 from app import config
-from app.contracts import SimParams
+from app.contracts import InterventionEvent, SimParams
 from app.map import build_map_index, get_preset, load_map
 from app.map.loader import MapLoadError
 from app.percep.camera import LBL_OBSTACLE, PALETTE, PseudoCamera
@@ -458,6 +458,37 @@ def verify_observation(index) -> None:
     )
 
 
+def verify_event_batch(index) -> None:
+    print("\n介入をまとめて適用したときの観測の作り直し")
+    env = make_env(index, vehicles=4, seed=6)
+    fleet = env.world.fleet
+    calls = [0]
+    compute = env._compute_observations
+
+    def counted():
+        calls[0] += 1
+        return compute()
+
+    env._compute_observations = counted
+    for k in range(10):
+        slot = int(np.flatnonzero(fleet.active)[k % int(fleet.active.sum())])
+        h = float(fleet.heading[slot])
+        env.apply_event(
+            InterventionEvent(
+                "add_obstacle",
+                {"x": float(fleet.x[slot]) + (25.0 + k) * math.cos(h), "y": float(fleet.y[slot]) + (25.0 + k) * math.sin(h)},
+            )
+        )
+    applied = calls[0]
+    env.observations
+    env.observations
+    check(
+        "介入 10 件を続けて適用しても、観測は読むときに 1 回だけ作り直す",
+        applied == 0 and calls[0] == 1,
+        f"適用中 {applied} 回 / 読んだ後 {calls[0]} 回",
+    )
+
+
 def verify_surround_respawn(index) -> None:
     print("\n再スポーンした車の周囲カメラ（CNN で撮り直していない間）")
     env = make_env(index, seed=5)
@@ -553,6 +584,7 @@ def main() -> None:
     verify_views(first)
     verify_observation(first)
     verify_surround_respawn(first)
+    verify_event_batch(first)
     verify_learning_mask(first)
     verify_expert_mask(first)
     for preset, index in indexes.items():
