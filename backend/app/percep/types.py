@@ -12,10 +12,16 @@ import numpy as np
 from app import config
 
 __all__ = [
+    "CAMERAS_BY_KEY",
+    "CAMERA_RIG",
     "CameraSpec",
     "CLASS_QUOTA",
     "CLASS_PRIORITY",
     "DEFAULT_CAMERA",
+    "LEFT_CAMERA",
+    "REAR_CAMERA",
+    "RIGHT_CAMERA",
+    "SURROUND_CAMERAS",
     "DetClass",
     "Detection",
     "FACING_TOLERANCE",
@@ -46,7 +52,7 @@ __all__ = [
 
 @dataclass(frozen=True)
 class CameraSpec:
-    """擬似カメラの内部パラメータ。"""
+    """擬似カメラの内部パラメータと、車体への取り付け位置・向き。"""
 
     width: int = 192
     height: int = 144
@@ -61,10 +67,23 @@ class CameraSpec:
     near: float = 0.5
     far: float = 120.0
 
+    key: str = "front"
+    #: 車両の進行方向から測ったカメラの向き [度]（反時計回りが正。左 = +90 / 後ろ = 180）
+    yaw_deg: float = 0.0
+    #: 俯角を直接決めるとき [度]（下向きが負）。None なら注視点の下がりから決める
+    pitch_deg: float | None = None
+
     @property
     def pitch(self) -> float:
-        """カメラの俯角 [rad]（下向きが負）。注視点の下がりから決まる。"""
+        """カメラの俯角 [rad]（下向きが負）。"""
+        if self.pitch_deg is not None:
+            return math.radians(float(self.pitch_deg))
         return math.atan2(-self.look_drop, max(self.look_ahead - self.forward, 1e-6))
+
+    @property
+    def yaw(self) -> float:
+        """車両の進行方向から測ったカメラの向き [rad]。"""
+        return math.radians(float(self.yaw_deg))
 
     @property
     def focal_px(self) -> float:
@@ -74,18 +93,59 @@ class CameraSpec:
     def to_wire(self) -> dict[str, Any]:
         """フロントが投影を再現できるだけの情報を返す。"""
         return {
+            "key": self.key,
             "width": self.width,
             "height": self.height,
             "fovDeg": self.fov_deg,
             "forward": self.forward,
             "right": self.right,
             "eyeHeight": self.eye_height,
-            "lookAhead": self.look_ahead,
-            "lookDrop": self.look_drop,
+            "yawDeg": self.yaw_deg,
+            "pitchDeg": math.degrees(self.pitch),
         }
 
 
 DEFAULT_CAMERA = CameraSpec()
+
+#: 周囲カメラの共通の俯角 [度]。車のすぐ後ろ・横の路面まで写すため前方より下へ向ける
+SURROUND_PITCH_DEG = -10.0
+
+REAR_CAMERA = CameraSpec(
+    forward=-0.62,
+    right=0.0,
+    eye_height=1.38,
+    key="rear",
+    yaw_deg=180.0,
+    pitch_deg=SURROUND_PITCH_DEG,
+)
+LEFT_CAMERA = CameraSpec(
+    forward=0.0,
+    right=-0.74,
+    eye_height=1.34,
+    key="left",
+    yaw_deg=90.0,
+    pitch_deg=SURROUND_PITCH_DEG,
+)
+RIGHT_CAMERA = CameraSpec(
+    forward=0.0,
+    right=0.74,
+    eye_height=1.34,
+    key="right",
+    yaw_deg=-90.0,
+    pitch_deg=SURROUND_PITCH_DEG,
+)
+
+#: 前方以外の 3 台。並びはワイヤ形式（`frame.surround`）と観測の欄の並びと同じ
+SURROUND_CAMERAS: tuple[CameraSpec, ...] = (REAR_CAMERA, LEFT_CAMERA, RIGHT_CAMERA)
+CAMERA_RIG: tuple[CameraSpec, ...] = (DEFAULT_CAMERA, *SURROUND_CAMERAS)
+CAMERAS_BY_KEY: dict[str, CameraSpec] = {spec.key: spec for spec in CAMERA_RIG}
+
+# 4 台とも同じ認識器に通すので、画の大きさ・画角・奥行きの範囲は揃っていなければならない
+assert all(
+    (s.width, s.height, s.fov_deg, s.near, s.far)
+    == (DEFAULT_CAMERA.width, DEFAULT_CAMERA.height, DEFAULT_CAMERA.fov_deg, DEFAULT_CAMERA.near, DEFAULT_CAMERA.far)
+    for s in CAMERA_RIG
+), "周囲カメラの内部パラメータが前方カメラと揃っていない"
 
 
 class DetClass(IntEnum):
@@ -123,6 +183,9 @@ class Detection:
     lateral: float | None = None
 
     lane_points: list[tuple[float, float]] | None = None
+
+    #: 安全ギミックが付ける危険度。1 = 注意（進路の近く）/ 2 = これで止めた。付けるのは `sim/safety.py` だけ
+    hazard: int | None = None
 
     @property
     def label(self) -> str:
@@ -167,6 +230,8 @@ class Detection:
             out["lanePoints"] = [
                 [round(px, 1), round(py, 2)] for px, py in self.lane_points
             ]
+        if self.hazard:
+            out["hazard"] = int(self.hazard)
         return out
 
 

@@ -150,6 +150,13 @@ def _layout_notes() -> dict[str, tuple[str, str]]:
             f"{config.OBS_FREESPACE_MAX_DISTANCE}m。"
             "以前の建物レイキャストに相当するが、値は画像からの推定",
         ),
+        "surround": (
+            "camera",
+            f"周囲カメラ（後方・左・右の順）の Late Fusion。カメラごとに、いちばん近い車両・障害物・歩行者の "
+            f"(dx, dy) / {config.OBS_SURROUND_RANGE}m（自車座標系: 前方 +x / 左 +y）と信頼度。"
+            "写っていなければ 3 つとも 0。CNN で走るときは周囲カメラを 1 ステップに "
+            f"{config.SURROUND_CNN_IMAGES_PER_STEP} 枚ずつ古い順に撮り直すので、少し前の画から作った値が入る",
+        ),
     }
 
 

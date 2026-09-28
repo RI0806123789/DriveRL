@@ -11,6 +11,7 @@ import zipfile
 
 import torch
 
+from app import config
 from app.rl.ppo import KNOWN_CHECKPOINT_FORMATS
 
 __all__ = ["CheckpointImportError", "CheckpointInfo", "inspect_checkpoint", "MAX_UPLOAD_BYTES"]
@@ -141,7 +142,12 @@ def inspect_checkpoint(
     except (TypeError, ValueError, OverflowError) as exc:
         raise CheckpointImportError("チェックポイントのモデル定義が壊れています") from exc
 
-    if obs_dim != expected_obs_dim:
+    # 周囲カメラの欄を足す前のモデルは、入力を 0 埋めして読み込める（`rl/ppo.py` の widen_observation）
+    widenable = (
+        obs_dim == int(config.OBS_DIM_BEFORE_SURROUND)
+        and int(expected_obs_dim) == int(config.OBS_DIM)
+    )
+    if obs_dim != expected_obs_dim and not widenable:
         raise CheckpointImportError(
             f"観測ベクトルの次元が違います（ファイル: {obs_dim} / このアプリ: {expected_obs_dim}）。"
             "観測の作り方を変更した後のモデルは読み込めません"

@@ -34,6 +34,28 @@ CHECKPOINT_FORMAT = "autoware-sim-ppo-1"
 KNOWN_CHECKPOINT_FORMATS: frozenset[object] = frozenset({CHECKPOINT_FORMAT, 1})
 
 
+#: 観測を受け取る入力層（方策と価値の MLP の先頭の Linear）
+_INPUT_WEIGHTS = ("policy_trunk.0.weight", "value_trunk.0.weight")
+
+
+def widen_observation(
+    state: dict[str, torch.Tensor], saved_obs: int, obs_dim: int
+) -> dict[str, torch.Tensor]:
+    """入力層の重みの末尾に 0 の列を足す。足した入力は出力に効かないので、読み込んだ直後の振る舞いは元と同じ。"""
+    out = dict(state)
+    for key in _INPUT_WEIGHTS:
+        weight = out.get(key)
+        if weight is None or weight.dim() != 2 or int(weight.shape[1]) != int(saved_obs):
+            raise ValueError(f"{key} の形が観測 {saved_obs} 次元の入力層ではありません")
+        pad = torch.zeros(
+            (int(weight.shape[0]), int(obs_dim) - int(saved_obs)),
+            dtype=weight.dtype,
+            device=weight.device,
+        )
+        out[key] = torch.cat([weight, pad], dim=1)
+    return out
+
+
 def peek_hidden_sizes(path: Path) -> tuple[int, ...] | None:
     """チェックポイントに保存された隠れ層構成だけを覗き見る。"""
     path = Path(path)
@@ -118,6 +140,8 @@ class PPOTrainer:
         self._last_grad_clip_rate: float = 0.0
         self._weights_before_update: dict[str, torch.Tensor] = {}
         self._last_delta_norms: dict[str, float] = {}
+        #: 直前の `load` が観測の次元を広げて読み込んだなら、元の次元
+        self.widened_from: int | None = None
 
     @property
     def updates(self) -> int:
@@ -466,6 +490,7 @@ class PPOTrainer:
     def load(self, path: Path) -> bool:
         """チェックポイントを読み込む。読めたら True、形状不一致等なら False。"""
         path = Path(path)
+        self.widened_from = None
         if not path.exists():
             return False
         try:
@@ -486,7 +511,8 @@ class PPOTrainer:
                 "見覚えのないチェックポイント形式です: %r（%s）", fmt, path.name
             )
         try:
-            if int(payload.get("obs_dim", -1)) != self.obs_dim:
+            saved_obs = int(payload.get("obs_dim", -1))
+            if saved_obs != self.obs_dim and not self._can_widen(saved_obs):
                 return False
             if int(payload.get("action_dim", -1)) != self.action_dim:
                 return False
@@ -495,11 +521,16 @@ class PPOTrainer:
         except (TypeError, ValueError):
             logger.warning("チェックポイントのモデル定義が壊れています: %s", path.name)
             return False
+        widened = saved_obs != self.obs_dim
         before = copy.deepcopy(self.policy.state_dict())
         try:
             self._drop_pending()
-            self.policy.load_state_dict(payload["policy"])
-            if "optimizer" in payload:
+            state = payload["policy"]
+            if widened:
+                state = widen_observation(state, saved_obs, self.obs_dim)
+            self.policy.load_state_dict(state)
+            # 入力の形が変わった重みの Adam の統計は使えないので、移行したときは捨てる
+            if "optimizer" in payload and not widened:
                 self.optimizer.load_state_dict(payload["optimizer"])
                 for group in self.optimizer.param_groups:
                     group["lr"] = self.learning_rate
@@ -516,4 +547,15 @@ class PPOTrainer:
             self._last_raw_actions = None
         self.policy.clamp_log_std()
         self._updates = int(payload.get("updates", 0))
+        self.widened_from = saved_obs if widened else None
+        if widened:
+            logger.info(
+                "観測 %d 次元のチェックポイントを %d 次元へ広げて読み込みました（足した入力の重みは 0）",
+                saved_obs,
+                self.obs_dim,
+            )
         return True
+
+    def _can_widen(self, saved_obs: int) -> bool:
+        """周囲カメラの欄を足す前の観測次元なら、入力を 0 埋めして読み込める。"""
+        return saved_obs == int(config.OBS_DIM_BEFORE_SURROUND) and self.obs_dim == int(config.OBS_DIM)

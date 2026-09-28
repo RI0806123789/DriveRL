@@ -31,16 +31,31 @@ _LOCAL_CORNERS = np.array(
 class VehicleFleet:
     """MAX_VEHICLES 台分の状態を numpy 配列で保持する。"""
 
-    __slots__ = ("size", "x", "y", "heading", "speed", "steer", "active")
+    __slots__ = ("size", "x", "y", "heading", "speed", "steer", "active", "gear")
 
     def __init__(self, size: int = config.MAX_VEHICLES) -> None:
         self.size = int(size)
         self.x = np.zeros(self.size, dtype=np.float32)
         self.y = np.zeros(self.size, dtype=np.float32)
         self.heading = np.zeros(self.size, dtype=np.float32)
+        #: 符号つきの速さ [m/s]。後退ギアの間だけ負になる
         self.speed = np.zeros(self.size, dtype=np.float32)
         self.steer = np.zeros(self.size, dtype=np.float32)
         self.active = np.zeros(self.size, dtype=bool)
+        #: +1 = 前進（D）/ -1 = 後退（R）。切り替えは止まってから（`set_gear`）
+        self.gear = np.ones(self.size, dtype=np.int8)
+
+    def set_gear(self, slot: int, gear: int) -> bool:
+        """ギアを切り替える。止まっていなければ切り替えず False を返す。"""
+        slot = int(slot)
+        want = np.int8(1 if gear >= 0 else -1)
+        if self.gear[slot] == want:
+            return True
+        if abs(float(self.speed[slot])) > 1e-3:
+            return False
+        self.gear[slot] = want
+        self.speed[slot] = np.float32(0.0)
+        return True
 
     def step(
         self,
@@ -49,7 +64,7 @@ class VehicleFleet:
         dt: float,
         max_speed: float,
     ) -> None:
-        """全スロットを 1 ステップ進める。非アクティブなスロットは変化しない。"""
+        """全スロットを 1 ステップ進める。指令の正はギアの向きへの加速、負は 0 へ向けた制動。"""
         accel_cmd = np.clip(
             np.asarray(accel_cmd, dtype=np.float32).reshape(self.size), -1.0, 1.0
         )
@@ -65,7 +80,13 @@ class VehicleFleet:
             accel_cmd * np.float32(config.MAX_ACCEL),
             accel_cmd * np.float32(abs(config.MAX_DECEL)),
         ).astype(np.float32)
-        new_speed = np.clip(self.speed + accel * dt, 0.0, limit_speed).astype(np.float32)
+        # 速さの大きさで積分して、ギアの向きの符号を付け直す（制動は 0 で止まり、逆へは走らない）
+        sign = self.gear.astype(np.float32)
+        cap = np.where(
+            self.gear > 0, np.float32(limit_speed), np.float32(config.REVERSE_MAX_SPEED)
+        ).astype(np.float32)
+        magnitude = np.clip(self.speed * sign + accel * dt, 0.0, cap).astype(np.float32)
+        new_speed = (magnitude * sign).astype(np.float32)
 
         target_steer = steer_cmd * np.float32(config.MAX_STEER)
         max_delta = np.float32(config.STEER_RATE * dt)
@@ -111,3 +132,4 @@ class VehicleFleet:
         self.heading[slot] = wrap_angle(np.float32(heading))
         self.speed[slot] = np.float32(0.0)
         self.steer[slot] = np.float32(0.0)
+        self.gear[slot] = np.int8(1)

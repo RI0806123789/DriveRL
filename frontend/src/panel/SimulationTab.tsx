@@ -231,6 +231,15 @@ export function SimulationTab() {
             send({ type: 'set_params', params: { obeySpeedSigns: v } })
           }}
         />
+        <Switch
+          label="安全ギミック（学習中の車にも掛ける）"
+          description="前後左右のカメラの検出枠で、障害物の手前で止まる・後退 AEB 付きで切り返す・曲がる側の歩行者を待つ・信号の無い交差点で左右を確かめる。実用モードでは常に掛かります。切り返しと回避の間は学習に使いません"
+          checked={params.safetyAssist}
+          onChange={(v) => {
+            patchParamsLocal({ safetyAssist: v })
+            send({ type: 'set_params', params: { safetyAssist: v } })
+          }}
+        />
         <div className="m3-note">
           切ると信号を無視して走るようになり、赤信号を越えた罰だけが残ります。
           標識も同じで、切ると規制速度を超えた罰だけが残ります。

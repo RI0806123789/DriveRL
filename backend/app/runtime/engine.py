@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import queue
+import shutil
 import threading
 import time
 from collections import deque
@@ -43,6 +44,9 @@ _EPISODE_WINDOW = 50
 #: タブを閉じた・回線が切れた利用者を街に置き去りにすると、そこに見えない人が
 #: 立ち続けて車が永久に止まる
 PLAYER_POSE_TTL_SEC = 1.0
+
+#: 周囲カメラの検出を frame に載せ続ける時間 [秒]。4 分割表示のクライアントは 1 秒ごとに送り直す
+SURROUND_WATCH_TTL_SEC = 2.5
 
 
 @dataclass
@@ -131,6 +135,8 @@ class SimulationEngine:
 
         # 徒歩キャラの位置を最後に受け取った時刻。0 なら街に居ない
         self._player_pose_at: float = 0.0
+        # 周囲カメラの検出を見たい車と、最後に頼まれた時刻（複数タブなら和集合）
+        self._surround_watch: dict[int, float] = {}
 
     def start(self) -> None:
         if self._thread is not None:
@@ -208,6 +214,12 @@ class SimulationEngine:
     def submit_player_pose(self, at: tuple[float, float] | None) -> None:
         """実用モードの徒歩キャラの位置を積む（None で街から消す）。"""
         self._inbox.put(("player_pose", at))
+
+    def watch_surround(self, vehicle_id: int | None) -> None:
+        """その車の周囲カメラの検出を、しばらく frame に載せるよう頼む（None は何もしない）。"""
+        if vehicle_id is None or not (0 <= int(vehicle_id) < config.MAX_VEHICLES):
+            return
+        self._inbox.put(("watch_surround", int(vehicle_id)))
 
     def take_taxi(self, last_seq: int) -> tuple[int, dict[str, Any] | None]:
         """前回配信した番号より新しい配車状態があれば返す（経路はここで配り終える）。"""
@@ -501,6 +513,9 @@ class SimulationEngine:
 
         elif kind == "player_pose":
             self._apply_player_pose(payload)
+
+        elif kind == "watch_surround":
+            self._surround_watch[int(payload)] = time.perf_counter()
 
         elif kind == "publish_taxi":
             with self._lock:
@@ -796,6 +811,17 @@ class SimulationEngine:
 
         restored = trainer.load(config.CHECKPOINT_PATH)
         stale = not restored and config.CHECKPOINT_PATH.exists()
+        widened = restored and trainer.widened_from is not None
+        if widened:
+            # 自動保存で上書きされる前に、旧い観測の重みを控える（前の版のコードへ戻れるように）
+            backup = config.CHECKPOINT_PATH.with_name(
+                f"{config.CHECKPOINT_PATH.name}.obs{trainer.widened_from}"
+            )
+            try:
+                if not backup.exists():
+                    shutil.copy2(config.CHECKPOINT_PATH, backup)
+            except OSError:
+                logger.exception("移行前のチェックポイントを控えられませんでした: %s", backup.name)
 
         warm_obs = np.zeros((config.MAX_VEHICLES, config.OBS_DIM), dtype=np.float32)
         warm_active = np.ones(config.MAX_VEHICLES, dtype=bool)
@@ -807,7 +833,13 @@ class SimulationEngine:
             (time.perf_counter() - started) * 1000.0,
             "あり" if restored else "なし",
         )
-        if restored:
+        if widened:
+            self._notify(
+                "前回の学習済みモデルを復元しました。観測に周囲カメラの欄が増えたので、"
+                "その入力の重みを 0 で足して読み込みました（元のファイルは "
+                f"{config.CHECKPOINT_PATH.name}.obs{trainer.widened_from} に控えました）"
+            )
+        elif restored:
             self._notify("前回の学習済みモデルを復元しました")
         elif stale:
             logger.warning(
@@ -919,7 +951,8 @@ class SimulationEngine:
                 values=values,
                 rewards=result.rewards,
                 dones=result.dones,
-                active=result.active,
+                # 安全ギミックが操作を丸ごと引き受けた車は、方策の経験として積まない
+                active=result.active if result.learn is None else result.learn,
                 truncated=result.truncated,
                 final_obs=result.final_obs,
             )
@@ -997,6 +1030,14 @@ class SimulationEngine:
         if delivered and self._unconfirmed_routes:
             env.world.clear_route_dirty(self._unconfirmed_routes)
             self._unconfirmed_routes = ()
+
+        # 頼まれなくなった車の周囲カメラは載せない（4 分割表示を閉じたタブのぶん）
+        self._surround_watch = {
+            vid: at
+            for vid, at in self._surround_watch.items()
+            if now - at < SURROUND_WATCH_TTL_SEC
+        }
+        env.watched_surround = frozenset(self._surround_watch)
 
         frame = (
             env.full_snapshot(self._tick, self._sim_time)

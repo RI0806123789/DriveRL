@@ -120,7 +120,8 @@ export const GAUGE_SLOTS: ReadonlyArray<{
 
 /** 速度 [m/s] を速度計の割合 0..1 へ。**目盛りは固定なので `maxSpeed` に依らない** */
 export function speedRatio(speedMps: number): number {
-  return Math.max(0, Math.min(1, (speedMps * 3.6) / GAUGE_SPEED_MAX_KMH))
+  // 後退中は速度が負になる。実車と同じく速さの大きさを指す
+  return Math.max(0, Math.min(1, (Math.abs(speedMps) * 3.6) / GAUGE_SPEED_MAX_KMH))
 }
 
 /** 加速指令 -1..1 をパワーメーターの割合 0..1 へ。 */

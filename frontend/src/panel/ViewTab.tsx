@@ -19,6 +19,7 @@ export function ViewTab() {
   const view = useSimStore((s) => s.view)
   const toggleView = useSimStore((s) => s.toggleView)
   const map = useSimStore((s) => s.map)
+  const appMode = useSimStore((s) => s.mode)
 
   const panelOpen = useSimStore((s) => s.panelOpen)
   const [activeIds, setActiveIds] = useState<number[]>([])
@@ -88,10 +89,18 @@ export function ViewTab() {
                 </Chip>
               ))}
             </div>
+            {cameraMode === 'driver' && appMode === 'dev' && (
+              <Switch
+                label="前後左右の 4 分割で表示"
+                description="左上が前方（運転席）、右上が後方（リアガラス上端）、左下が左側方・右下が右側方（B ピラー上端）のカメラです。各カメラの検出枠を重ね、安全ギミックが止めている根拠の枠は赤、注意の枠は黄で示します"
+                checked={view.quad}
+                onChange={() => toggleView('quad')}
+              />
+            )}
             <div className="m3-note">
               {cameraMode === 'driver'
-                ? '右ハンドル（日本仕様）の運転席から見た視点です。進路は太い矢印で示されます。ダッシュボード・メーター・ハンドルなどの内装も描きます。'
-                : '車両の後方上空から追いかけます。'}
+                ? '右ハンドル（日本仕様）の運転席から見た視点です。進路は太い矢印で示されます。ダッシュボード・メーター・ハンドルなどの内装も描きます。後退しているときは後方に予測ガイド線（赤 1m・黄 2m・緑 3m の目盛り）が出ます。'
+                : '車両の後方上空から追いかけます。後退しているときは後方に予測ガイド線が出ます。'}
               <br />
               追従中は手動のカメラ操作を受け付けません。「シミュレーション」タブの
               車両一覧をクリックしても対象を切り替えられます。
@@ -161,7 +170,7 @@ export function ViewTab() {
         <Switch label="グリッド" checked={view.grid} onChange={() => toggleView('grid')} />
         <Switch
           label="認識結果（バウンディングボックス）"
-          description="運転席カメラでのみ表示。擬似カメラは運転席の位置・向きで描いているため、追従カメラ（車体後方15m）に重ねると対象物の位置が合いません。PPO が観測として受け取っている検出結果と同じものです"
+          description="運転席カメラでのみ表示（4 分割のときは前後左右の各カメラ）。擬似カメラは運転席の位置・向きで描いているため、追従カメラ（車体後方15m）に重ねると対象物の位置が合いません。PPO が観測として受け取っている検出結果と同じものです"
           checked={view.detections}
           onChange={() => toggleView('detections')}
         />

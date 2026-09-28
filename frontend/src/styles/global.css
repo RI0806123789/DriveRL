@@ -314,6 +314,88 @@ p {
   color: var(--m3-on-surface-variant);
 }
 
+/* 安全ギミックが介入の根拠にしている枠（色は detectionLabels.ts の HAZARD_COLORS） */
+.detection-box--hazard {
+  border-width: 3px;
+}
+
+/* 運転席の 4 分割表示。区切りの線は枠で描く（3D 側はシザーで描き分けている） */
+.quad-pane {
+  position: absolute;
+  overflow: hidden;
+  outline: 1px solid color-mix(in srgb, var(--m3-surface-container-lowest) 70%, transparent);
+  outline-offset: -1px;
+}
+
+/* ラベルと介入の表示は左上に並べる（右上はパネルを開くボタン、上の中央は操作の案内が使う） */
+.quad-pane-head {
+  position: absolute;
+  left: 10px;
+  top: 10px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.quad-pane-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: var(--m3-shape-full);
+  background: color-mix(in srgb, var(--m3-surface-container-lowest) 80%, transparent);
+  backdrop-filter: blur(6px);
+  color: var(--m3-on-surface);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.quad-gear {
+  display: inline-grid;
+  place-items: center;
+  min-width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  background: #ff3b30;
+  color: #fff;
+  font-family: var(--m3-font-mono);
+  font-size: 11px;
+}
+
+.quad-badge {
+  padding: 3px 10px;
+  border-radius: var(--m3-shape-sm);
+  font-size: 12px;
+  font-weight: 700;
+  color: #fff;
+}
+
+.quad-summary {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  padding: 6px 14px;
+  border-radius: var(--m3-shape-md);
+  font-size: 13px;
+  font-weight: 700;
+  color: #fff;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+}
+
+.quad-badge--info {
+  background: color-mix(in srgb, #1e88e5 88%, transparent);
+}
+
+.quad-badge--warn {
+  background: color-mix(in srgb, #ef8f00 90%, transparent);
+}
+
+.quad-badge--stop {
+  background: color-mix(in srgb, #e5322b 92%, transparent);
+}
+
 .panel {
   display: flex;
   flex-direction: column;

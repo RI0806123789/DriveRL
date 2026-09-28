@@ -18,7 +18,7 @@ import numpy as np
 from app import config
 from app.contracts import SimParams
 from app.percep import detector as det
-from app.percep.types import DEFAULT_CAMERA, CameraSpec, DetClass
+from app.percep.types import CAMERAS_BY_KEY, DEFAULT_CAMERA, CameraSpec, DetClass
 from app.percep.weather import PRESETS, Weather
 
 if TYPE_CHECKING:
@@ -31,6 +31,19 @@ DATASET_FILE = "detector_dataset.npz"
 DATASET_VERSION = 4
 
 VALIDATION_SPLIT = 0.1
+
+#: 教師データの画をどのカメラで撮るか（割合）。同じ認識器を 4 台のカメラに通すので、
+#: 前方だけで学習すると後方・左右の画（俯角が違い、写るものも違う）で取りこぼす
+CAMERA_MIX: dict[str, float] = {
+    "front": 0.5,
+    "rear": 1.0 / 6.0,
+    "left": 1.0 / 6.0,
+    "right": 1.0 / 6.0,
+}
+
+#: 周囲カメラ用に車の周りへ置くパイロンの距離 [m]
+AROUND_MIN_M = 3.0
+AROUND_MAX_M = 18.0
 
 
 class TrainingCancelled(Exception):
@@ -137,7 +150,7 @@ def cluster_vehicles(
 def scatter_obstacles(
     env: "SimulationEnv", rng: np.random.Generator, *, focus: DetClass | None = None
 ) -> None:
-    """各車両の前方にパイロンを置く。置かないと OBSTACLE の教師が 0 件になる。"""
+    """各車両の前方と周り（後ろ・横）にパイロンを置く。置かないと OBSTACLE の教師が 0 件になる。"""
     env.world.clear_obstacles()
     dense = focus is DetClass.OBSTACLE
     per_vehicle = 3 if dense else 1
@@ -155,6 +168,14 @@ def scatter_obstacles(
                 y + np.sin(heading) * ahead + np.cos(heading) * side,
                 float(config.OBSTACLE_RADIUS),
             )
+        # 後方・左右カメラの教師（後退 AEB はこれで後ろのパイロンに気づく）
+        bearing = heading + float(rng.uniform(math.pi * 0.35, math.pi * 1.65))
+        away = float(rng.uniform(AROUND_MIN_M, AROUND_MAX_M))
+        env.world.add_obstacle(
+            x + math.cos(bearing) * away,
+            y + math.sin(bearing) * away,
+            float(config.OBSTACLE_RADIUS),
+        )
 
 
 def scatter_pedestrians(env: "SimulationEnv", *, focus: DetClass | None = None) -> None:
@@ -296,10 +317,11 @@ def collect_dataset(
     weathers: Sequence[str] | None = None,
     weather_focus: dict[str, float] | None = None,
     class_focus: dict[DetClass, float] | None = None,
+    camera_mix: dict[str, float] | None = None,
     on_progress: Callable[[int, int, float], None] | None = None,
     should_cancel: Callable[[], bool] | None = None,
 ) -> dict[str, np.ndarray]:
-    """走らせながら画像と正解を集める。"""
+    """走らせながら画像と正解を集める。画は `camera_mix`（省略時 `CAMERA_MIX`）の割合で 4 台のカメラから撮る。"""
     from app.sim.env import SimulationEnv
     from app.percep.camera import PseudoCamera
     from app.percep.groundtruth import detect_ground_truth_batch, freespace_ground_truth
@@ -315,6 +337,8 @@ def collect_dataset(
 
     names = [name for name in (weathers or ("clear",)) if name in PRESETS] or ["clear"]
     classes = list(DetClass)
+    mix = {key: weight for key, weight in (camera_mix or CAMERA_MIX).items() if key in CAMERAS_BY_KEY}
+    mix_keys = list(mix) or [spec.key]
 
     images: list[np.ndarray] = []
     targets: list[np.ndarray] = []
@@ -338,26 +362,32 @@ def collect_dataset(
         slots = np.flatnonzero(env.world.fleet.active)
         if slots.size:
             weather: Weather = PRESETS[_weighted_choice(rng, names, weather_focus)]
-            frame = camera.render(env.world, slots, weather, step)
-            results = detect_ground_truth_batch(env.world, slots, spec, weather)
-            target = det.encode_targets(results, spec)
             reach = min(
                 float(config.OBS_FREESPACE_MAX_DISTANCE),
                 weather.visibility_m(float(spec.far)),
             )
-            free = np.stack(
-                [freespace_ground_truth(env.world, int(s), spec, reach) for s in slots]
-            )
-            images.append(frame)
-            targets.append(target)
-            frees.append(det.encode_freespace(free))
-            skies.append(
-                np.tile(
-                    np.array([weather.rain, weather.fog], dtype=np.float32),
-                    (int(frame.shape[0]), 1),
+            # 車ごとにどのカメラで撮るかを選ぶ。同じカメラの車はまとめて描く
+            views = [_weighted_choice(rng, mix_keys, mix) for _ in range(int(slots.size))]
+            for key in mix_keys:
+                group = slots[[i for i, v in enumerate(views) if v == key]]
+                if group.size == 0:
+                    continue
+                view = spec if key == spec.key else CAMERAS_BY_KEY[key]
+                frame = camera.render(env.world, group, weather, step, spec=view)
+                results = detect_ground_truth_batch(env.world, group, view, weather)
+                free = np.stack(
+                    [freespace_ground_truth(env.world, int(s), view, reach) for s in group]
                 )
-            )
-            collected += int(frame.shape[0])
+                images.append(frame)
+                targets.append(det.encode_targets(results, view))
+                frees.append(det.encode_freespace(free))
+                skies.append(
+                    np.tile(
+                        np.array([weather.rain, weather.fog], dtype=np.float32),
+                        (int(frame.shape[0]), 1),
+                    )
+                )
+                collected += int(frame.shape[0])
 
         action = np.zeros((config.MAX_VEHICLES, config.ACTION_DIM), dtype=np.float32)
         action[:, 0] = rng.uniform(-0.2, 1.0, size=config.MAX_VEHICLES)

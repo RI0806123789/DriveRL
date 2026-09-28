@@ -10,6 +10,7 @@ import type {
   SimConfig,
   SimParams,
   StatusPayload,
+  SurroundDetections,
   WeatherPreset,
   WeatherState,
 } from '../types/protocol.ts'
@@ -24,6 +25,7 @@ import type { Transport } from './connection.ts'
 import { MockDetectorJob } from './mock/detectorJob.ts'
 import { FRAME_MS, SIM_HZ, makeRng } from './mock/grid.ts'
 import { MOCK_PRESETS, MockSignals, buildMockMap } from './mock/map.ts'
+import { mockSurround } from './mock/surround.ts'
 import { MockTaxi } from './mock/taxi.ts'
 import { MockTraffic } from './mock/traffic.ts'
 
@@ -31,7 +33,7 @@ const MOCK_CONFIG: SimConfig = {
   maxVehicles: 8,
   maxPedestrians: 64,
   simHz: SIM_HZ,
-  obsDim: 66,
+  obsDim: 75,
   actionDim: 2,
 }
 
@@ -66,11 +68,14 @@ const DEFAULT_PARAMS: SimParams = {
   weatherRain: 0,
   weatherFog: 0,
   weatherAuto: false,
+  safetyAssist: false,
 }
 
 const MOCK_MAX_PEDESTRIANS = MOCK_CONFIG.maxPedestrians ?? 64
 
 const MOCK_WEATHER_PERIOD_SEC = 480
+/** 周囲カメラの検出を載せ続ける時間 [ms]。本物の `engine.SURROUND_WATCH_TTL_SEC` と同じ */
+const MOCK_SURROUND_TTL_MS = 2500
 
 const MOCK_MIN_VISIBILITY_M = 15
 
@@ -102,6 +107,8 @@ class MockServer {
   private closed = false
   private updates = 0
   private progress = 0
+  /** 周囲カメラの検出を頼まれた車と、頼まれた時刻 [ms] */
+  private surroundWatch = new Map<number, number>()
 
   constructor(emit: (json: string) => void) {
     this.emit = emit
@@ -220,7 +227,24 @@ class MockServer {
     frame.weather = this.currentWeather()
     const detections = this.buildDetections(phases)
     if (detections) frame.detections = detections
+    const surround = this.buildSurround(frame)
+    if (surround) frame.surround = surround
     this.send(frame)
+  }
+
+  /** 頼まれている車の周囲カメラの検出（本物は `env._surround_wire`） */
+  private buildSurround(frame: FrameMessage): Record<string, SurroundDetections> | null {
+    const now = Date.now()
+    const out: Record<string, SurroundDetections> = {}
+    for (const [id, at] of this.surroundWatch) {
+      if (now - at > MOCK_SURROUND_TTL_MS) {
+        this.surroundWatch.delete(id)
+        continue
+      }
+      const car = frame.vehicles.find((v) => v.id === id && v.active)
+      if (car) out[String(id)] = mockSurround(car, frame.vehicles, frame.pedestrians ?? [])
+    }
+    return Object.keys(out).length ? out : null
   }
 
   /** いま効いている天候。視程の式は `percep/weather.py` の `visibility_m` に合わせる。 */
@@ -486,6 +510,12 @@ class MockServer {
       case 'ping':
         this.send({ type: 'pong', t: Date.now() })
         break
+
+      case 'watch_surround': {
+        // 本物と同じく、頼まれてから 2.5 秒だけ載せる
+        this.surroundWatch.set(msg.vehicleId, Date.now())
+        break
+      }
 
       default:
         this.send({ type: 'error', code: 'INVALID_MESSAGE', message: '未知のメッセージ種別です' })

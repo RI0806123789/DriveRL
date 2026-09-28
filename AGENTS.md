@@ -210,3 +210,12 @@ npm run verify      # 幾何検証と規約の検査（ブラウザ不要。一�
   `performance.now()` を渡すと、あとで描くカメラの区間まで進んで車内が跳ぶ）
 - **モードが変わるときの後始末は `store/simStore.ts` の `modeChange()` 1 か所**（ボタン・`init`・`status` の
   どれで変わっても同じ）。`status.message` は `notice: true` の通だけバナーにする（`docs/protocol.md` 2.4）
+- **前後左右のカメラの取り付けは `percep/types.py` の `CAMERA_RIG` が唯一の出典**。フロントの
+  `scene/cameraMath.ts` の `SURROUND_CAMERAS` と揃えないと、4 分割に出す検出枠が実物からずれる
+  （`npm run verify:detections` が `types.py` を読んで照合する）。**前方カメラは 1 ビットも変えない**
+  （観測の 66 次元までと学習済みの認識器がこれを前提にする）
+- **観測は 75 次元。周囲カメラの 9 次元は末尾に足してある**（`config.OBS_LAYOUT` の `surround`）。
+  66 次元の重みは読み込み時にゼロ詰めで広げる（`rl/ppo.py` の `widen_observation`。元の重みは
+  `.obs66` へ控える）。**途中へ差し込むと、広げた重みが別の欄を読む**
+- **安全ギミックが運転を奪ったステップは PPO の学習から外す**（`StepResult.learn`）。外さないと、
+  方策が出していない操作の結果を方策の手柄として教えることになる（検査は `backend/verify_safety_gimmicks.py`）

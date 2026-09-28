@@ -62,6 +62,8 @@ export interface SimParams {
   weatherFog: number
   /** true の間はサーバーが simTime から天候を決める（上の 2 つは据え置かれる）。 */
   weatherAuto: boolean
+  /** 学習中の車にも安全ギミックを掛けるか（実用モードの経路追従の車には常に掛かる）。 */
+  safetyAssist: boolean
 }
 
 /** いま効いている天候（2.3 frame.weather） */
@@ -248,9 +250,31 @@ export interface VehicleState {
   throttle?: number
   /** 方向指示器。-1=左 / 0=消灯 / +1=右 */
   turnSignal?: number
+  /** 後退ギア（R）か。後退中は `speed` が負になる */
+  reverse?: boolean
+  /** 安全ギミックの介入（protocol.md 2.3）。介入していなければ空文字 */
+  assist?: AssistKind
   /** 目的地までの経路。変化があったフレームのみ含まれる。省略時は前回値を保持 */
   route?: Vec2[]
 }
+
+/** 安全ギミックの介入の種類。**バックエンドの `sim/safety.py` の ASSIST_* と同じ値** */
+export type AssistKind =
+  | ''
+  | 'front_hold'
+  | 'reverse_check'
+  | 'reversing'
+  | 'reverse_stop'
+  | 'detour'
+  | 'blind_spot'
+  | 'peek'
+  | 'yield'
+
+/** 周囲カメラのキー。**バックエンドの `percep/types.py` の CAMERA_RIG と同じ値** */
+export type SurroundKey = 'rear' | 'left' | 'right'
+
+/** 1 台ぶんの周囲カメラの検出。まだ撮っていないカメラのキーは無い */
+export type SurroundDetections = Partial<Record<SurroundKey, Detection[]>>
 
 export interface ObstacleState {
   id: number
@@ -301,6 +325,8 @@ export interface Detection {
   lateral?: number
   /** 車線のみ: 認識した車線中心線の点列。**自車座標系**（前方 +x / 左 +y、単位 m）。 */
   lanePoints?: [number, number][]
+  /** 安全ギミックがこの検出を根拠に介入しているとき。1 = 注意 / 2 = これで止めている */
+  hazard?: 1 | 2
 }
 
 /** 2.3 frame — 毎シミュレーションステップ（既定 20Hz） */
@@ -319,6 +345,8 @@ export interface FrameMessage {
   signals?: number[]
   /** 車両ごとの認識結果。**キーはスロット番号の文字列**（JSON のキーは文字列のため）。 */
   detections?: Record<string, Detection[]>
+  /** 周囲カメラの検出。`watch_surround` で頼んだ車の分だけ載る（キーはスロット番号の文字列） */
+  surround?: Record<string, SurroundDetections>
   /** いま効いている天候。weatherAuto の間は params ではなくこちらが正。 */
   weather?: WeatherState
 }
@@ -731,6 +759,12 @@ export interface PlayerPoseMessage {
   at: Vec2 | null
 }
 
+/** その車の周囲カメラの検出を frame に載せてもらう。**4 分割表示の間は 1 秒ごとに送り直す**（2.5 秒で切れる） */
+export interface WatchSurroundMessage {
+  type: 'watch_surround'
+  vehicleId: number
+}
+
 /** クライアント → サーバーの全メッセージ */
 export type ClientMessage =
   | LoadMapMessage
@@ -754,6 +788,7 @@ export type ClientMessage =
   | AlightTaxiMessage
   | CancelTaxiMessage
   | PlayerPoseMessage
+  | WatchSurroundMessage
   | PingMessage
 
 /** WebSocket の接続状態 */

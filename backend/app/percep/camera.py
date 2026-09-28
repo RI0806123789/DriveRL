@@ -10,7 +10,7 @@ import numpy as np
 
 from app import config
 from app.contracts import MapIndex
-from app.percep.geometry import eye_position, project_components
+from app.percep.geometry import NeighborIndex, eye_position, project_components, view_heading
 from app.percep.types import (
     DEFAULT_CAMERA,
     PEDESTRIAN_HALF_WIDTH,
@@ -160,7 +160,7 @@ _MARK_EDGE_INSET = 0.35
 _MARK_DASH_ON = 5.0
 _MARK_DASH_PERIOD = 10.0
 
-_SMALL_POINT_SET = 1500
+
 
 
 def _ragged_arange(counts: np.ndarray) -> np.ndarray:
@@ -181,49 +181,27 @@ def _ragged_range(starts: np.ndarray, counts: np.ndarray) -> np.ndarray:
     return np.repeat(np.asarray(starts, dtype=np.int64), counts) + _ragged_arange(counts)
 
 
-class _NeighborIndex:
-    """点群を一様グリッドに入れて、半径内の候補を返す索引。"""
-
-    def __init__(self, xs: np.ndarray, ys: np.ndarray, radius: float) -> None:
-        self._count = int(xs.size)
-        self._all = np.arange(self._count, dtype=np.int64)
-        self._small = self._count <= _SMALL_POINT_SET
-        self._cache: dict[tuple[int, int], np.ndarray] = {}
-        if self._small or self._count == 0:
-            return
-
-        self._cell = max(float(radius) * 2.0, 1.0)
-        ci = np.floor(xs / self._cell).astype(np.int64)
-        ri = np.floor(ys / self._cell).astype(np.int64)
-        self._buckets: dict[tuple[int, int], np.ndarray] = {}
-        order = np.lexsort((ci, ri))
-        keys = list(zip(ri[order].tolist(), ci[order].tolist()))
-        start = 0
-        for i in range(1, len(keys) + 1):
-            if i == len(keys) or keys[i] != keys[start]:
-                self._buckets[keys[start]] = order[start:i]
-                start = i
-
-    def query(self, x: float, y: float) -> np.ndarray:
-        if self._small or self._count == 0:
-            return self._all
-        cr = int(math.floor(y / self._cell))
-        cc = int(math.floor(x / self._cell))
-        hit = self._cache.get((cr, cc))
-        if hit is None:
-            parts = [
-                self._buckets[(cr + dr, cc + dc)]
-                for dr in (-1, 0, 1)
-                for dc in (-1, 0, 1)
-                if (cr + dr, cc + dc) in self._buckets
-            ]
-            hit = np.concatenate(parts) if parts else np.zeros(0, dtype=np.int64)
-            self._cache[(cr, cc)] = hit
-        return hit
+#: 取り付け位置・向きで変わる属性。視点を切り替えるときはこれだけを入れ替え、路面タイル・信号・標識は共有する
+_OPTIC_ATTRS = (
+    "spec",
+    "_eye_h",
+    "_cp",
+    "_sp",
+    "_horizon_row",
+    "_ground_g",
+    "_ground_q",
+    "_ground_ok",
+    "_ground_zc",
+    "_column_step",
+    "_col_centers",
+    "_col_a",
+    "_col_f",
+    "_ray_samples",
+)
 
 
 class PseudoCamera:
-    """運転席視点の擬似カメラ。"""
+    """車載カメラ（運転席・後方・左右）の擬似カメラ。路面タイルは全視点で共有する。"""
 
     def __init__(self, map_index: MapIndex, spec: CameraSpec = DEFAULT_CAMERA) -> None:
         self.map_index = map_index
@@ -236,17 +214,45 @@ class PseudoCamera:
         self._cy = self._h * 0.5
         self._near = float(spec.near)
         self._far = float(spec.far)
-        self._eye_h = float(spec.eye_height)
 
-        pitch = float(spec.pitch)
-        self._cp = math.cos(pitch)
-        self._sp = math.sin(pitch)
-
-        self._prepare_ground()
-        self._prepare_columns()
+        self._default_spec = spec
+        self._set_optics(spec)
+        self._optics = {spec: self._optics_snapshot()}
         self._build_road_raster()
         self._prepare_signals()
         self._prepare_signs()
+
+    def _set_optics(self, spec: CameraSpec) -> None:
+        self.spec = spec
+        self._eye_h = float(spec.eye_height)
+        pitch = float(spec.pitch)
+        self._cp = math.cos(pitch)
+        self._sp = math.sin(pitch)
+        self._prepare_ground()
+        self._prepare_columns()
+
+    def _optics_snapshot(self) -> dict[str, object]:
+        return {name: getattr(self, name) for name in _OPTIC_ATTRS}
+
+    def _use(self, spec: CameraSpec) -> None:
+        """描く視点を `spec` へ切り替える。画の大きさと画角は全視点で共通であること。"""
+        if spec == self.spec:
+            return
+        if (spec.width, spec.height, spec.fov_deg, spec.near, spec.far) != (
+            self._w,
+            self._h,
+            self.spec.fov_deg,
+            self._near,
+            self._far,
+        ):
+            raise ValueError(f"カメラ {spec.key} の画の大きさ・画角が他の視点と違います")
+        optics = self._optics.get(spec)
+        if optics is None:
+            self._set_optics(spec)
+            self._optics[spec] = self._optics_snapshot()
+            return
+        for name, value in optics.items():
+            setattr(self, name, value)
 
     def _prepare_ground(self) -> None:
         """地平線と、地面画素の逆透視変換の係数を作る。"""
@@ -604,7 +610,7 @@ class PseudoCamera:
         n = len(signals)
         self._sig_count = n
         if n == 0:
-            self._sig_grid = _NeighborIndex(
+            self._sig_grid = NeighborIndex(
                 np.zeros(0), np.zeros(0), self._far
             )
             return
@@ -631,7 +637,7 @@ class PseudoCamera:
         self._sig_heading = heading
         self._sig_stop_x = np.array([s.x for s in signals], dtype=np.float64)
         self._sig_stop_y = np.array([s.y for s in signals], dtype=np.float64)
-        self._sig_grid = _NeighborIndex(self._sig_x, self._sig_y, self._far)
+        self._sig_grid = NeighborIndex(self._sig_x, self._sig_y, self._far)
 
     def _prepare_signs(self) -> None:
         """最高速度標識の板の中心・向き・表示する数字を求めておく。"""
@@ -639,7 +645,7 @@ class PseudoCamera:
         n = len(signs)
         self._sign_count = n
         if n == 0:
-            self._sign_grid = _NeighborIndex(np.zeros(0), np.zeros(0), self._far)
+            self._sign_grid = NeighborIndex(np.zeros(0), np.zeros(0), self._far)
             return
 
         heading = np.array([s.heading for s in signs], dtype=np.float64)
@@ -659,7 +665,7 @@ class PseudoCamera:
         digits[:, 0] = np.where(kph >= 100, digits[:, 0], -1)
         digits[:, 1] = np.where(kph >= 10, digits[:, 1], -1)
         self._sign_digits = digits.astype(np.int8)
-        self._sign_grid = _NeighborIndex(self._sign_x, self._sign_y, self._far)
+        self._sign_grid = NeighborIndex(self._sign_x, self._sign_y, self._far)
 
     def render(
         self,
@@ -667,25 +673,30 @@ class PseudoCamera:
         slots: np.ndarray,
         weather: Weather = CLEAR,
         frame_index: int = 0,
+        spec: CameraSpec | None = None,
     ) -> np.ndarray:
-        """指定スロットの運転席視点を描く。戻り値 (len(slots), H, W, 3) uint8。"""
+        """指定スロットを `spec` の視点で描く（省略時は構築時の視点）。戻り値 (len(slots), H, W, 3) uint8。"""
         slots = np.asarray(slots, dtype=np.int64).reshape(-1)
         n = int(slots.size)
         h, w = self._h, self._w
         if n == 0:
             return np.zeros((0, h, w, 3), dtype=np.uint8)
+        # 省略時は直前に描いた視点ではなく、構築時の視点に戻す
+        self._use(self._default_spec if spec is None else spec)
 
         fleet = world.fleet
-        heading = fleet.heading[slots].astype(np.float64)
-        cos_h = np.cos(heading)
-        sin_h = np.sin(heading)
+        body = fleet.heading[slots].astype(np.float64)
         eye_x, eye_y = eye_position(
             fleet.x[slots].astype(np.float64),
             fleet.y[slots].astype(np.float64),
-            cos_h,
-            sin_h,
+            np.cos(body),
+            np.sin(body),
             self.spec,
         )
+        # ここから先の「向き」はすべて視線の向き（後方カメラなら車体の逆向き）
+        heading = view_heading(body, self.spec)
+        cos_h = np.cos(heading)
+        sin_h = np.sin(heading)
 
         label = np.empty((n, h, w), dtype=np.uint8)
         label[:, : self._horizon_row, :] = LBL_SKY
@@ -1046,7 +1057,7 @@ class PseudoCamera:
             np.concatenate([np.zeros(m, dtype=np.int16), np.ones(m, dtype=np.int16)]),
         )
 
-    def _pairs(self, grid: _NeighborIndex, eye_x: np.ndarray, eye_y: np.ndarray):
+    def _pairs(self, grid: NeighborIndex, eye_x: np.ndarray, eye_y: np.ndarray):
         """カメラごとに視程内の候補を引き、(カメラ添字, 物体添字) の組を返す。"""
         cams: list[np.ndarray] = []
         objs: list[np.ndarray] = []
