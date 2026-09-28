@@ -83,7 +83,6 @@ class SimulationEngine:
         self._state: str = "idle"
         self._message: str = "マップが読み込まれていません"
         self._preset_id: str | None = None
-        self._preset_name: str | None = None
         self._render_paused: bool = False
         self._sim_suspended: bool = False
         self._suspend_reason: str = ""
@@ -101,6 +100,10 @@ class SimulationEngine:
         self._last_frame_at: float = 0.0
         self._map_pending: bool = False
         self._shared_map_index: MapIndex | None = None
+        # `_shared_map_index` と同じ世代の ID・名前。`_preset_id`（画面に出す）は読み込み中は読み込み先を指す
+        self._loaded_preset_id: str | None = None
+        self._loaded_preset_name: str | None = None
+        self._state_before_loading: tuple[str, str] = ("idle", "")
         self._metrics = MetricsSnapshot()
         self._network: dict[str, Any] = {}
         self._params = SimParams()
@@ -167,10 +170,21 @@ class SimulationEngine:
 
     def set_loading(self, preset_id: str, preset_name: str) -> None:
         with self._lock:
+            self._state_before_loading = (self._state, self._message)
             self._state = "loading_map"
             self._preset_id = preset_id
-            self._preset_name = preset_name
             self._message = f"{preset_name} の地図データを取得しています"
+
+    def map_loading(self) -> bool:
+        """地図を読み込んでいる最中か（差し込み終わるまで真）。"""
+        with self._lock:
+            return self._state == "loading_map" or self._map_pending
+
+    def abort_loading(self) -> None:
+        """読み込んだ地図を差し込まずにやめ、表示を取り込み済みの地図へ戻す。"""
+        with self._lock:
+            self._preset_id = self._loaded_preset_id
+            self._state, self._message = self._state_before_loading
 
     def set_error(self, message: str) -> None:
         with self._lock:
@@ -255,9 +269,9 @@ class SimulationEngine:
         self._inbox.put(("set_network", list(sizes)))
 
     def current_map(self) -> tuple[MapIndex | None, str | None, str | None]:
-        """いま取り込んでいる (マップ, プリセット ID, 表示名)。"""
+        """いま取り込んでいる (マップ, プリセット ID, 表示名)。読み込み中でも読み込み先ではなく、取り込み済みのもの。"""
         with self._lock:
-            return self._shared_map_index, self._preset_id, self._preset_name
+            return self._shared_map_index, self._loaded_preset_id, self._loaded_preset_name
 
     def suspend_sim(self, reason: str) -> None:
         """物理と PPO を止める（配信・コマンド処理・書き出しは動いたまま）。"""
@@ -667,8 +681,8 @@ class SimulationEngine:
                 return
 
             with self._lock:
-                preset_id = self._preset_id
-                preset_name = self._preset_name
+                preset_id = self._loaded_preset_id
+                preset_name = self._loaded_preset_name
                 metrics = self._metrics.to_wire()
 
             ticket.result = export_model(
@@ -716,8 +730,8 @@ class SimulationEngine:
             )
 
             with self._lock:
-                preset_id = self._preset_id
-                preset_name = self._preset_name
+                preset_id = self._loaded_preset_id
+                preset_name = self._loaded_preset_name
                 metrics = self._metrics.to_wire()
             try:
                 ticket.backup = export_model(
@@ -729,8 +743,14 @@ class SimulationEngine:
                     label=IMPORT_BACKUP_LABEL,
                     params=self.snapshot_params(),
                 )
-            except ExportError:
-                logger.exception("読み込み前のバックアップに失敗しました（読み込みは続行します）")
+            except ExportError as exc:
+                # 退避できないまま読み込むと、元の重みを取り戻す手段が無くなる
+                logger.exception("読み込み前のバックアップに失敗しました。読み込みを中止します")
+                ticket.error = (
+                    f"いまのモデルを退避できなかったため、読み込みを中止しました（{exc}）。"
+                    "学習はいまのモデルのまま続けます"
+                )
+                return
 
             if not trainer.load(ticket.path):
                 ticket.error = (
@@ -914,8 +934,9 @@ class SimulationEngine:
             self._state = "running"
             self._map_pending = False
             self._preset_id = preset_id
-            self._preset_name = preset_name
             self._shared_map_index = map_index
+            self._loaded_preset_id = preset_id
+            self._loaded_preset_name = preset_name
             self._message = f"{preset_name} を読み込みました"
             self._latest_frame = initial_frame
             self._frame_seq += 1
@@ -951,10 +972,11 @@ class SimulationEngine:
                 values=values,
                 rewards=result.rewards,
                 dones=result.dones,
-                # 安全ギミックが操作を丸ごと引き受けた車は、方策の経験として積まない
-                active=result.active if result.learn is None else result.learn,
+                active=result.active,
                 truncated=result.truncated,
                 final_obs=result.final_obs,
+                # 安全ギミックが操作を丸ごと引き受けた車は、方策の経験として積まない
+                learn=result.learn,
             )
 
             stats = trainer.maybe_update(result.obs, result.active)

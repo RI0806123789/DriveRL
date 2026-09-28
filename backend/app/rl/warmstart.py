@@ -74,6 +74,7 @@ def collect_expert(env, steps: int = DEFAULT_STEPS, *, gamma: float | None = Non
     act_seq: list[list[np.ndarray]] = [[] for _ in range(n)]
     rew_seq: list[list[float]] = [[] for _ in range(n)]
     end_seq: list[list[bool]] = [[] for _ in range(n)]
+    teach_seq: list[list[bool]] = [[] for _ in range(n)]
 
     try:
         for _ in range(int(steps)):
@@ -92,6 +93,9 @@ def collect_expert(env, steps: int = DEFAULT_STEPS, *, gamma: float | None = Non
                 # 打ち切り（時間切れ）も区切りとして扱う。続きの価値を知らないので同じこと
                 truncated = result.truncated is not None and bool(result.truncated[slot])
                 end_seq[slot].append(bool(result.dones[slot]) or truncated)
+                # 安全ギミックが操作を引き受けた（後退・回避）ステップの操作は、経路追従が
+                # 出しただけで実行していないので教えない。報酬はリターンに積む
+                teach_seq[slot].append(result.learn is None or bool(result.learn[slot]))
     finally:
         env.autopilot_all = restore
 
@@ -110,9 +114,10 @@ def collect_expert(env, steps: int = DEFAULT_STEPS, *, gamma: float | None = Non
         for t in range(rewards.shape[0] - 1, -1, -1):
             running = float(rewards[t]) + (0.0 if ends[t] else discount * running)
             returns[t] = running
-        obs_out.append(np.asarray(obs_seq[slot], dtype=np.float32))
-        act_out.append(np.asarray(act_seq[slot], dtype=np.float32))
-        ret_out.append(returns)
+        teach = np.asarray(teach_seq[slot], dtype=bool)
+        obs_out.append(np.asarray(obs_seq[slot], dtype=np.float32)[teach])
+        act_out.append(np.asarray(act_seq[slot], dtype=np.float32)[teach])
+        ret_out.append(returns[teach])
 
     if not obs_out:
         return ExpertData(

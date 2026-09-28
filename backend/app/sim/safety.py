@@ -219,8 +219,8 @@ class SafetySupervisor:
         self._state = [_SlotSafety() for _ in range(config.MAX_VEHICLES)]
         self.commands = [SafetyCommand() for _ in range(config.MAX_VEHICLES)]
 
-    def reset(self, slot: int) -> None:
-        """その車の介入をすべて解く（経路の差し替え・徴用・モードの切り替え）。"""
+    def _release(self, slot: int) -> None:
+        """安全ギミックを掛けなくなった車の介入を解く。経路の差し替えは `_evaluate_slot` が通し番号で見る。"""
         slot = int(slot)
         if 0 <= slot < config.MAX_VEHICLES:
             self._state[slot] = _SlotSafety()
@@ -259,7 +259,7 @@ class SafetySupervisor:
         for slot in range(config.MAX_VEHICLES):
             if slot not in wanted:
                 if self._state[slot].mode != _MODE_DRIVE or self.commands[slot].assist:
-                    self.reset(slot)
+                    self._release(slot)
                 continue
             fresh = {
                 key: result

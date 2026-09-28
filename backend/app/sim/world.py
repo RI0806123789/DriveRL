@@ -27,6 +27,7 @@ from app.sim.signals import (
     stop_speed_limit,
 )
 from app.sim.vehicle import VehicleFleet
+from app.warn import warn_once
 
 __all__ = ["ObstacleState", "Route", "SlotState", "World"]
 
@@ -163,16 +164,6 @@ class SlotState:
 
 
 logger = logging.getLogger("autoware_sim")
-
-_WARNED: set[str] = set()
-
-
-def _warn_once(key: str, message: str) -> None:
-    """同じ失敗を初回だけログに残す（code_review B-15）。"""
-    if key in _WARNED:
-        return
-    _WARNED.add(key)
-    logger.exception(message)
 
 
 class World:
@@ -312,8 +303,8 @@ class World:
         try:
             return self.map_index.road_lead(float(x), float(y), heading, need)
         except Exception:
-            _warn_once(
-                "road_lead",
+            warn_once(
+                "sim.world.road_lead",
                 f"いまいる道路を特定できませんでした: ({x:.1f}, {y:.1f})。経路を作らずに続けます（初回のみ記録）",
             )
             return None

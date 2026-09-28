@@ -108,6 +108,8 @@ class SimulationEnv:
 
         n = config.MAX_VEHICLES
         self._obs = np.zeros((n, config.OBS_DIM), dtype=np.float32)
+        # 介入・台数の変更で世界が変わったが、観測をまだ作り直していない
+        self._obs_stale = False
         self._episode_lateral = np.zeros(n, dtype=np.float64)
         self._episode_reward = np.zeros(n, dtype=np.float32)
 
@@ -155,8 +157,15 @@ class SimulationEnv:
 
     @property
     def observations(self) -> np.ndarray:
-        """shape (MAX_VEHICLES, OBS_DIM) float32。"""
+        """shape (MAX_VEHICLES, OBS_DIM) float32。介入の後なら、ここで 1 回だけ作り直す。"""
+        self._refresh_observations()
         return self._obs.copy()
+
+    def _refresh_observations(self) -> None:
+        """介入の後で観測が古ければ作り直す（安全ギミックの判断も介入の後の世界で作り直す）。"""
+        if self._obs_stale:
+            self._obs = self._compute_observations()
+            self._obs_stale = False
 
     @property
     def vehicle_count(self) -> int:
@@ -391,6 +400,7 @@ class SimulationEnv:
             np.zeros(config.MAX_VEHICLES, dtype=bool),
         )
         self._obs = self._compute_observations()
+        self._obs_stale = False
         return self._obs.copy()
 
     @property
@@ -434,6 +444,7 @@ class SimulationEnv:
         n = config.MAX_VEHICLES
         act = np.asarray(actions, dtype=np.float32).reshape(n, config.ACTION_DIM)
         act = np.clip(np.nan_to_num(act, nan=0.0, posinf=1.0, neginf=-1.0), -1.0, 1.0)
+        self._refresh_observations()
 
         active_before = self.world.fleet.active.copy()
         accel_cmd = np.where(active_before, act[:, 0], 0.0).astype(np.float32)
@@ -601,6 +612,7 @@ class SimulationEnv:
         self.world.set_event_flags(collided, reached)
 
         self._obs = self._compute_observations()
+        self._obs_stale = False
         return StepResult(
             obs=self._obs.copy(),
             rewards=rewards,
@@ -656,7 +668,7 @@ class SimulationEnv:
             self.world.set_active_count(new_count)
             self._reset_stats_for_changed(active_before)
             self.world.project_all()
-            self._obs = self._compute_observations()
+            self._obs_stale = True
 
     @staticmethod
     def _finite(payload: dict[str, Any], key: str, default: Any = None) -> float:
@@ -722,7 +734,8 @@ class SimulationEnv:
         except (KeyError, TypeError, ValueError, OverflowError) as exc:
             return f"介入イベントのペイロードが不正です: {exc}"
 
-        self._obs = self._compute_observations()
+        # 作り直すのは読むとき・進めるときに 1 回だけ（届いた件数ぶん擬似カメラと推論を回さない）
+        self._obs_stale = True
         return None
 
     def snapshot(self, tick: int, sim_time: float) -> FrameSnapshot:
@@ -998,6 +1011,18 @@ class SimulationEnv:
                 self.latest_surround.pop(slot, None)
                 self._surround_taken.pop(slot, None)
                 self._rear_free.pop(slot, None)
+                continue
+            # 経路が変わった（再スポーンで別の場所へ移った）車の結果は、前の場所で写したもの
+            serial = int(self.world.route_serial[slot])
+            kept = self.latest_surround[slot]
+            stamps = self._surround_taken.setdefault(slot, {})
+            for key in [k for k in kept if stamps.get(k, (0.0, -1))[1] != serial]:
+                kept.pop(key, None)
+                stamps.pop(key, None)
+                if key == REAR_CAMERA.key:
+                    self._rear_free.pop(slot, None)
+            if not kept:
+                self.latest_surround.pop(slot, None)
         for slot, cams in fresh.items():
             serial = int(self.world.route_serial[slot])
             kept = self.latest_surround.setdefault(slot, {})

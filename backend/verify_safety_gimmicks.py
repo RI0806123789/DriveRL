@@ -21,14 +21,16 @@ import numpy as np
 import torch
 
 from app import config
-from app.contracts import SimParams
+from app.contracts import InterventionEvent, SimParams
 from app.map import build_map_index, get_preset, load_map
 from app.map.loader import MapLoadError
 from app.percep.camera import LBL_OBSTACLE, PALETTE, PseudoCamera
 from app.percep.encoder import OBS_OFFSETS, local_xy
 from app.percep.groundtruth import detect_ground_truth_views
 from app.percep.types import CAMERA_RIG, SURROUND_CAMERAS, DetClass
+from app.rl.buffer import RolloutBuffer
 from app.rl.ppo import PPOTrainer
+from app.rl.warmstart import collect_expert
 from app.sim.env import SimulationEnv
 from app.sim.signals import GREEN
 
@@ -361,6 +363,76 @@ def verify_learning_mask(index) -> None:
     )
 
 
+def _gae_returns(learn: np.ndarray | None) -> tuple[np.ndarray, int]:
+    """報酬 -0.1・価値 5.0 の 5 ステップ（1 台）の価値目標と、学習に使うサンプル数。"""
+    buf = RolloutBuffer(5, 1, 1, 1)
+    for t in range(5):
+        buf.add(
+            np.zeros(1), np.zeros(1), np.zeros(1), np.full(1, 5.0), np.full(1, -0.1),
+            np.zeros(1, dtype=bool), np.ones(1, dtype=bool),
+            learn=None if learn is None else learn[t : t + 1],
+        )
+    buf.compute_returns_and_advantages(np.full(1, 5.0), np.ones(1, dtype=bool), 0.99, 0.95)
+    data = buf.flat_dataset()
+    return buf.returns[:5, 0].copy(), 0 if data is None else int(data["returns"].shape[0])
+
+
+def verify_gae_mask() -> None:
+    print("\n学習から外したステップの手前の価値目標（GAE）")
+    full, full_n = _gae_returns(None)
+    learn = np.array([True, True, False, True, True])
+    masked, masked_n = _gae_returns(learn)
+    check(
+        "外したステップの手前も「この先の価値 0」にせず、次の状態の価値で補う",
+        bool(np.all(masked[:2] > 0.8 * full[:2])),
+        f"全部学習 {[round(float(x), 3) for x in full]} / t=2 を外す {[round(float(x), 3) for x in masked]}",
+    )
+    check(
+        "手前は外したステップの価値で打ち切る（r + γV = 4.85）",
+        abs(float(masked[1]) - (-0.1 + 0.99 * 5.0)) < 1e-4,
+        f"t=1 の価値目標 {float(masked[1]):.4f}",
+    )
+    check(
+        "外したステップは学習データに入らない",
+        full_n == 5 and masked_n == 4,
+        f"全部学習 {full_n} 件 / t=2 を外す {masked_n} 件",
+    )
+
+
+def verify_expert_mask(index) -> None:
+    print("\nウォームスタートの教師: 安全ギミックが引き受けたステップの操作は教えない")
+    taught = expected = skipped = 0
+    for seed in range(11, 23):
+        env = make_env(index, seed=seed)
+        slot = 0
+        start = straight_start(env, slot, PYLON_AHEAD_M + 40.0)
+        if start is None:
+            continue
+        place_on_route(env, slot, start)
+        px, py, _h = point_at(env, slot, start + PYLON_AHEAD_M)
+        env.world.add_obstacle(px, py, config.OBSTACLE_RADIUS)
+        step = env.step
+        counts = [0, 0]
+
+        def spy(actions, step=step, counts=counts):
+            res = step(actions)
+            learn = res.active if res.learn is None else res.learn
+            counts[0] += int(np.count_nonzero(res.active & learn))
+            counts[1] += int(np.count_nonzero(res.active & ~learn))
+            return res
+
+        env.step = spy
+        data = collect_expert(env, int(40.0 / config.DT))
+        taught, expected, skipped = len(data), counts[0], counts[1]
+        if skipped:
+            break
+    check(
+        "教師のサンプル数 = 引き受けていなかったステップの数",
+        skipped > 0 and taught == expected,
+        f"教師 {taught} 件 / 引き受けなし {expected} 件 / 外した {skipped} 件",
+    )
+
+
 def verify_observation(index) -> None:
     print("\n観測の周囲カメラの欄（Late Fusion）")
     env = make_env(index, seed=5)
@@ -383,6 +455,65 @@ def verify_observation(index) -> None:
         "観測は 75 次元で、周囲カメラの欄は末尾",
         config.OBS_DIM == 75 and base + config.OBS_SURROUND_DIM == config.OBS_DIM,
         f"OBS_DIM {config.OBS_DIM} / 欄の先頭 {base}",
+    )
+
+
+def verify_event_batch(index) -> None:
+    print("\n介入をまとめて適用したときの観測の作り直し")
+    env = make_env(index, vehicles=4, seed=6)
+    fleet = env.world.fleet
+    calls = [0]
+    compute = env._compute_observations
+
+    def counted():
+        calls[0] += 1
+        return compute()
+
+    env._compute_observations = counted
+    for k in range(10):
+        slot = int(np.flatnonzero(fleet.active)[k % int(fleet.active.sum())])
+        h = float(fleet.heading[slot])
+        env.apply_event(
+            InterventionEvent(
+                "add_obstacle",
+                {"x": float(fleet.x[slot]) + (25.0 + k) * math.cos(h), "y": float(fleet.y[slot]) + (25.0 + k) * math.sin(h)},
+            )
+        )
+    applied = calls[0]
+    env.observations
+    env.observations
+    check(
+        "介入 10 件を続けて適用しても、観測は読むときに 1 回だけ作り直す",
+        applied == 0 and calls[0] == 1,
+        f"適用中 {applied} 回 / 読んだ後 {calls[0]} 回",
+    )
+
+
+def verify_surround_respawn(index) -> None:
+    print("\n再スポーンした車の周囲カメラ（CNN で撮り直していない間）")
+    env = make_env(index, seed=5)
+    slot = int(np.flatnonzero(env.world.fleet.active)[0])
+    base = OBS_OFFSETS["surround"]
+    env.world.clear_obstacles()
+    bx, by = ego_to_world(env, slot, -config.VEHICLE_LENGTH / 2 - 4.0, 0.0)
+    env.world.add_obstacle(bx, by, config.OBSTACLE_RADIUS)
+    env._compute_observations()
+    idx = np.flatnonzero(env.world.fleet.active)
+    # 撮り直さなかったステップと同じ形で取り込む（経路が同じなら残す）
+    env._merge_surround(idx, {}, {}, False)
+    kept = env._encode_last_perception()[slot, base : base + 3]
+    moved = env.world.try_respawn(slot)
+    env._merge_surround(idx, {}, {}, False)
+    after = env._encode_last_perception()[slot, base : base + config.OBS_SURROUND_DIM]
+    check(
+        "経路が同じなら撮り直すまで前の結果を使う",
+        kept[2] > 0.99,
+        f"後方の欄 {[round(float(x), 3) for x in kept]}",
+    )
+    check(
+        "再スポーンした車の周囲カメラの欄に、前の場所で写したものを残さない",
+        moved and slot not in env.latest_surround and bool(np.all(after == 0.0)),
+        f"再スポーン {moved} / 残った結果 {sorted(env.latest_surround.get(slot, {}))}",
     )
 
 
@@ -439,6 +570,7 @@ def main() -> None:
 
     verify_gear()
     verify_checkpoint()
+    verify_gae_mask()
     indexes = {}
     for preset in [p for p in args.presets.split(",") if p]:
         try:
@@ -451,7 +583,10 @@ def main() -> None:
     print()
     verify_views(first)
     verify_observation(first)
+    verify_surround_respawn(first)
+    verify_event_batch(first)
     verify_learning_mask(first)
+    verify_expert_mask(first)
     for preset, index in indexes.items():
         print(f"\n===== {preset} =====")
         verify_stuck(index, preset, args.trials, behind=False)

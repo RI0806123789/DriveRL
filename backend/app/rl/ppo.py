@@ -181,6 +181,7 @@ class PPOTrainer:
         active: np.ndarray,
         truncated: np.ndarray | None = None,
         final_obs: np.ndarray | None = None,
+        learn: np.ndarray | None = None,
     ) -> None:
         """1 ステップ分をバッファに積む。"""
         raw = self._last_raw_actions
@@ -216,6 +217,7 @@ class PPOTrainer:
             active,
             truncated,
             truncated_values,
+            learn,
         )
 
     def maybe_update(

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from typing import Sequence
+from typing import Any, Sequence
 
 import networkx as nx
 import logging
@@ -26,11 +26,15 @@ from app.contracts import (
 __all__ = ["MapIndexImpl", "build_map_index"]
 
 from app.map.lanes import RouteSegment, build_lane_route
+from app.warn import warn_once
 
 logger = logging.getLogger("autoware_sim")
 
 #: 建物の中を通るエッジの経路探索の重みに、中の長さ 1m あたり足す値 [m]
 ROUTE_BUILDING_PENALTY = 1000.0
+#: A* の見積もり（目的地までの直線距離）に掛ける係数。辺の重みはキャッシュの丸めで両端の直線距離を
+#: 最大 2mm 下回るので、見積もりが過大にならないよう控えめにする
+ROUTE_HEURISTIC_SCALE = 0.99
 #: これより短い重なりは、建物の角をかすめただけとみなす [m]
 BUILDING_OVERLAP_MIN_M = 1.0
 #: いま走っている道路を探す範囲 [m]。幅 32.5m の道路では車線の中心が中心線から 15m 近く離れる
@@ -52,16 +56,6 @@ ROUTE_END_EPS_M = 0.01
 #: 停止線の位置で、経路の向きと灯器の向きがこれ以上ずれていれば、その灯器に従わない [rad]
 SIGNAL_HEADING_TOLERANCE_RAD = math.radians(35.0)
 
-_WARNED: set[str] = set()
-
-
-def _warn_once(key: str, message: str) -> None:
-    """同じ失敗を初回だけログに残す（code_review B-15 / E-06 / E-10）。"""
-    if key in _WARNED:
-        return
-    _WARNED.add(key)
-    logger.exception(message)
-
 
 class MapIndexImpl:
     """`contracts.MapIndex` プロトコルの実装。"""
@@ -74,6 +68,9 @@ class MapIndexImpl:
         self._node_xy = np.array([[n.x, n.y] for n in nodes], dtype=np.float64)
         if self._node_xy.size == 0:
             self._node_xy = np.zeros((0, 2), dtype=np.float64)
+        self._node_pts: dict[int, tuple[float, float]] = {
+            int(n.id): (float(n.x), float(n.y)) for n in nodes
+        }
 
         self._edges_by_id: dict[int, MapEdge] = {e.id: e for e in data.edges}
 
@@ -167,8 +164,8 @@ class MapIndexImpl:
             inside = np.zeros(len(self._edge_lines), dtype=np.float64)
             np.add.at(inside, pairs[0], shapely.length(parts))
         except Exception:
-            _warn_once(
-                "edge_building_overlap",
+            warn_once(
+                "map.index.edge_building_overlap",
                 "建物の中を通る道路の判定に失敗しました。経路は建物を避けずに作ります",
             )
             return {}
@@ -268,13 +265,27 @@ class MapIndexImpl:
                 return attrs["cost"]
 
             try:
-                return list(nx.shortest_path(self.graph, src, dst, weight=weight))
+                return self._search(src, dst, weight)
             except (nx.NetworkXNoPath, nx.NodeNotFound):
                 pass
         try:
-            return list(nx.shortest_path(self.graph, src, dst, weight="cost"))
+            return self._search(src, dst, "cost")
         except (nx.NetworkXNoPath, nx.NodeNotFound):
             return None
+
+    def _search(self, src: int, dst: int, weight: Any) -> list[int]:
+        """主成分の中どうしは A*、それ以外は双方向 Dijkstra で探す。"""
+        mask = self._reachable_mask
+        if 0 <= src < mask.size and 0 <= dst < mask.size and mask[src] and mask[dst]:
+            return list(nx.astar_path(self.graph, src, dst, heuristic=self._heuristic, weight=weight))
+        # 主成分の外へは届かないことがあり、片側から探す A* は届く範囲を全部なめる（金沢で 100ms 超）
+        return list(nx.shortest_path(self.graph, src, dst, weight=weight))
+
+    def _heuristic(self, a: int, b: int) -> float:
+        """A* の見積もり。辺の重み（長さ + 建物の罰）は両端の直線距離より小さくならない。"""
+        pa = self._node_pts[a]
+        pb = self._node_pts[b]
+        return ROUTE_HEURISTIC_SCALE * math.hypot(pa[0] - pb[0], pa[1] - pb[1])
 
     def _turns_back(self, node: int, attrs: dict, heading: float) -> bool:
         """向き `heading` で着いたノード `node` から、このエッジへ出ると折り返しになるか。"""
@@ -723,11 +734,14 @@ def _direction(points: Sequence[tuple[float, float]], at_end: bool) -> float:
     origin = pts[0]
     far = pts[-1]
     walked = 0.0
+    # 頂点までで止めると、頂点が疎な道では何十 m も先との弦になり、端の曲がりが消える
     for a, b in zip(pts[:-1], pts[1:]):
-        walked += math.dist(a, b)
-        if walked >= LEAD_DIRECTION_SPAN_M:
-            far = b
+        step = math.dist(a, b)
+        if walked + step >= LEAD_DIRECTION_SPAN_M:
+            t = (LEAD_DIRECTION_SPAN_M - walked) / step
+            far = (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)
             break
+        walked += step
     if at_end:
         return math.atan2(origin[1] - far[1], origin[0] - far[0])
     return math.atan2(far[1] - origin[1], far[0] - origin[0])
