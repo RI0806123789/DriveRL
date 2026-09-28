@@ -20,8 +20,18 @@ from app.contracts import (
     StepResult,
 )
 from app.percep.encoder import encode_observations
-from app.percep.types import DEFAULT_CAMERA, PerceptionResult
+from app.percep.types import (
+    CAMERA_RIG,
+    DEFAULT_CAMERA,
+    REAR_CAMERA,
+    SURROUND_CAMERAS,
+    CameraSpec,
+    DetClass,
+    PerceptionResult,
+)
 from app.percep.weather import Weather, auto_weather
+from app.sim.safety import FRESH_SEC as SAFETY_FRESH_SEC
+from app.sim.safety import SafetyCommand, SafetySupervisor
 from app.sim.signals import GREEN, STOP_MARGIN_M, constrain_accel, stop_speed_limit
 from app.sim.world import SPAWN_CLEARANCE_M2, World
 
@@ -68,6 +78,17 @@ AUTOPILOT_PEDESTRIAN_MARGIN_M = (
 #: 速度上限がこれ以下まで抑えられていたら「交通に止められている」とみなす [m/s]
 TRAFFIC_HOLD_MPS = 1.0
 
+#: CNN で周囲カメラを回すとき、安全ギミックが要るカメラの待ち時間に掛ける重み。
+#: 待ち時間は撮っていないとき inf になるので、比べるときはこの秒数で頭打ちにする
+SURROUND_DEMAND_WEIGHT = 20.0
+SURROUND_AGE_CAP_SEC = 2.0
+
+#: 後退: これ以下の速さなら止まっているとみなしてギアを入れ替える [m/s]
+REVERSE_SHIFT_MPS = 0.05
+#: 後退の速さの差 1 m/s あたりのアクセルと、その上限（ゆっくり下がる）
+REVERSE_GAIN = 0.6
+REVERSE_MAX_THROTTLE = 0.5
+
 
 class SimulationEnv:
     """複数車両の物理更新・観測生成・報酬計算をまとめた環境。"""
@@ -103,6 +124,15 @@ class SimulationEnv:
 
         self.latest_perception: dict[int, PerceptionResult] = {}
         self._latest_freespace: dict[int, np.ndarray] = {}
+        # 周囲カメラ（後方・左・右）の認識結果と、それを撮った時刻（シミュレーション内の秒）。
+        #   CNN で走るときは毎ステップ撮り直さないので、古さを添えて持つ
+        self.latest_surround: dict[int, dict[str, PerceptionResult]] = {}
+        #: (撮った時刻, そのときの経路の通し番号)。経路が変わったら古いものとして扱う
+        self._surround_taken: dict[int, dict[str, tuple[float, int]]] = {}
+        self._rear_free: dict[int, np.ndarray] = {}
+        self.safety = SafetySupervisor()
+        # 周囲カメラの検出を frame に載せる車（`watch_surround`）。載せないと転送量が倍になる
+        self.watched_surround: frozenset[int] = frozenset()
         self._camera_spec = DEFAULT_CAMERA
         self._camera: Any | None = None
         self._detector: Any | None = None
@@ -161,8 +191,10 @@ class SimulationEnv:
         self.params.vehicle_count = self.vehicle_count
         return ok
 
-    def _autopilot(self, slot: int, target_speed: float) -> tuple[float, float]:
-        """経路の先を追う操作を返す（Pure Pursuit）。アクセルは目標速度との差で決める。"""
+    def _autopilot(
+        self, slot: int, target_speed: float, offset: float = 0.0
+    ) -> tuple[float, float]:
+        """経路の先を追う操作を返す（Pure Pursuit）。`offset` だけ経路を左へずらして追う（回避）。"""
         world = self.world
         state = world.slots[slot]
         route = state.route
@@ -170,7 +202,7 @@ class SimulationEnv:
             return 0.0, 0.0
 
         speed = float(world.fleet.speed[slot])
-        off_route = abs(float(world.lateral[slot]))
+        off_route = abs(float(world.lateral[slot]) - float(offset))
         ahead = max(AUTOPILOT_LOOKAHEAD_MIN_M, speed * AUTOPILOT_LOOKAHEAD_SEC)
         # 経路から離れているほど近くを見る（遠くを見たままだと戻れない）
         ahead = max(AUTOPILOT_LOOKAHEAD_FLOOR_M, ahead - off_route * 2.0)
@@ -178,6 +210,14 @@ class SimulationEnv:
         target = np.float32(state.arc_position + ahead)
         tx = float(np.interp(target, state.route_cum, route[:, 0]))
         ty = float(np.interp(target, state.route_cum, route[:, 1]))
+        if offset != 0.0:
+            ahead_x = float(np.interp(target + 1.0, state.route_cum, route[:, 0]))
+            ahead_y = float(np.interp(target + 1.0, state.route_cum, route[:, 1]))
+            behind_x = float(np.interp(target - 1.0, state.route_cum, route[:, 0]))
+            behind_y = float(np.interp(target - 1.0, state.route_cum, route[:, 1]))
+            tangent = math.atan2(ahead_y - behind_y, ahead_x - behind_x)
+            tx -= math.sin(tangent) * offset
+            ty += math.cos(tangent) * offset
 
         heading = float(world.fleet.heading[slot])
         dx = tx - float(world.fleet.x[slot])
@@ -210,6 +250,12 @@ class SimulationEnv:
         if 0 <= held < config.MAX_VEHICLES and active[held]:
             return np.array([held], dtype=np.int64)
         return np.zeros(0, dtype=np.int64)
+
+    def _assisted_slots(self, active: np.ndarray) -> np.ndarray:
+        """安全ギミックを掛けるスロット。経路追従の車と、`safety_assist` のときは学習中の車も。"""
+        if self.params.safety_assist:
+            return np.flatnonzero(active)
+        return self._autopilot_slots(active)
 
     def _lead_gap(self, slot: int) -> float:
         """前方の同じ進路上にいる他車までの車間 [m]。"""
@@ -269,6 +315,9 @@ class SimulationEnv:
             limit = stop_speed_limit(np.float64(gap), decel, config.DT, margin_m=margin)
             return float(limit) <= TRAFFIC_HOLD_MPS
 
+        # 安全ギミックが止めている・切り返している間も、待たされているのと同じに扱う
+        if self.safety.holding(slot):
+            return True
         distance, phase = self.world.next_signal(slot)
         if int(phase) != GREEN and held(distance, STOP_MARGIN_M):
             return True
@@ -393,6 +442,15 @@ class SimulationEnv:
         # 経路追従で走らせる車。**方策の実力に体験を左右させないため**で、
         # 実用モードでは街の車も止まったままにしない（詰まるとタクシーも来られない）
         piloted = self._autopilot_slots(active_before)
+        # 安全ギミックを掛ける車と、操作を丸ごと引き受けている車（切り返し・回避）。
+        #   指示は直前の `_compute_observations` の末尾で、表示中の検出枠から作ったもの
+        assisted = self._assisted_slots(active_before)
+        commands = self.safety.commands
+        overridden = np.zeros(n, dtype=bool)
+        for slot in assisted:
+            overridden[int(slot)] = commands[int(slot)].override
+        steered = np.union1d(piloted, np.flatnonzero(overridden)).astype(np.int64)
+        self._shift_out_of_reverse(active_before, assisted)
 
         params = self.params
         max_speed = max(float(params.max_speed), 1e-3)
@@ -429,13 +487,22 @@ class SimulationEnv:
                     )
                 ),
             )
+        assist_mask = np.zeros(n, dtype=bool)
+        assist_mask[assisted] = True
+        for slot in assisted:
+            s = int(slot)
+            limit[s] = min(float(limit[s]), float(commands[s].speed_cap))
         # 経路追従は、下の constrain_accel と同じ上限を目標速度にして手前からアクセルを絞る
         self.autopilot_actions[:] = 0.0
-        for slot in piloted:
+        for slot in steered:
             s = int(slot)
-            accel_cmd[s], steer_cmd[s] = self._autopilot(s, min(float(limit[s]), max_speed))
-            self.autopilot_actions[s, 0] = accel_cmd[s]
-            self.autopilot_actions[s, 1] = steer_cmd[s]
+            offset = float(commands[s].offset) if assist_mask[s] else 0.0
+            accel_cmd[s], steer_cmd[s] = self._autopilot(
+                s, min(float(limit[s]), max_speed), offset
+            )
+            if s in piloted:
+                self.autopilot_actions[s, 0] = accel_cmd[s]
+                self.autopilot_actions[s, 1] = steer_cmd[s]
         accel_cmd = constrain_accel(
             accel_cmd,
             self.world.fleet.speed,
@@ -444,6 +511,11 @@ class SimulationEnv:
             config.MAX_ACCEL,
             abs(config.MAX_DECEL),
         )
+        # 後退とギアの切り替えは前進の上限（constrain_accel）の外で決める
+        for slot in assisted:
+            s = int(slot)
+            if commands[s].reverse or int(self.world.fleet.gear[s]) < 0:
+                accel_cmd[s], steer_cmd[s] = self._reverse_control(s, commands[s])
 
         self.world.set_braking(accel_cmd)
         self.world.fleet.step(accel_cmd, steer_cmd, config.DT, max_speed)
@@ -537,7 +609,35 @@ class SimulationEnv:
             truncated=truncated,
             final_obs=final_obs,
             episodes=episodes,
+            learn=active_before & ~overridden,
         )
+
+    def _reverse_control(self, slot: int, command: SafetyCommand) -> tuple[float, float]:
+        """後退の操作（まっすぐ下がる）。前進から後退・後退から前進へは、止まってからギアを入れ替える。"""
+        fleet = self.world.fleet
+        gear = int(fleet.gear[slot])
+        speed = float(fleet.speed[slot])
+        want = -1 if command.reverse else 1
+        if gear != want:
+            if abs(speed) <= REVERSE_SHIFT_MPS:
+                fleet.set_gear(slot, want)
+                return 0.0, 0.0
+            return -1.0, 0.0
+        backing = max(0.0, -speed)
+        target = max(0.0, float(command.reverse_cap))
+        if target <= REVERSE_SHIFT_MPS or backing > target + REVERSE_SHIFT_MPS:
+            # 0 へ向けた制動。上限まで落とすのに要る分だけ踏む（後退 AEB はここで止める）
+            need = (backing - target) / config.DT / abs(config.MAX_DECEL)
+            return -float(np.clip(need, 0.2, 1.0)), 0.0
+        return float(np.clip(REVERSE_GAIN * (target - backing), 0.0, REVERSE_MAX_THROTTLE)), 0.0
+
+    def _shift_out_of_reverse(self, active: np.ndarray, assisted: np.ndarray) -> None:
+        """安全ギミックが外れた車（モードの切り替え・徴用の解除）が後退ギアのままなら、その場で止めて前進へ戻す。"""
+        fleet = self.world.fleet
+        backing = np.flatnonzero(active & (fleet.gear < 0))
+        for slot in np.setdiff1d(backing, assisted):
+            fleet.speed[int(slot)] = np.float32(0.0)
+            fleet.set_gear(int(slot), 1)
 
     def apply_params(self, params: SimParams) -> None:
         """パラメータの実行時変更を反映する。学習は止めない。"""
@@ -627,21 +727,34 @@ class SimulationEnv:
 
     def snapshot(self, tick: int, sim_time: float) -> FrameSnapshot:
         """描画用スナップショット。経路は変化があったスロットのみ載る。"""
-        frame = self.world.snapshot(tick, sim_time, include_routes=False)
-        frame.detections = self._detections_wire()
-        frame.weather = self.weather.to_wire(float(self._camera_spec.far))
-        return frame
+        return self._decorate(self.world.snapshot(tick, sim_time, include_routes=False))
 
     def full_snapshot(self, tick: int, sim_time: float) -> FrameSnapshot:
         """新規接続クライアント向けに全スロットの経路を含めたスナップショット。"""
-        frame = self.world.snapshot(tick, sim_time, include_routes=True)
+        return self._decorate(self.world.snapshot(tick, sim_time, include_routes=True))
+
+    def _decorate(self, frame: FrameSnapshot) -> FrameSnapshot:
+        """world の外にあるもの（認識結果・天候・安全ギミックの介入）を載せる。"""
         frame.detections = self._detections_wire()
+        frame.surround = self._surround_wire()
         frame.weather = self.weather.to_wire(float(self._camera_spec.far))
+        for vehicle in frame.vehicles:
+            if vehicle.active:
+                vehicle.assist = self.safety.assist(vehicle.id)
         return frame
 
     def _detections_wire(self) -> dict[int, list[dict[str, Any]]]:
         """直近の認識結果をワイヤ形式にする。"""
         return {slot: result.to_wire() for slot, result in self.latest_perception.items()}
+
+    def _surround_wire(self) -> dict[int, dict[str, list[dict[str, Any]]]]:
+        """購読されている車の周囲カメラの認識結果をワイヤ形式にする。"""
+        out: dict[int, dict[str, list[dict[str, Any]]]] = {}
+        for slot in self.watched_surround:
+            cams = self.latest_surround.get(int(slot))
+            if cams:
+                out[int(slot)] = {key: result.to_wire() for key, result in cams.items()}
+        return out
 
     @property
     def detector_active(self) -> bool:
@@ -664,11 +777,11 @@ class SimulationEnv:
         self._percep_ready = True
 
         from app.percep.groundtruth import (
-            detect_ground_truth_batch,
+            detect_ground_truth_views,
             freespace_ground_truth,
         )
 
-        self._ground_truth = detect_ground_truth_batch
+        self._ground_truth = detect_ground_truth_views
         self._freespace_gt = freespace_ground_truth
 
         if not config.DETECTOR_PATH.exists():
@@ -704,15 +817,17 @@ class SimulationEnv:
             logger.info("認識器を読み込みました: %s", config.DETECTOR_PATH.name)
 
     def _compute_observations(self) -> np.ndarray:
-        """擬似カメラで描き、CNN で検出し、観測ベクトルへ落とす。"""
+        """前方と周囲のカメラを描いて検出し、安全ギミックを評価してから観測ベクトルへ落とす。"""
         if not self._observations_enabled:
             self.latest_perception = {}
+            self.latest_surround = {}
             return np.zeros((config.MAX_VEHICLES, config.OBS_DIM), dtype=np.float32)
 
         active = self.world.fleet.active
         idx = np.flatnonzero(active)
         if idx.size == 0:
             self.latest_perception = {}
+            self.latest_surround = {}
             return np.zeros((config.MAX_VEHICLES, config.OBS_DIM), dtype=np.float32)
 
         self._ensure_percep()
@@ -720,15 +835,13 @@ class SimulationEnv:
         weather = self.weather
         freespace: dict[int, np.ndarray] = {}
         results: list[PerceptionResult] | None = None
+        # このステップで撮り直した周囲カメラ（CNN は予算の分だけ、真値は全部）
+        fresh: dict[int, dict[str, PerceptionResult]] = {}
+        rear_free: dict[int, np.ndarray] = {}
 
         if self._detector is not None and self._camera is not None:
             try:
-                images = self._camera.render(
-                    self.world, idx, weather, int(self.world.sim_time * config.SIM_HZ)
-                )
-                results, free_arr = self._detector.detect_with_freespace(images, idx)
-                for i, slot in enumerate(idx):
-                    freespace[int(slot)] = free_arr[i]
+                results, freespace, fresh, rear_free = self._detect_cnn(idx, weather)
             except Exception:
                 self._detector = None
                 self._camera = None
@@ -740,7 +853,10 @@ class SimulationEnv:
                     )
                 results = None
                 freespace.clear()
+                fresh.clear()
+                rear_free.clear()
 
+        replace_all = False
         if results is None and config.PERCEP_FALLBACK_GROUND_TRUTH:
             if self._ground_truth is not None and self._freespace_gt is not None:
                 # 認識器を使う経路では CNN の出力をそのまま使う（画から判断させる）。
@@ -750,11 +866,19 @@ class SimulationEnv:
                     weather.visibility_m(float(spec.far)),
                 )
                 try:
-                    results = self._ground_truth(self.world, idx, spec, weather)
+                    results = []
                     for slot in idx:
-                        freespace[int(slot)] = self._freespace_gt(
-                            self.world, int(slot), spec, reach
-                        )
+                        s = int(slot)
+                        views = self._ground_truth(self.world, s, CAMERA_RIG, weather)
+                        results.append(views[0])
+                        fresh[s] = {
+                            cam.key: view for cam, view in zip(CAMERA_RIG[1:], views[1:])
+                        }
+                        freespace[s] = self._freespace_gt(self.world, s, spec, reach)
+                        # 後方の建物までの距離は、下がる前後の車の分だけ作る
+                        if REAR_CAMERA.key in self.safety.demand(s):
+                            rear_free[s] = self._freespace_gt(self.world, s, REAR_CAMERA, reach)
+                    replace_all = True
                 except Exception:
                     if not self._ground_truth_failed:
                         self._ground_truth_failed = True
@@ -763,6 +887,8 @@ class SimulationEnv:
                         )
                     results = None
                     freespace.clear()
+                    fresh.clear()
+                    rear_free.clear()
 
         perceptions: dict[int, PerceptionResult] = {}
         if results is not None:
@@ -771,8 +897,138 @@ class SimulationEnv:
 
         self.latest_perception = perceptions
         self._latest_freespace = freespace
+        self._merge_surround(idx, fresh, rear_free, replace_all)
+        self._run_safety()
         return encode_observations(
-            self.world, self.params, perceptions, freespace=freespace, spec=spec
+            self.world,
+            self.params,
+            perceptions,
+            freespace=freespace,
+            spec=spec,
+            surround=self.latest_surround,
+        )
+
+    def _detect_cnn(
+        self, idx: np.ndarray, weather: Weather
+    ) -> tuple[
+        list[PerceptionResult],
+        dict[int, np.ndarray],
+        dict[int, dict[str, PerceptionResult]],
+        dict[int, np.ndarray],
+    ]:
+        """前方は全車、周囲は予算の分だけ描いて、1 回の推論にまとめて通す。"""
+        assert self._camera is not None and self._detector is not None
+        frame_index = int(self.world.sim_time * config.SIM_HZ)
+        images = [self._camera.render(self.world, idx, weather, frame_index)]
+        order: list[tuple[int, str]] = []
+        cam, slots = self._surround_schedule(idx)
+        if slots:
+            images.append(
+                self._camera.render(
+                    self.world, np.asarray(slots, dtype=np.int64), weather, frame_index, spec=cam
+                )
+            )
+            order.extend((s, cam.key) for s in slots)
+        batch = images[0] if len(images) == 1 else np.concatenate(images, axis=0)
+        slots_all = [int(s) for s in idx] + [s for s, _ in order]
+        found, free_arr = self._detector.detect_with_freespace(batch, slots_all)
+
+        n = int(idx.size)
+        freespace = {int(slot): free_arr[i] for i, slot in enumerate(idx)}
+        fresh: dict[int, dict[str, PerceptionResult]] = {}
+        rear_free: dict[int, np.ndarray] = {}
+        for k, (slot, key) in enumerate(order):
+            result = found[n + k]
+            # 車線は前方カメラの意味（経路の先）しか持たないので、周囲の画からは捨てる
+            result.detections = [d for d in result.detections if d.cls != DetClass.LANE]
+            fresh.setdefault(slot, {})[key] = result
+            if key == REAR_CAMERA.key:
+                rear_free[slot] = free_arr[n + k]
+        return found[:n], freespace, fresh, rear_free
+
+    def _surround_schedule(self, idx: np.ndarray) -> tuple[CameraSpec, list[int]]:
+        """CNN に通す周囲カメラを 1 種類だけ選び（描画はカメラ 1 種類ごとに固定費が掛かる）、その車を古い順に予算まで返す。"""
+        now = float(self.world.sim_time)
+        budget = int(config.SURROUND_CNN_IMAGES_PER_STEP)
+        assisted = set(int(s) for s in self._assisted_slots(self.world.fleet.active))
+        best: tuple[float, CameraSpec, list[int]] | None = None
+        for cam in SURROUND_CAMERAS:
+            ranked: list[tuple[float, int]] = []
+            for slot in idx:
+                s = int(slot)
+                age = self._surround_age(s, cam.key, now)
+                wanted = s in assisted and cam.key in self.safety.demand(s)
+                weight = SURROUND_DEMAND_WEIGHT if wanted else 1.0
+                ranked.append((min(age, SURROUND_AGE_CAP_SEC) * weight, s))
+            ranked.sort(key=lambda item: -item[0])
+            chosen = ranked[: max(1, budget)]
+            score = sum(p for p, _s in chosen)
+            if best is None or score > best[0]:
+                best = (score, cam, [s for _p, s in chosen])
+        if best is None:
+            return SURROUND_CAMERAS[0], []
+        return best[1], best[2]
+
+    def _surround_age(self, slot: int, key: str, now: float) -> float:
+        """その周囲カメラを撮ってからの時間 [秒]。撮っていない・経路が変わった後なら inf。"""
+        taken = self._surround_taken.get(slot, {}).get(key)
+        if taken is None:
+            return math.inf
+        at, serial = taken
+        if serial != int(self.world.route_serial[slot]):
+            return math.inf
+        return now - at
+
+    def _merge_surround(
+        self,
+        idx: np.ndarray,
+        fresh: dict[int, dict[str, PerceptionResult]],
+        rear_free: dict[int, np.ndarray],
+        replace_all: bool,
+    ) -> None:
+        """撮り直した周囲カメラを取り込む。撮り直していないものは古さを添えたまま残す。"""
+        now = float(self.world.sim_time)
+        alive = {int(s) for s in idx}
+        if replace_all:
+            self.latest_surround = {}
+            self._surround_taken = {}
+            self._rear_free = {}
+        for slot in list(self.latest_surround):
+            if slot not in alive:
+                self.latest_surround.pop(slot, None)
+                self._surround_taken.pop(slot, None)
+                self._rear_free.pop(slot, None)
+        for slot, cams in fresh.items():
+            serial = int(self.world.route_serial[slot])
+            kept = self.latest_surround.setdefault(slot, {})
+            stamps = self._surround_taken.setdefault(slot, {})
+            for key, result in cams.items():
+                kept[key] = result
+                stamps[key] = (now, serial)
+        for slot, free in rear_free.items():
+            self._rear_free[slot] = free
+
+    def _run_safety(self) -> None:
+        """表示する検出枠から、次のステップの安全ギミックの指示を作る（枠に危険度も付ける）。"""
+        now = float(self.world.sim_time)
+        assisted = self._assisted_slots(self.world.fleet.active)
+        ages = {
+            slot: {key: self._surround_age(slot, key, now) for key in cams}
+            for slot, cams in self.latest_surround.items()
+        }
+        rear_free = {
+            slot: free
+            for slot, free in self._rear_free.items()
+            if self._surround_age(slot, REAR_CAMERA.key, now) <= SAFETY_FRESH_SEC
+        }
+        self.safety.evaluate(
+            self.world,
+            assisted,
+            now,
+            self.latest_perception,
+            self.latest_surround,
+            ages,
+            rear_free,
         )
 
     def _encode_last_perception(self) -> np.ndarray:
@@ -785,4 +1041,5 @@ class SimulationEnv:
             self.latest_perception,
             freespace=self._latest_freespace,
             spec=self._camera_spec,
+            surround=self.latest_surround,
         )

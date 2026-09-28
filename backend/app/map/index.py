@@ -78,6 +78,12 @@ class MapIndexImpl:
         self._edges_by_id: dict[int, MapEdge] = {e.id: e for e in data.edges}
 
         self.graph = self._build_graph(data)
+        # 3 方向以上に道がつながるノード（向きを問わず、隣のノードの数で数える）
+        self._junctions = frozenset(
+            int(node)
+            for node in self.graph.nodes
+            if len(set(self.graph.predecessors(node)) | set(self.graph.successors(node))) >= 3
+        )
         self._reachable = self._build_reachable_nodes()
         self._reachable_mask = np.zeros(self._node_xy.shape[0], dtype=bool)
         self._reachable_mask[self._reachable[self._reachable < self._reachable_mask.size]] = True
@@ -198,6 +204,10 @@ class MapIndexImpl:
         _rasterize_into(grid.building, self._building_polys, grid)
 
         return grid
+
+    def is_intersection(self, node_id: int) -> bool:
+        """3 方向以上に道がつながるノードか（交差点の入口で左右を確かめるのに使う）。"""
+        return int(node_id) in self._junctions
 
     def nearest_node(self, x: float, y: float) -> int:
         """指定座標に最も近い道路ノード ID を返す。"""

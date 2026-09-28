@@ -249,6 +249,10 @@ class MapIndex(Protocol):
     data: MapData
     occupancy: OccupancyGrid
 
+    def is_intersection(self, node_id: int) -> bool:
+        """3 方向以上に道がつながるノードか。"""
+        ...
+
     def nearest_node(self, x: float, y: float) -> int:
         """指定座標に最も近い道路ノード ID を返す。"""
         ...
@@ -355,6 +359,7 @@ _PARAM_SPECS: dict[str, _ParamSpec] = {
     "weather_rain": _ParamSpec("weatherRain", float, 0.0, 1.0),
     "weather_fog": _ParamSpec("weatherFog", float, 0.0, 1.0),
     "weather_auto": _ParamSpec("weatherAuto", bool),
+    "safety_assist": _ParamSpec("safetyAssist", bool),
 }
 
 _TRUE_WORDS = {"true", "1", "yes", "on"}
@@ -414,6 +419,9 @@ class SimParams:
     weather_rain: float = 0.0
     weather_fog: float = 0.0
     weather_auto: bool = False
+    #: 開発モードでも、学習中の車に安全ギミック（検出枠連動の停止・切り返し）を掛けるか。
+    #: 実用モードの経路追従の車にはこの値に関係なく掛かる
+    safety_assist: bool = False
 
     def to_wire(self) -> dict[str, Any]:
         return {spec.wire: getattr(self, snake) for snake, spec in _PARAM_SPECS.items()}
@@ -498,6 +506,10 @@ class VehicleSnapshot:
     throttle: float = 0.0
     #: 方向指示器。-1=左 / 0=消灯 / +1=右
     turn_signal: int = 0
+    #: 後退ギア（R）に入っているか。後退するのは安全ギミックの切り返しだけ
+    reverse: bool = False
+    #: 安全ギミックが介入している内容（`sim/safety.py` の ASSIST_*）。介入していなければ空
+    assist: str = ""
     route: list[tuple[float, float]] | None = None
 
     def to_wire(self) -> dict[str, Any]:
@@ -520,6 +532,8 @@ class VehicleSnapshot:
             "braking": self.braking,
             "throttle": round(self.throttle, 3),
             "turnSignal": int(self.turn_signal),
+            "reverse": self.reverse,
+            "assist": self.assist,
         }
         if self.route is not None:
             out["route"] = [[round(px, 2), round(py, 2)] for px, py in self.route]
@@ -575,6 +589,8 @@ class FrameSnapshot:
     pedestrians: list[PedestrianSnapshot] = field(default_factory=list)
     signals: list[int] = field(default_factory=list)
     detections: dict[int, list[dict[str, Any]]] = field(default_factory=dict)
+    #: 周囲カメラ（rear / left / right）の検出。**購読されている車（`watch_surround`）の分だけ**載る
+    surround: dict[int, dict[str, list[dict[str, Any]]]] = field(default_factory=dict)
     weather: dict[str, float] | None = None
     routed_slots: tuple[int, ...] = ()
 
@@ -595,6 +611,8 @@ class FrameSnapshot:
             payload["detections"] = {
                 str(slot): dets for slot, dets in self.detections.items()
             }
+        if self.surround:
+            payload["surround"] = {str(slot): cams for slot, cams in self.surround.items()}
         return payload
 
 
@@ -697,6 +715,9 @@ class StepResult:
     #: 打ち切り（timeout）が起きたステップだけ、再スポーン前の観測が入る
     final_obs: np.ndarray | None = None
     episodes: list[EpisodeResult] = field(default_factory=list)
+    #: 学習に使ってよいスロット。`active` から、安全ギミックが操作を丸ごと引き受けた車を除いたもの
+    #: （方策が出していない操作を方策の経験として積まない）。None なら `active` と同じ
+    learn: np.ndarray | None = None
 
 
 @dataclass

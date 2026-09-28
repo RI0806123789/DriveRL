@@ -441,6 +441,13 @@ async def handle_client_message(websocket: WebSocket, message: dict[str, Any]) -
         engine.submit_player_pose(_parse_point(message.get("at")))
         return
 
+    if kind == "watch_surround":
+        # 4 分割表示の間 1 秒ごとに届く。読めない値は黙って捨てる（player_pose と同じ理由）
+        raw = message.get("vehicleId")
+        if isinstance(raw, int) and not isinstance(raw, bool):
+            engine.watch_surround(raw)
+        return
+
     if kind == "cancel_taxi":
         halt = coerce_bool(message.get("halt")) or False
         engine.taxi_command("halt" if halt else "cancel")

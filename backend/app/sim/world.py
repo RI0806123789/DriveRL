@@ -77,6 +77,15 @@ TURN_TANGENT_SPAN_M = 3.0
 TURN_ON_RAD = 0.35
 TURN_OFF_RAD = 0.12
 
+#: 交差点で曲がるかを見るとき、入る辺の終わりと出る辺の始まりの向きを測る長さ [m]
+TURN_HEADING_SPAN_M = 4.0
+
+#: 交差点の入口のこの範囲に停止線がある交差点は信号で捌かれるとみなす [m]（入口の手前 / 先）
+JUNCTION_SIGNAL_REACH_M = 20.0
+JUNCTION_SIGNAL_AFTER_M = 5.0
+#: 入口をこれだけ越えたら、その交差点は過ぎたとみなす [m]
+JUNCTION_PASSED_M = 0.5
+
 #: 経路が最初に曲がるまでに、少なくともまっすぐ進む距離 [m]
 LEAD_MIN_M = 12.0
 #: いまの速度から、曲がり始めるまでに要る距離を見込む減速度 [m/s²]
@@ -137,6 +146,12 @@ class SlotState:
     signal_ids: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.int32))
     sign_arcs: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.float32))
     sign_limits: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.float32))
+    #: 信号の無い交差点の入口の弧長（昇順）。安全ギミックが徐行して左右を確かめる位置
+    junction_arcs: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.float32))
+    #: 交差点で曲がる所（入る辺の車線を出る弧長・出る辺の車線に入る弧長・向き -1=左 / +1=右）
+    turn_starts: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.float32))
+    turn_ends: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.float32))
+    turn_sides: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.int8))
     signals_passed: int = 0
     signals_floor: int = 0
     committed_signal: int = -1
@@ -188,6 +203,8 @@ class World:
 
         self.arc = np.zeros(n, dtype=np.float32)
         self.route_total = np.zeros(n, dtype=np.float32)
+        #: 経路を差し替えるたびに増える。弧長で覚えた状態（安全ギミックの障害物の位置など）を捨てる合図
+        self.route_serial = np.zeros(n, dtype=np.int64)
         self._goal_x = np.zeros(n, dtype=np.float32)
         self._goal_y = np.zeros(n, dtype=np.float32)
         self.lateral = np.zeros(n, dtype=np.float32)
@@ -708,6 +725,7 @@ class World:
             return False
         route = plan.points
         state = self.slots[slot]
+        self.route_serial[slot] += 1
         state.route = np.ascontiguousarray(route, dtype=np.float32)
         state.route_cum = self._cumulative_length(state.route)
         self.route_total[slot] = (
@@ -781,6 +799,10 @@ class World:
         else:
             state.sign_arcs = np.zeros(0, dtype=np.float32)
             state.sign_limits = np.zeros(0, dtype=np.float32)
+        state.junction_arcs = self._junction_arcs(plan.legs, state.signal_arcs)
+        state.turn_starts, state.turn_ends, state.turn_sides = self._junction_turns(
+            state.route, state.route_cum, plan.legs
+        )
 
         state.committed_signal = -1
         state.violations = 0
@@ -789,6 +811,89 @@ class World:
         state.speed_violations = 0
         state.over_speed = False
         return True
+
+    def _junction_arcs(
+        self, legs: tuple[RouteLeg, ...], signal_arcs: np.ndarray
+    ) -> np.ndarray:
+        """経路が信号の無い交差点へ入る弧長（車線がその辺を出る所）。"""
+        check = getattr(self.map_index, "is_intersection", None)
+        if check is None or not legs:
+            return np.zeros(0, dtype=np.float32)
+        out: list[float] = []
+        for leg in legs:
+            if not check(int(leg.exit_node)):
+                continue
+            end = float(leg.end_arc)
+            near = (signal_arcs >= end - JUNCTION_SIGNAL_REACH_M) & (
+                signal_arcs <= end + JUNCTION_SIGNAL_AFTER_M
+            )
+            if not bool(near.any()):
+                out.append(end)
+        return np.asarray(sorted(out), dtype=np.float32)
+
+    def next_junction(self, slot: int) -> float:
+        """前方の直近の、信号の無い交差点の入口までの距離 [m]（車体の中心から）。無ければ inf。"""
+        arcs = self.slots[int(slot)].junction_arcs
+        if arcs.size == 0:
+            return float("inf")
+        arc = float(self.arc[int(slot)])
+        i = int(np.searchsorted(arcs, arc - JUNCTION_PASSED_M, side="left"))
+        if i >= arcs.size:
+            return float("inf")
+        return float(arcs[i]) - arc
+
+    def _junction_turns(
+        self, route: np.ndarray, cum: np.ndarray, legs: tuple[RouteLeg, ...]
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """経路が交差点で曲がる所（曲がり始め・曲がり終わりの弧長と向き）。"""
+        empty = (
+            np.zeros(0, dtype=np.float32),
+            np.zeros(0, dtype=np.float32),
+            np.zeros(0, dtype=np.int8),
+        )
+        check = getattr(self.map_index, "is_intersection", None)
+        if check is None or len(legs) < 2 or route.shape[0] < 2:
+            return empty
+        total = float(cum[-1])
+        picked = [
+            k for k in range(len(legs) - 1) if check(int(legs[k].exit_node))
+        ]
+        if not picked:
+            return empty
+        ends = np.array([float(legs[k].end_arc) for k in picked])
+        starts = np.array([float(legs[k + 1].start_arc) for k in picked])
+        before0 = np.clip(ends - TURN_HEADING_SPAN_M, 0.0, total)
+        after1 = np.clip(starts + TURN_HEADING_SPAN_M, 0.0, total)
+        marks = np.stack([before0, ends, starts, after1])
+        xs = np.interp(marks, cum, route[:, 0])
+        ys = np.interp(marks, cum, route[:, 1])
+        h_in = np.arctan2(ys[1] - ys[0], xs[1] - xs[0])
+        h_out = np.arctan2(ys[3] - ys[2], xs[3] - xs[2])
+        diff = np.arctan2(np.sin(h_out - h_in), np.cos(h_out - h_in))
+        span_ok = (ends - before0 >= 0.5) & (after1 - starts >= 0.5)
+        turned = span_ok & (np.abs(diff) >= TURN_ON_RAD)
+        # ENU は反時計回りが正なので、方位が増える側が左折
+        sides = np.where(diff > 0.0, -1, 1).astype(np.int8)
+        return (
+            ends[turned].astype(np.float32),
+            starts[turned].astype(np.float32),
+            sides[turned],
+        )
+
+    def turn_ahead(self, slot: int, reach_m: float = TURN_LOOKAHEAD_M) -> tuple[float, int]:
+        """交差点で曲がり始めるまでの距離 [m] と向き（-1=左 / +1=右）。`reach_m` 以内に無ければ (inf, 0)。"""
+        state = self.slots[int(slot)]
+        if state.turn_starts.size == 0:
+            return float("inf"), 0
+        arc = float(self.arc[int(slot)])
+        # 曲がっている最中（交差点のつなぎの上）も「これから曲がる」と同じに扱う
+        i = int(np.searchsorted(state.turn_ends, arc, side="right"))
+        if i >= state.turn_starts.size:
+            return float("inf"), 0
+        dist = max(0.0, float(state.turn_starts[i]) - arc)
+        if dist > reach_m:
+            return float("inf"), 0
+        return dist, int(state.turn_sides[i])
 
     def install_route(
         self, slot: int, route: Route, *, keep_pose: bool = False
@@ -880,6 +985,7 @@ class World:
         self.fleet.active[slot] = False
         self.fleet.speed[slot] = np.float32(0.0)
         self.fleet.steer[slot] = np.float32(0.0)
+        self.fleet.gear[slot] = np.int8(1)
         self.collided_flags[slot] = False
         self.reached_flags[slot] = False
         self.stop_arc[slot] = np.inf
@@ -1164,6 +1270,7 @@ class World:
                     braking=bool(self.braking[slot]),
                     throttle=float(self.throttle[slot]),
                     turn_signal=int(self.turn_signal[slot]),
+                    reverse=bool(self.fleet.gear[slot] < 0),
                     route=route,
                 )
             )

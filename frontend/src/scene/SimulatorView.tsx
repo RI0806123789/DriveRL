@@ -31,7 +31,9 @@ import { usePalette } from './usePalette'
 import { sceneStats } from './sceneStats'
 import { advanceWeather, displayedWeather, weatherLook } from './weatherView'
 import { frameBuffer } from '../store/frameBuffer'
-import { useSimStore } from '../store/simStore'
+import { isQuadView, useSimStore } from '../store/simStore'
+import { QuadViewRenderer } from './QuadViewRenderer'
+import { VehicleReverseGuide } from './VehicleReverseGuide'
 import { ConeIcon, CarIcon, MapIcon } from '../ui/Icons'
 import type { MapBounds } from '../types/protocol'
 
@@ -68,6 +70,7 @@ export function SimulatorView() {
   const appMode = useSimStore((s) => s.mode)
   const taxiMode = appMode === 'taxi'
   const taxiCameraOn = useSimStore((s) => s.taxiCameraOn)
+  const quadView = useSimStore(isQuadView)
 
   const bounds = map?.bounds ?? null
   const extent = shadowExtent(bounds)
@@ -136,8 +139,12 @@ export function SimulatorView() {
           {taxiMode && <Pedestrian />}
           {taxiMode && taxiCameraOn && <TaxiCameraFeed />}
 
+          <VehicleReverseGuide />
+
           <InteractionPlane bounds={bounds} />
           <CameraRig bounds={bounds} />
+          {/* 4 分割は自分で描く（正の優先度の useFrame）。外すと R3F の自動描画に戻る */}
+          {quadView && <QuadViewRenderer />}
           <RenderStatsProbe />
         </Canvas>
       </div>

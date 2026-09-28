@@ -22,7 +22,7 @@ function readSample(vehicleId: number): HudSample {
   const curr = frameBuffer.curr
   if (curr && vehicleId >= 0) {
     const v = curr.vehicles.find((item) => item.id === vehicleId)
-    if (v) speedKph = Math.round(v.speed * 3.6)
+    if (v) speedKph = Math.round(Math.abs(v.speed) * 3.6)
   }
   return { locked: pedestrian.locked, aimed: pedestrian.aimed, speedKph }
 }

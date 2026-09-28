@@ -74,6 +74,13 @@ export interface ViewToggles {
   grid: boolean
   /** 認識結果のバウンディングボックス（運転席／追従カメラのみ）。scene/DetectionOverlay.tsx */
   detections: boolean
+  /** 開発モードの運転席視点を前後左右の 4 分割にする。scene/QuadViewRenderer.tsx */
+  quad: boolean
+}
+
+/** 運転席の 4 分割表示を出すか。**実用モードでは出さない**（車載カメラは従来の 1 画面のまま） */
+export function isQuadView(s: { mode: AppMode; cameraMode: CameraMode; view: ViewToggles }): boolean {
+  return s.mode === 'dev' && s.cameraMode === 'driver' && s.view.quad
 }
 
 /** サーバーから来たエラーを画面に出すためのログ 1 行 */
@@ -108,6 +115,7 @@ const DEFAULT_PARAMS: SimParams = {
   weatherRain: 0,
   weatherFog: 0,
   weatherAuto: false,
+  safetyAssist: false,
 }
 
 /** `init` の `config.maxPedestrians` が無い（古いサーバー）ときの上限 */
@@ -117,7 +125,7 @@ const DEFAULT_CONFIG: SimConfig = {
   maxVehicles: 8,
   maxPedestrians: DEFAULT_MAX_PEDESTRIANS,
   simHz: 20,
-  obsDim: 66,
+  obsDim: 75,
   actionDim: 2,
 }
 
@@ -282,6 +290,7 @@ export const useSimStore = create<SimStore>((set, get) => ({
     shadows: true,
     grid: false,
     detections: true,
+    quad: true,
   },
 
   setPanelOpen: (open) => set({ panelOpen: open }),

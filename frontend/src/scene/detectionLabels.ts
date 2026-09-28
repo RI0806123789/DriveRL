@@ -46,6 +46,15 @@ export function detectionLabel(det: Detection): string {
   }
 }
 
+/** 安全ギミックが介入の根拠にしている検出の色。1 = 注意（黄）/ 2 = これで止めている（赤） */
+export const HAZARD_COLORS = { 1: '#ffa000', 2: '#ff3b30' } as const
+
+/** 枠の色。安全ギミックの根拠になっている検出はクラスの色より危険度の色を優先する */
+export function detectionFrameColor(det: Detection): string {
+  if (det.hazard === 1 || det.hazard === 2) return HAZARD_COLORS[det.hazard]
+  return detectionColor(det)
+}
+
 /** ボックスの枠・ラベルに使う色。信号機は灯色で変える。 */
 export function detectionColor(det: Detection): string {
   if (det.cls === DET_TRAFFIC_LIGHT) {

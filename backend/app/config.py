@@ -100,7 +100,13 @@ OBS_PEDESTRIAN_DIM = OBS_PEDESTRIAN_COUNT * OBS_PEDESTRIAN_FIELDS
 
 OBS_FREESPACE_DIM = 9
 
+# 周囲カメラ（後方・左・右）ごとに、いちばん近い車両・障害物・歩行者 1 つ
+OBS_SURROUND_CAMERAS = 3
+OBS_SURROUND_FIELDS = 3
+OBS_SURROUND_DIM = OBS_SURROUND_CAMERAS * OBS_SURROUND_FIELDS
+
 # 観測ベクトルの連結順と区画の大きさ。percep/encoder.py の添字と書き出しのメタデータはここから導く
+# 周囲カメラの欄は必ず末尾に置く（旧い 66 次元の重みを 0 埋めで読み込めるのはこのため。rl/ppo.py）
 OBS_LAYOUT: tuple[tuple[str, int], ...] = (
     ("self", OBS_SELF_DIM),
     ("goal", OBS_GOAL_DIM),
@@ -112,9 +118,12 @@ OBS_LAYOUT: tuple[tuple[str, int], ...] = (
     ("obstacles", OBS_OBSTACLE_DIM),
     ("pedestrians", OBS_PEDESTRIAN_DIM),
     ("freespace", OBS_FREESPACE_DIM),
+    ("surround", OBS_SURROUND_DIM),
 )
 
 OBS_DIM = sum(size for _name, size in OBS_LAYOUT)
+#: 周囲カメラの欄を足す前の観測の次元。この次元のチェックポイントは入力を 0 埋めして読み込む
+OBS_DIM_BEFORE_SURROUND = OBS_DIM - OBS_SURROUND_DIM
 
 ACTION_DIM = 2
 
@@ -126,6 +135,14 @@ OBS_FREESPACE_MAX_DISTANCE = 30.0
 OBS_GOAL_RANGE = 300.0
 OBS_LATERAL_RANGE = 8.0
 OBS_SIGNAL_RANGE = 60.0
+OBS_SURROUND_RANGE = 20.0
+
+#: 後退の速さの上限 [m/s]。後退するのは安全ギミックの切り返しだけ（sim/safety.py）
+REVERSE_MAX_SPEED = 2.0
+
+#: 周囲カメラ（後方・左・右）を CNN に通す枚数の上限 [枚/ステップ]。前方 8 台だけで 50ms を使い切るため、
+#: 周囲は優先度の高いものから順に回す（真値で走るときは毎ステップ全部作る）
+SURROUND_CNN_IMAGES_PER_STEP = 3
 
 DETECTOR_DIR = DATA_DIR / "detector"
 DETECTOR_PATH = DETECTOR_DIR / "detector.keras"

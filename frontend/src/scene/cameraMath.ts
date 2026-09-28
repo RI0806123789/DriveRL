@@ -1,5 +1,7 @@
 /** カメラ位置の計算（純粋関数）。 */
 
+import type { SurroundKey } from '../types/protocol.ts'
+
 /** カメラが目標位置を追う強さ [1/秒]。 */
 export const DRIVER_FOLLOW_RATE = 0
 export const FOLLOW_FOLLOW_RATE = 4.5
@@ -32,6 +34,55 @@ export const DRIVER_LOOK_DROP = 1.1
 
 /** 運転席カメラの**垂直**視野角 [度]。 */
 export const DRIVER_FOV_DEG = 95
+
+/** 周囲カメラ 1 台の取り付け（車両ローカル）。**バックエンドの `percep/types.py` の CAMERA_RIG と同じ値** */
+export interface SurroundCamera {
+  readonly key: SurroundKey
+  readonly label: string
+  /** 車両中心から前方へ [m] */
+  readonly forward: number
+  /** 車両中心から右へ [m] */
+  readonly right: number
+  /** 路面からの高さ [m] */
+  readonly height: number
+  /** 車両の進行方向から測った向き [度]（反時計回りが正。左 = +90） */
+  readonly yawDeg: number
+  /** 俯角 [度]（下向きが負） */
+  readonly pitchDeg: number
+}
+
+/** 後方（リアガラス上端）・左右（B ピラー上端）。並びは 4 分割の右上・左下・右下 */
+export const SURROUND_CAMERAS: readonly SurroundCamera[] = [
+  { key: 'rear', label: '後方', forward: -0.62, right: 0, height: 1.38, yawDeg: 180, pitchDeg: -10 },
+  { key: 'left', label: '左側方', forward: 0, right: -0.74, height: 1.34, yawDeg: 90, pitchDeg: -10 },
+  { key: 'right', label: '右側方', forward: 0, right: 0.74, height: 1.34, yawDeg: -90, pitchDeg: -10 },
+]
+
+/** 擬似カメラ（192×144・**水平** 68 度）。4 台とも同じ（同じ認識器に通すため） */
+export const PSEUDO_CAMERA = { width: 192, height: 144, fovDeg: 68 } as const
+
+/** 周囲カメラのペインの**垂直**画角 [度]。擬似カメラの垂直画角と揃え、検出枠がペインの高さいっぱいに出るようにする */
+export const SURROUND_FOV_DEG =
+  (2 * Math.atan(Math.tan((PSEUDO_CAMERA.fovDeg * Math.PI) / 360) * (PSEUDO_CAMERA.height / PSEUDO_CAMERA.width)) * 180) /
+  Math.PI
+
+/** 周囲カメラの位置（three 空間） */
+export function surroundEye(cam: SurroundCamera, x: number, y: number, heading: number): Vec3 {
+  return vehicleLocalToThree([cam.forward, cam.height, cam.right], x, y, heading)
+}
+
+/** 周囲カメラが見る先（three 空間）。視線の方位は車体の向き + カメラの向き */
+export function surroundLookAt(cam: SurroundCamera, x: number, y: number, heading: number): Vec3 {
+  const eye = surroundEye(cam, x, y, heading)
+  const yaw = heading + (cam.yawDeg * Math.PI) / 180
+  const pitch = (cam.pitchDeg * Math.PI) / 180
+  const reach = 10
+  return {
+    x: eye.x + Math.cos(yaw) * Math.cos(pitch) * reach,
+    y: eye.y + Math.sin(pitch) * reach,
+    z: eye.z - Math.sin(yaw) * Math.cos(pitch) * reach,
+  }
+}
 
 export interface Vec3 {
   x: number

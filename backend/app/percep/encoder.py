@@ -13,6 +13,7 @@ from app import config
 from app.contracts import SimParams
 from app.percep.types import (
     DEFAULT_CAMERA,
+    SURROUND_CAMERAS,
     CameraSpec,
     DetClass,
     Detection,
@@ -24,7 +25,10 @@ if TYPE_CHECKING:
     from app.sim.world import World
 
 
-__all__ = ["OBS_OFFSETS", "encode_observations"]
+__all__ = ["OBS_OFFSETS", "SURROUND_CLASSES", "encode_observations", "local_xy"]
+
+#: 周囲カメラの欄と安全ギミックが見るクラス（車の周りで当たりうるもの）
+SURROUND_CLASSES: tuple[DetClass, ...] = (DetClass.VEHICLE, DetClass.OBSTACLE, DetClass.PEDESTRIAN)
 
 OBS_OFFSETS: dict[str, int] = dict(
     zip(
@@ -43,6 +47,8 @@ _OFF_VEHICLE = OBS_OFFSETS["vehicles"]
 _OFF_OBSTACLE = OBS_OFFSETS["obstacles"]
 _OFF_PEDESTRIAN = OBS_OFFSETS["pedestrians"]
 _OFF_FREESPACE = OBS_OFFSETS["freespace"]
+_OFF_SURROUND = OBS_OFFSETS["surround"]
+assert len(SURROUND_CAMERAS) == config.OBS_SURROUND_CAMERAS, "周囲カメラの台数と観測の欄が合わない"
 
 _ROUTE_OFFSETS = np.arange(1, config.OBS_ROUTE_POINTS + 1, dtype=np.float32) * np.float32(
     config.OBS_ROUTE_SPACING
@@ -106,10 +112,10 @@ def _confidence(det: Detection) -> float:
     return 0.0 if conf is None else min(max(conf, 0.0), 1.0)
 
 
-def _local_xy(det: Detection, spec: CameraSpec) -> tuple[float, float, float]:
-    """検出の推定位置を自車座標系（前方 +x / 左 +y）の (x, y) と距離で返す。"""
+def local_xy(det: Detection, spec: CameraSpec) -> tuple[float, float, float]:
+    """検出の推定位置を自車座標系（前方 +x / 左 +y）の (x, y) と距離で返す。安全ギミックも同じ換算で読む。"""
     dist = _distance(det, spec)
-    bearing = _bearing(det, spec)
+    bearing = _bearing(det, spec) + spec.yaw
     fx = float(spec.forward) + dist * math.cos(bearing)
     fy = -float(spec.right) + dist * math.sin(bearing)
     return fx, fy, dist
@@ -205,7 +211,7 @@ def _encode_camera(
         _pick(result, DetClass.VEHICLE, config.OBS_VEHICLE_COUNT, spec, vehicle_range)
     ):
         base = _OFF_VEHICLE + i * config.OBS_VEHICLE_FIELDS
-        fx, fy, _ = _local_xy(det, spec)
+        fx, fy, _ = local_xy(det, spec)
         row[base + 0] = min(max(fx / vehicle_range, -1.0), 1.0)
         row[base + 1] = min(max(fy / vehicle_range, -1.0), 1.0)
         row[base + 2] = min(dist / vehicle_range, 1.0)
@@ -216,7 +222,7 @@ def _encode_camera(
         _pick(result, DetClass.OBSTACLE, config.OBS_OBSTACLE_COUNT, spec, obstacle_range)
     ):
         base = _OFF_OBSTACLE + i * config.OBS_OBSTACLE_FIELDS
-        fx, fy, _ = _local_xy(det, spec)
+        fx, fy, _ = local_xy(det, spec)
         row[base + 0] = min(max(fx / obstacle_range, -1.0), 1.0)
         row[base + 1] = min(max(fy / obstacle_range, -1.0), 1.0)
         row[base + 2] = _confidence(det)
@@ -226,7 +232,7 @@ def _encode_camera(
         _pick(result, DetClass.PEDESTRIAN, config.OBS_PEDESTRIAN_COUNT, spec, pedestrian_range)
     ):
         base = _OFF_PEDESTRIAN + i * config.OBS_PEDESTRIAN_FIELDS
-        fx, fy, _ = _local_xy(det, spec)
+        fx, fy, _ = local_xy(det, spec)
         row[base + 0] = min(max(fx / pedestrian_range, -1.0), 1.0)
         row[base + 1] = min(max(fy / pedestrian_range, -1.0), 1.0)
         row[base + 2] = _confidence(det)
@@ -243,6 +249,30 @@ def _encode_camera(
     ) / float(config.OBS_FREESPACE_MAX_DISTANCE)
 
 
+def _encode_surround(row: np.ndarray, results: dict[str, PerceptionResult] | None) -> None:
+    """周囲カメラの欄。カメラごとに、いちばん近い車両・障害物・歩行者の自車座標と信頼度。"""
+    if not results:
+        return
+    reach = float(config.OBS_SURROUND_RANGE)
+    for i, cam in enumerate(SURROUND_CAMERAS):
+        result = results.get(cam.key)
+        if result is None:
+            continue
+        best: tuple[float, float, float, float] | None = None
+        for det in result.detections:
+            if det.cls not in SURROUND_CLASSES:
+                continue
+            fx, fy, dist = local_xy(det, cam)
+            if dist <= reach and (best is None or dist < best[0]):
+                best = (dist, fx, fy, _confidence(det))
+        if best is None:
+            continue
+        base = _OFF_SURROUND + i * config.OBS_SURROUND_FIELDS
+        row[base + 0] = min(max(best[1] / reach, -1.0), 1.0)
+        row[base + 1] = min(max(best[2] / reach, -1.0), 1.0)
+        row[base + 2] = best[3]
+
+
 def encode_observations(
     world: "World",
     params: SimParams,
@@ -250,6 +280,7 @@ def encode_observations(
     *,
     freespace: dict[int, np.ndarray] | None = None,
     spec: CameraSpec = DEFAULT_CAMERA,
+    surround: dict[int, dict[str, PerceptionResult]] | None = None,
 ) -> np.ndarray:
     """認識結果とナビ情報から (MAX_VEHICLES, OBS_DIM) float32 を作る。"""
     n = config.MAX_VEHICLES
@@ -305,6 +336,8 @@ def encode_observations(
             float(max_speed),
             None if freespace is None else freespace.get(slot),
         )
+        if surround is not None:
+            _encode_surround(obs[slot], surround.get(slot))
 
     obs[~active, :] = 0.0
     np.nan_to_num(obs, copy=False, nan=0.0, posinf=1.0, neginf=-1.0)

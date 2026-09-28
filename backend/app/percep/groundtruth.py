@@ -11,7 +11,13 @@ from typing import TYPE_CHECKING, Sequence
 import numpy as np
 
 from app import config
-from app.percep.geometry import CameraPose, camera_pose, project_points
+from app.percep.geometry import (
+    CameraPose,
+    NeighborIndex,
+    camera_pose,
+    project_points,
+    view_heading,
+)
 from app.percep.types import (
     CLASS_QUOTA,
     DEFAULT_CAMERA,
@@ -43,6 +49,7 @@ __all__ = [
     "clear_static_cache",
     "detect_ground_truth",
     "detect_ground_truth_batch",
+    "detect_ground_truth_views",
     "freespace_ground_truth",
 ]
 
@@ -72,6 +79,14 @@ FREESPACE_ANGLES = np.linspace(
 )
 
 VEHICLE_BLOCK_RADIUS = (config.VEHICLE_LENGTH + config.VEHICLE_WIDTH) * 0.25
+
+#: 信号・標識の候補を車ごとに引く半径 [m]。画角の端（水平 ±34 度）では、奥行きが far の点は
+#: 目から far / cos(34°) ≒ 1.21 × far 離れるので、far そのものでは足りない
+STATIC_QUERY_RADIUS_M = DEFAULT_CAMERA.far * 1.3 + 10.0
+#: 画角で先に落とすときの余裕 [rad]。俯角があると路面近くの点は水平の画角より外まで写る
+FOV_PREFILTER_MARGIN = math.radians(20.0)
+#: 画角で落とすとき、物体の大きさとして見込む半径 [m]（車体の半対角線）
+VEHICLE_REACH_M = math.hypot(config.VEHICLE_LENGTH, config.VEHICLE_WIDTH) * 0.5
 
 
 def _box_from_points(
@@ -123,6 +138,9 @@ class _StaticScene:
     sign_across: np.ndarray
     sign_heading: np.ndarray
     sign_limit: np.ndarray
+    #: 車ごとに候補を引く索引。金沢は標識 15,719 基・灯器 2,528 基あり、全部をなめると 4 視点で重い
+    signal_grid: NeighborIndex
+    sign_grid: NeighborIndex
 
 
 _STATIC_CACHE: tuple[object, _StaticScene] | None = None
@@ -181,6 +199,9 @@ def _build_static_scene(map_index) -> _StaticScene:
         sign_across=across_sgn,
         sign_heading=heading_sgn,
         sign_limit=limit,
+        # 灯器の頭と停止線は道幅の半分 + 2m ほど離れているので、その分だけ半径を足す
+        signal_grid=NeighborIndex(head[:, 0], head[:, 1], STATIC_QUERY_RADIUS_M + 20.0),
+        sign_grid=NeighborIndex(board[:, 0], board[:, 1], STATIC_QUERY_RADIUS_M),
     )
 
 
@@ -233,8 +254,13 @@ def _blocked_by_fleet(
     return hit.any(axis=1)
 
 
-def _line_of_sight(map_index, eye: tuple[float, float], targets: np.ndarray) -> np.ndarray:
-    """視線が建物を貫いていないターゲットを True で返す。shape (M,)。"""
+def _line_of_sight(
+    map_index,
+    eye: tuple[float, float],
+    targets: np.ndarray,
+    span: float | None = None,
+) -> np.ndarray:
+    """視線が建物を貫いていないターゲットを True で返す。標本の数は `span`（省略時は最大距離）で決まる。"""
     m = int(targets.shape[0])
     if m == 0:
         return np.zeros(0, dtype=bool)
@@ -245,7 +271,8 @@ def _line_of_sight(map_index, eye: tuple[float, float], targets: np.ndarray) -> 
     dx = targets[:, 0] - eye[0]
     dy = targets[:, 1] - eye[1]
     dist = np.hypot(dx, dy)
-    steps = int(min(OCCLUSION_MAX_SAMPLES, max(2, math.ceil(float(np.max(dist)) / OCCLUSION_STEP_M))))
+    reach = float(np.max(dist)) if span is None else float(span)
+    steps = int(min(OCCLUSION_MAX_SAMPLES, max(2, math.ceil(reach / OCCLUSION_STEP_M))))
     t = np.linspace(0.0, 1.0, steps + 2, dtype=np.float64)[1:-1]
     sample_x = eye[0] + dx[:, None] * t[None, :]
     sample_y = eye[1] + dy[:, None] * t[None, :]
@@ -261,48 +288,62 @@ def _line_of_sight(map_index, eye: tuple[float, float], targets: np.ndarray) -> 
     return ~np.asarray(blocked, dtype=bool).reshape(m, -1).any(axis=1)
 
 
+def _in_view(
+    spec: CameraSpec,
+    eye: tuple[float, float],
+    look: float,
+    xs: np.ndarray,
+    ys: np.ndarray,
+    radius: np.ndarray | float,
+) -> np.ndarray:
+    """画に写りうる物体（中心が画角の外でも、体の一部が入りうるもの）を True で返す。"""
+    dx = np.asarray(xs, dtype=np.float64) - eye[0]
+    dy = np.asarray(ys, dtype=np.float64) - eye[1]
+    dist = np.hypot(dx, dy)
+    off = np.abs(np.arctan2(np.sin(np.arctan2(dy, dx) - look), np.cos(np.arctan2(dy, dx) - look)))
+    reach = np.asarray(radius, dtype=np.float64)
+    spread = np.arcsin(np.clip(reach / np.maximum(dist, 1e-6), 0.0, 1.0))
+    allow = math.radians(float(spec.fov_deg)) * 0.5 + FOV_PREFILTER_MARGIN + spread
+    return (dist <= reach + 0.5) | (off <= allow)
+
+
 def _detect_signals(
     world: "World",
-    slot: int,
     spec: CameraSpec,
     pose: CameraPose,
+    look: float,
     scene: _StaticScene,
+    candidates: np.ndarray,
     max_distance: float,
 ) -> list[tuple[float, Detection]]:
-    """前方の信号機。灯色は `world.signal_phases` の真値をそのまま入れる。"""
+    """写っている信号機。灯色は `world.signal_phases` の真値をそのまま入れる。"""
     out: list[tuple[float, Detection]] = []
-    head = scene.signal_head
-    if head.shape[0] == 0:
+    if candidates.size == 0:
         return out
+    head = scene.signal_head[candidates]
+    stop = scene.signal_stop[candidates]
+    heading = scene.signal_heading[candidates]
 
     eye = (pose.eye_x, pose.eye_y)
     # 報告する距離は停止線まで（止まる位置）。視程で打ち切るのは、描いて枠を付ける灯器の奥行き
     #   （擬似カメラの霧と遠方の切り捨てが使うのと同じカメラ座標の奥行き）
-    dist = np.hypot(scene.signal_stop[:, 0] - eye[0], scene.signal_stop[:, 1] - eye[1])
+    dist = np.hypot(stop[:, 0] - eye[0], stop[:, 1] - eye[1])
     _u, _v, head_depth = project_points(pose, spec, head)
-    heading = float(world.fleet.heading[slot])
     facing = facing_viewer(
-        scene.signal_head[:, 0],
-        scene.signal_head[:, 1],
-        scene.signal_heading,
-        eye[0],
-        eye[1],
-        heading,
-    ) & signal_ahead_of_stop(
-        scene.signal_stop[:, 0], scene.signal_stop[:, 1], scene.signal_heading, eye[0], eye[1]
-    )
-    candidates = np.flatnonzero((head_depth <= max_distance) & facing)
-    if candidates.size == 0:
+        head[:, 0], head[:, 1], heading, eye[0], eye[1], look
+    ) & signal_ahead_of_stop(stop[:, 0], stop[:, 1], heading, eye[0], eye[1])
+    keep = np.flatnonzero((head_depth <= max_distance) & facing)
+    if keep.size == 0:
         return out
 
-    visible = _line_of_sight(world.map_index, eye, scene.signal_stop[candidates])
-    candidates = candidates[visible]
+    keep = keep[_line_of_sight(world.map_index, eye, stop[keep])]
 
     phases = world.signal_phases
     half_w = SIGNAL_HOUSING_W * 0.5
     half_h = SIGNAL_HOUSING_H * 0.5
-    for i in candidates:
-        center = head[i]
+    for k in keep:
+        i = int(candidates[k])
+        center = scene.signal_head[i]
         across = scene.signal_across[i]
         corners = np.array(
             [
@@ -316,17 +357,16 @@ def _detect_signals(
         box = _box_from_points(pose, spec, corners)
         if box is None:
             continue
-        idx = int(i)
-        phase = int(phases[idx]) if 0 <= idx < len(phases) else 2
+        phase = int(phases[i]) if 0 <= i < len(phases) else 2
         out.append(
             (
-                float(dist[idx]),
+                float(dist[k]),
                 Detection(
                     cls=DetClass.TRAFFIC_LIGHT,
                     x0=box[0], y0=box[1], x1=box[2], y1=box[3],
                     confidence=1.0,
                     phase=phase,
-                    distance=float(dist[idx]),
+                    distance=float(dist[k]),
                 ),
             )
         )
@@ -335,35 +375,33 @@ def _detect_signals(
 
 def _detect_speed_signs(
     world: "World",
-    slot: int,
     spec: CameraSpec,
     pose: CameraPose,
+    look: float,
     scene: _StaticScene,
+    candidates: np.ndarray,
     max_distance: float,
 ) -> list[tuple[float, Detection]]:
-    """最高速度標識。規制速度は `MapSign.speed_limit` の真値。"""
+    """写っている最高速度標識。規制速度は `MapSign.speed_limit` の真値。"""
     out: list[tuple[float, Detection]] = []
-    board = scene.sign_board
-    if board.shape[0] == 0:
-        return out
-
-    eye = (pose.eye_x, pose.eye_y)
-    dx = board[:, 0] - eye[0]
-    dy = board[:, 1] - eye[1]
-    dist = np.hypot(dx, dy)
-    heading = float(world.fleet.heading[slot])
-    facing = facing_viewer(
-        board[:, 0], board[:, 1], scene.sign_heading, eye[0], eye[1], heading
-    )
-    candidates = np.flatnonzero((dist <= max_distance) & facing)
     if candidates.size == 0:
         return out
+    board = scene.sign_board[candidates]
 
-    visible = _line_of_sight(world.map_index, eye, board[candidates, :2])
-    candidates = candidates[visible]
+    eye = (pose.eye_x, pose.eye_y)
+    dist = np.hypot(board[:, 0] - eye[0], board[:, 1] - eye[1])
+    facing = facing_viewer(
+        board[:, 0], board[:, 1], scene.sign_heading[candidates], eye[0], eye[1], look
+    )
+    keep = np.flatnonzero((dist <= max_distance) & facing)
+    if keep.size == 0:
+        return out
 
-    for i in candidates:
-        center = board[i]
+    keep = keep[_line_of_sight(world.map_index, eye, board[keep, :2])]
+
+    for k in keep:
+        i = int(candidates[k])
+        center = scene.sign_board[i]
         across = scene.sign_across[i]
         corners = np.array(
             [
@@ -377,16 +415,15 @@ def _detect_speed_signs(
         box = _box_from_points(pose, spec, corners)
         if box is None:
             continue
-        idx = int(i)
         out.append(
             (
-                float(dist[idx]),
+                float(dist[k]),
                 Detection(
                     cls=DetClass.SPEED_SIGN,
                     x0=box[0], y0=box[1], x1=box[2], y1=box[3],
                     confidence=1.0,
-                    speed_limit=float(scene.sign_limit[idx]),
-                    distance=float(dist[idx]),
+                    speed_limit=float(scene.sign_limit[i]),
+                    distance=float(dist[k]),
                 ),
             )
         )
@@ -394,7 +431,12 @@ def _detect_speed_signs(
 
 
 def _detect_vehicles(
-    world: "World", slot: int, spec: CameraSpec, pose: CameraPose, max_distance: float
+    world: "World",
+    slot: int,
+    spec: CameraSpec,
+    pose: CameraPose,
+    look: float,
+    max_distance: float,
 ) -> list[tuple[float, Detection]]:
     """他車両。車体の 8 頂点（路面と屋根の 4 隅）を投影して箱にする。"""
     out: list[tuple[float, Detection]] = []
@@ -408,7 +450,12 @@ def _detect_vehicles(
     dx = fleet.x[others].astype(np.float64) - eye[0]
     dy = fleet.y[others].astype(np.float64) - eye[1]
     dist = np.hypot(dx, dy)
-    near = others[dist <= max_distance]
+    within = dist <= max_distance
+    near = others[within]
+    if near.size == 0:
+        return out
+    span = float(np.max(dist[within]))
+    near = near[_in_view(spec, eye, look, fleet.x[near], fleet.y[near], VEHICLE_REACH_M)]
     if near.size == 0:
         return out
 
@@ -416,6 +463,7 @@ def _detect_vehicles(
         world.map_index,
         eye,
         np.column_stack((fleet.x[near], fleet.y[near])).astype(np.float64),
+        span,
     )
     near = near[visible]
     if near.size == 0:
@@ -454,7 +502,12 @@ def _detect_vehicles(
 
 
 def _detect_obstacles(
-    world: "World", slot: int, spec: CameraSpec, pose: CameraPose, max_distance: float
+    world: "World",
+    slot: int,
+    spec: CameraSpec,
+    pose: CameraPose,
+    look: float,
+    max_distance: float,
 ) -> list[tuple[float, Detection]]:
     """ユーザーが置いたパイロン。円柱を視線に垂直な板で近似する。"""
     out: list[tuple[float, Detection]] = []
@@ -467,11 +520,22 @@ def _detect_obstacles(
     dy = xy[:, 1].astype(np.float64) - eye[1]
     dist = np.hypot(dx, dy)
     height = float(config.OBSTACLE_HEIGHT)
+    radius = np.array(
+        [
+            float(world.obstacles[i].radius) if i < len(world.obstacles) else config.OBSTACLE_RADIUS
+            for i in range(xy.shape[0])
+        ],
+        dtype=np.float64,
+    )
 
     near = np.flatnonzero(dist <= max_distance)
     if near.size == 0:
         return out
-    near = near[_line_of_sight(world.map_index, eye, xy[near].astype(np.float64))]
+    span = float(np.max(dist[near]))
+    near = near[_in_view(spec, eye, look, xy[near, 0], xy[near, 1], radius[near])]
+    if near.size == 0:
+        return out
+    near = near[_line_of_sight(world.map_index, eye, xy[near].astype(np.float64), span)]
     if near.size:
         pts = xy[near].astype(np.float64)
         near = near[~_blocked_by_fleet(world, eye, pts, slot)]
@@ -481,15 +545,15 @@ def _detect_obstacles(
         d = float(dist[i])
         if d < 1e-3:
             continue
-        radius = float(world.obstacles[i].radius) if i < len(world.obstacles) else config.OBSTACLE_RADIUS
+        r = float(radius[i])
         ax, ay = -dy[i] / d, dx[i] / d
         cx, cy = float(xy[i, 0]), float(xy[i, 1])
         pts = np.array(
             [
-                [cx - ax * radius, cy - ay * radius, 0.0],
-                [cx + ax * radius, cy + ay * radius, 0.0],
-                [cx - ax * radius, cy - ay * radius, height],
-                [cx + ax * radius, cy + ay * radius, height],
+                [cx - ax * r, cy - ay * r, 0.0],
+                [cx + ax * r, cy + ay * r, 0.0],
+                [cx - ax * r, cy - ay * r, height],
+                [cx + ax * r, cy + ay * r, height],
             ],
             dtype=np.float64,
         )
@@ -511,7 +575,12 @@ def _detect_obstacles(
 
 
 def _detect_pedestrians(
-    world: "World", slot: int, spec: CameraSpec, pose: CameraPose, max_distance: float
+    world: "World",
+    slot: int,
+    spec: CameraSpec,
+    pose: CameraPose,
+    look: float,
+    max_distance: float,
 ) -> list[tuple[float, Detection]]:
     """NPC 歩行者。視線に垂直な板（肩幅 × 身長）へ近似して箱にする。"""
     out: list[tuple[float, Detection]] = []
@@ -527,7 +596,11 @@ def _detect_pedestrians(
     near = np.flatnonzero(dist <= max_distance)
     if near.size == 0:
         return out
-    near = near[_line_of_sight(world.map_index, eye, xy[near])]
+    span = float(np.max(dist[near]))
+    near = near[_in_view(spec, eye, look, xy[near, 0], xy[near, 1], PEDESTRIAN_HALF_WIDTH)]
+    if near.size == 0:
+        return out
+    near = near[_line_of_sight(world.map_index, eye, xy[near], span)]
     if near.size:
         near = near[~_blocked_by_fleet(world, eye, xy[near], slot)]
 
@@ -635,6 +708,68 @@ def _detect_lane(
     )
 
 
+def _within(points: np.ndarray, candidates: np.ndarray, x: float, y: float) -> np.ndarray:
+    """索引が返した候補を、車から `STATIC_QUERY_RADIUS_M` 以内に絞って番号順に並べる。"""
+    cand = np.sort(candidates)
+    if cand.size == 0:
+        return cand
+    dx = points[cand, 0] - x
+    dy = points[cand, 1] - y
+    return cand[dx * dx + dy * dy <= STATIC_QUERY_RADIUS_M * STATIC_QUERY_RADIUS_M]
+
+
+def detect_ground_truth_views(
+    world: "World",
+    slot: int,
+    specs: Sequence[CameraSpec],
+    weather: Weather = CLEAR,
+) -> list[PerceptionResult]:
+    """1 台の複数カメラぶんの「理想の検出結果」を作る（並びは `specs` と同じ。車線は前向きのカメラだけ）。"""
+    slot = int(slot)
+    results = [PerceptionResult(slot=slot) for _ in specs]
+    if not (0 <= slot < len(world.slots)) or not bool(world.fleet.active[slot]):
+        return results
+
+    x = float(world.fleet.x[slot])
+    y = float(world.fleet.y[slot])
+    heading = float(world.fleet.heading[slot])
+    scene = _static_scene(world.map_index)
+    signal_candidates = _within(scene.signal_head, scene.signal_grid.query(x, y), x, y)
+    sign_candidates = _within(scene.sign_board, scene.sign_grid.query(x, y), x, y)
+
+    for result, spec in zip(results, specs):
+        pose = camera_pose(x, y, heading, spec)
+        look = float(view_heading(heading, spec))
+        reach = weather.visibility_m(float(spec.far))
+
+        per_class: dict[DetClass, list[Detection]] = {c: [] for c in DetClass}
+        buckets: list[tuple[DetClass, list[tuple[float, Detection]]]] = [
+            (
+                DetClass.TRAFFIC_LIGHT,
+                _detect_signals(world, spec, pose, look, scene, signal_candidates, reach),
+            ),
+            (
+                DetClass.SPEED_SIGN,
+                _detect_speed_signs(world, spec, pose, look, scene, sign_candidates, reach),
+            ),
+            (DetClass.VEHICLE, _detect_vehicles(world, slot, spec, pose, look, reach)),
+            (DetClass.OBSTACLE, _detect_obstacles(world, slot, spec, pose, look, reach)),
+            (DetClass.PEDESTRIAN, _detect_pedestrians(world, slot, spec, pose, look, reach)),
+        ]
+        if spec.yaw_deg == 0.0:
+            lane = _detect_lane(world, slot, spec, pose, reach)
+            if lane is not None:
+                per_class[DetClass.LANE] = [lane[1]]
+        for cls, items in buckets:
+            items.sort(key=lambda pair: pair[0])
+            per_class[cls] = [det for _, det in items[: CLASS_QUOTA[cls]]]
+
+        result.detections = pack_by_class_quota(
+            per_class, int(config.PERCEP_MAX_DETECTIONS), spec
+        )
+    return results
+
+
 def detect_ground_truth(
     world: "World",
     slot: int,
@@ -642,41 +777,7 @@ def detect_ground_truth(
     weather: Weather = CLEAR,
 ) -> PerceptionResult:
     """world の真値から「理想の検出結果」を作る。"""
-    slot = int(slot)
-    result = PerceptionResult(slot=slot)
-    if not (0 <= slot < len(world.slots)):
-        return result
-    if not bool(world.fleet.active[slot]):
-        return result
-
-    pose = camera_pose(
-        float(world.fleet.x[slot]),
-        float(world.fleet.y[slot]),
-        float(world.fleet.heading[slot]),
-        spec,
-    )
-    scene = _static_scene(world.map_index)
-    reach = weather.visibility_m(float(spec.far))
-
-    per_class: dict[DetClass, list[Detection]] = {c: [] for c in DetClass}
-    buckets: list[tuple[DetClass, list[tuple[float, Detection]]]] = [
-        (DetClass.TRAFFIC_LIGHT, _detect_signals(world, slot, spec, pose, scene, reach)),
-        (DetClass.SPEED_SIGN, _detect_speed_signs(world, slot, spec, pose, scene, reach)),
-        (DetClass.VEHICLE, _detect_vehicles(world, slot, spec, pose, reach)),
-        (DetClass.OBSTACLE, _detect_obstacles(world, slot, spec, pose, reach)),
-        (DetClass.PEDESTRIAN, _detect_pedestrians(world, slot, spec, pose, reach)),
-    ]
-    lane = _detect_lane(world, slot, spec, pose, reach)
-    if lane is not None:
-        per_class[DetClass.LANE] = [lane[1]]
-    for cls, items in buckets:
-        items.sort(key=lambda pair: pair[0])
-        per_class[cls] = [det for _, det in items[: CLASS_QUOTA[cls]]]
-
-    result.detections = pack_by_class_quota(
-        per_class, int(config.PERCEP_MAX_DETECTIONS), spec
-    )
-    return result
+    return detect_ground_truth_views(world, slot, (spec,), weather)[0]
 
 
 def detect_ground_truth_batch(
@@ -695,7 +796,7 @@ def freespace_ground_truth(
     spec: CameraSpec = DEFAULT_CAMERA,
     max_distance: float = float(config.OBS_FREESPACE_MAX_DISTANCE),
 ) -> np.ndarray:
-    """走行可能領域の真値。前方 ±90 度を `OBS_FREESPACE_DIM` 本に分けた距離 [m]。"""
+    """走行可能領域の真値。カメラの視線の ±90 度を `OBS_FREESPACE_DIM` 本に分けた距離 [m]。"""
     slot = int(slot)
     out = np.full(config.OBS_FREESPACE_DIM, float(max_distance), dtype=np.float32)
     if not (0 <= slot < len(world.slots)) or not bool(world.fleet.active[slot]):
@@ -706,7 +807,7 @@ def freespace_ground_truth(
         float(world.fleet.x[slot]), float(world.fleet.y[slot]), heading, spec
     )
     ox, oy = pose.eye_x, pose.eye_y
-    angles = (heading + FREESPACE_ANGLES).astype(np.float64)
+    angles = (float(view_heading(heading, spec)) + FREESPACE_ANGLES).astype(np.float64)
 
     try:
         hit = world.map_index.raycast(

@@ -106,7 +106,7 @@ class TaxiService:
             return "迎車の経路を設定できませんでした"
         world.set_stop_target(slot, float(world.route_total[slot]))
 
-        self._speed_avg = float(world.fleet.speed[slot])
+        self._speed_avg = max(0.0, float(world.fleet.speed[slot]))
         self._handovers = 0
         self._tried = {slot}
         self._reset_stall()
@@ -266,7 +266,7 @@ class TaxiService:
         self.status.message = (
             f"車両 #{old} が来られなくなったため、車両 #{slot} が向かっています"
         )
-        self._speed_avg = float(world.fleet.speed[slot])
+        self._speed_avg = max(0.0, float(world.fleet.speed[slot]))
         self._reset_stall()
         self._refresh_progress(env)
         return True
@@ -351,7 +351,7 @@ class TaxiService:
         remaining = float(world.route_total[slot]) - float(world.arc[slot])
         return (
             remaining <= ARRIVE_DISTANCE_M
-            and float(world.fleet.speed[slot]) <= ARRIVE_SPEED_MPS
+            and abs(float(world.fleet.speed[slot])) <= ARRIVE_SPEED_MPS
         )
 
     def _refresh_progress(self, env: "SimulationEnv") -> None:
@@ -359,7 +359,7 @@ class TaxiService:
         slot = self.vehicle_id
         world = env.world
         remaining = max(0.0, float(world.route_total[slot]) - float(world.arc[slot]))
-        speed = float(world.fleet.speed[slot])
+        speed = max(0.0, float(world.fleet.speed[slot]))
         self._speed_avg += (speed - self._speed_avg) * ETA_SPEED_SMOOTH
 
         self.status.remaining_distance_m = remaining
