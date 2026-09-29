@@ -106,7 +106,6 @@ DriveRL/
 ├── run.cmd                         同上。cmd.exe / ダブルクリック用（ASCII のみ）
 ├── requirements.txt                Python の依存（先頭の --extra-index-url を消さない）
 ├── requirements-dev.txt            開発用の依存（pytest。テストを回すときだけ要る）
-├── .github/pull_request_template.md  PR の確認項目（テストを回したか）
 ├── SECURITY.md                     セキュリティ上の前提（ローカル単一利用者・認証なし）
 ├── LICENSE.md                      MIT。地図データは OSM 由来で ODbL
 ├── docs/protocol.md                WebSocket プロトコル仕様（フロント／バックの唯一の契約）
