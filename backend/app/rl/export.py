@@ -59,11 +59,19 @@ class ExportResult:
     kind: str
 
 
+#: Keras で上位方策のいちばん確率の高い意図を one-hot にするときの温度（ロジットをこれで割って softmax）
+KERAS_OPTION_TEMPERATURE = 1e-8
+
+
 class InferencePolicy(nn.Module):
-    """観測から決定論的な行動を出すだけのモジュール。"""
+    """観測から決定論的な行動を出すだけのモジュール。意図は呼ばれるたびに上位方策のいちばん確率の高いものを選ぶ。"""
 
     def __init__(self, policy: ActorCritic) -> None:
         super().__init__()
+        self.num_options = int(policy.num_options)
+        self.meta_trunk = copy.deepcopy(policy.meta_trunk)
+        self.meta_head = copy.deepcopy(policy.meta_head)
+        self.register_buffer("option_bias", policy.option_bias.detach().clone())
         self.policy_trunk = copy.deepcopy(policy.policy_trunk)
         self.mu_head = copy.deepcopy(policy.mu_head)
         self.value_trunk = copy.deepcopy(policy.value_trunk)
@@ -81,8 +89,11 @@ class InferencePolicy(nn.Module):
 
     def forward(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Args: obs (B, obs_dim) -> Returns: (action (B, action_dim), value (B,))"""
-        action = torch.tanh(self.mu_head(self.policy_trunk(obs)))
-        value = self.value_head(self.value_trunk(obs)).squeeze(-1)
+        option = self.meta_head(self.meta_trunk(obs)).argmax(dim=-1)
+        one_hot = torch.nn.functional.one_hot(option, self.num_options).to(obs.dtype)
+        x = torch.cat([obs, one_hot], dim=-1)
+        action = torch.tanh(self.mu_head(self.policy_trunk(x)) + one_hot @ self.option_bias)
+        value = self.value_head(self.value_trunk(x)).squeeze(-1)
         return action, value
 
 
@@ -187,11 +198,20 @@ def build_metadata(
         "exportedAt": datetime.now().astimezone().isoformat(timespec="seconds"),
         "torchVersion": str(torch.__version__),
         "model": {
-            "type": "shared ActorCritic (parameter sharing)",
+            "type": "shared hierarchical ActorCritic (parameter sharing)",
             "obsDim": int(trainer.obs_dim),
             "actionDim": int(trainer.action_dim),
             "hiddenSizes": [int(h) for h in trainer.policy.hidden_sizes],
             "activation": "tanh",
+            "options": {
+                "names": list(config.HRL_OPTIONS),
+                "periodSteps": int(config.HRL_OPTION_STEPS),
+                "note": (
+                    "上位方策が意図を選び、下位方策が観測と意図の one-hot から操作を出す。"
+                    "書き出したモデルは呼ばれるたびに、上位方策のいちばん確率の高い意図を選び直す"
+                    "（アプリの中では periodSteps ごとに引き直して保つ）"
+                ),
+            },
         },
         "observation": {
             "dim": int(trainer.obs_dim),
@@ -292,6 +312,7 @@ def _build_keras_model(trainer: Any):
     action_dim = int(policy.action_dim)
     state = policy.state_dict()
 
+    num_options = int(policy.num_options)
     inputs = keras.Input(shape=(obs_dim,), dtype="float32", name="observation")
 
     def trunk(x, prefix: str):
@@ -299,10 +320,19 @@ def _build_keras_model(trainer: Any):
             x = keras.layers.Dense(units, activation="tanh", name=f"{prefix}_dense_{i}")(x)
         return x
 
-    action = keras.layers.Dense(
-        action_dim, activation="tanh", name="action"
-    )(trunk(inputs, "policy"))
-    value_dense = keras.layers.Dense(1, activation=None, name="value")(trunk(inputs, "value"))
+    # いちばん確率の高い意図の one-hot を、温度の低い softmax で標準の層だけで作る（Lambda を使わない）
+    option = keras.layers.Dense(num_options, activation="softmax", name="option")(
+        trunk(inputs, "meta")
+    )
+    sub_inputs = keras.layers.Concatenate(name="observation_option")([inputs, option])
+    raw_action = keras.layers.Dense(action_dim, activation=None, name="action_raw")(
+        trunk(sub_inputs, "policy")
+    )
+    option_bias = keras.layers.Dense(action_dim, use_bias=False, name="option_bias")(option)
+    action = keras.layers.Activation("tanh", name="action")(
+        keras.layers.Add(name="action_biased")([raw_action, option_bias])
+    )
+    value_dense = keras.layers.Dense(1, activation=None, name="value")(trunk(sub_inputs, "value"))
     value = keras.layers.Reshape((), name="value_squeezed")(value_dense)
 
     model = keras.Model(
@@ -316,11 +346,22 @@ def _build_keras_model(trainer: Any):
         return state[f"{name}.bias"].detach().cpu().numpy()
 
     for i in range(len(hidden)):
-        for prefix, source in (("policy", "policy_trunk"), ("value", "value_trunk")):
+        for prefix, source in (
+            ("meta", "meta_trunk"),
+            ("policy", "policy_trunk"),
+            ("value", "value_trunk"),
+        ):
             model.get_layer(f"{prefix}_dense_{i}").set_weights(
                 [weight(f"{source}.{2 * i}").T, bias(f"{source}.{2 * i}")]
             )
-    model.get_layer("action").set_weights([weight("mu_head").T, bias("mu_head")])
+    scale = 1.0 / float(KERAS_OPTION_TEMPERATURE)
+    model.get_layer("option").set_weights(
+        [weight("meta_head").T * scale, bias("meta_head") * scale]
+    )
+    model.get_layer("action_raw").set_weights([weight("mu_head").T, bias("mu_head")])
+    model.get_layer("option_bias").set_weights(
+        [state["option_bias"].detach().cpu().numpy()]
+    )
     model.get_layer("value").set_weights([weight("value_head").T, bias("value_head")])
 
     return model

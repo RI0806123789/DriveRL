@@ -20,6 +20,7 @@ from app.rl.warmstart import (
     DEFAULT_STEPS,
     WARMSTART_STD,
     collect_expert,
+    fit_options,
     fit_policy,
     fit_value,
     set_exploration,
@@ -110,6 +111,21 @@ def main() -> int:
         lr=float(args.lr),
     )
     print(f"  損失 {fitted.first_loss:.5f} → {fitted.last_loss:.5f}")
+
+    print("\n意図の選び方を回帰します")
+    chosen = fit_options(
+        trainer,
+        data,
+        epochs=int(args.epochs),
+        batch_size=int(args.batch),
+        lr=float(args.lr),
+    )
+    shares = np.bincount(data.options, minlength=len(config.HRL_OPTIONS)) / max(1, len(data))
+    print(
+        f"  損失 {chosen.first_loss:.4f} → {chosen.last_loss:.4f}（教師の意図の割合 "
+        + " / ".join(f"{name} {share:.0%}" for name, share in zip(config.HRL_OPTIONS, shares))
+        + "）"
+    )
 
     # 価値関数も必ず合わせること。方策だけ差し替えると、走り出した瞬間に
     #   予測と実測が食い違って advantage が暴れ、1〜2 更新で方策が吹き飛ぶ

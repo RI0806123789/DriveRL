@@ -16,6 +16,7 @@ __all__ = [
     "ExpertData",
     "WarmstartResult",
     "collect_expert",
+    "fit_options",
     "fit_policy",
     "fit_value",
     "set_exploration",
@@ -41,11 +42,12 @@ DEFAULT_LR = 3e-4
 
 @dataclass(slots=True)
 class ExpertData:
-    """経路追従で走らせて集めた、観測・操作・そのときのリターン。"""
+    """経路追従で走らせて集めた、観測・操作・そのときのリターンと、状況に合う意図。"""
 
     obs: np.ndarray
     actions: np.ndarray
     returns: np.ndarray
+    options: np.ndarray
 
     def __len__(self) -> int:
         return int(self.obs.shape[0])
@@ -75,12 +77,15 @@ def collect_expert(env, steps: int = DEFAULT_STEPS, *, gamma: float | None = Non
     rew_seq: list[list[float]] = [[] for _ in range(n)]
     end_seq: list[list[bool]] = [[] for _ in range(n)]
     teach_seq: list[list[bool]] = [[] for _ in range(n)]
+    opt_seq: list[list[int]] = [[] for _ in range(n)]
 
     try:
         for _ in range(int(steps)):
             obs = np.asarray(env.observations, dtype=np.float32)
             active = np.asarray(env.active_mask, dtype=bool)
             slots = np.flatnonzero(active)
+            # 意図の教師も操作と同じく、進める前の状態から決める
+            labels = env.option_labels(active)
 
             result = env.step(idle)
 
@@ -89,6 +94,7 @@ def collect_expert(env, steps: int = DEFAULT_STEPS, *, gamma: float | None = Non
                 obs_seq[slot].append(obs[slot].copy())
                 # 教師の操作は step() の中で経路追従が出したもの（進める前の状態から決めている）
                 act_seq[slot].append(env.autopilot_actions[slot].copy())
+                opt_seq[slot].append(int(labels[slot]))
                 rew_seq[slot].append(float(result.rewards[slot]))
                 # 打ち切り（時間切れ）も区切りとして扱う。続きの価値を知らないので同じこと
                 truncated = result.truncated is not None and bool(result.truncated[slot])
@@ -102,6 +108,7 @@ def collect_expert(env, steps: int = DEFAULT_STEPS, *, gamma: float | None = Non
     obs_out: list[np.ndarray] = []
     act_out: list[np.ndarray] = []
     ret_out: list[np.ndarray] = []
+    opt_out: list[np.ndarray] = []
     for slot in range(n):
         if not obs_seq[slot]:
             continue
@@ -118,12 +125,14 @@ def collect_expert(env, steps: int = DEFAULT_STEPS, *, gamma: float | None = Non
         obs_out.append(np.asarray(obs_seq[slot], dtype=np.float32)[teach])
         act_out.append(np.asarray(act_seq[slot], dtype=np.float32)[teach])
         ret_out.append(returns[teach])
+        opt_out.append(np.asarray(opt_seq[slot], dtype=np.int64)[teach])
 
     if not obs_out:
         return ExpertData(
             obs=np.zeros((0, config.OBS_DIM), dtype=np.float32),
             actions=np.zeros((0, config.ACTION_DIM), dtype=np.float32),
             returns=np.zeros((0,), dtype=np.float32),
+            options=np.zeros((0,), dtype=np.int64),
         )
 
     actions = np.concatenate(act_out, axis=0)
@@ -132,13 +141,14 @@ def collect_expert(env, steps: int = DEFAULT_STEPS, *, gamma: float | None = Non
         obs=np.concatenate(obs_out, axis=0),
         actions=actions,
         returns=np.concatenate(ret_out, axis=0),
+        options=np.clip(np.concatenate(opt_out, axis=0), 0, None),
     )
 
 
 def _regress(
-    modules: list[torch.nn.Module],
+    params: list[torch.nn.Parameter],
     forward,
-    t_obs: torch.Tensor,
+    inputs: tuple[torch.Tensor, ...],
     target: torch.Tensor,
     *,
     epochs: int,
@@ -146,11 +156,9 @@ def _regress(
     lr: float,
     seed: int,
     label: str,
+    loss_fn=F.mse_loss,
 ) -> WarmstartResult:
-    n = int(t_obs.shape[0])
-    params: list[torch.nn.Parameter] = []
-    for m in modules:
-        params.extend(m.parameters())
+    n = int(inputs[0].shape[0])
     opt = torch.optim.Adam(params, lr=float(lr))
     rng = np.random.default_rng(int(seed))
 
@@ -161,7 +169,7 @@ def _regress(
         batches = 0
         for start in range(0, n, int(batch_size)):
             idx = torch.from_numpy(order[start : start + int(batch_size)].astype(np.int64))
-            loss = F.mse_loss(forward(t_obs[idx]), target[idx])
+            loss = loss_fn(forward(*(t[idx] for t in inputs)), target[idx])
             opt.zero_grad(set_to_none=True)
             loss.backward()
             opt.step()
@@ -190,16 +198,48 @@ def fit_policy(
 
     policy = trainer.policy
     return _regress(
-        [policy.policy_trunk, policy.mu_head],
-        lambda x: torch.tanh(policy.mu_head(policy.policy_trunk(x))),
-        torch.from_numpy(np.ascontiguousarray(data.obs)),
-        torch.from_numpy(np.ascontiguousarray(data.actions)),
+        [*policy.policy_trunk.parameters(), *policy.mu_head.parameters(), policy.option_bias],
+        policy.mean_action,
+        (_tensor(data.obs), _tensor(data.options)),
+        _tensor(data.actions),
         epochs=epochs,
         batch_size=batch_size,
         lr=lr,
         seed=seed,
         label="方策",
     )
+
+
+def fit_options(
+    trainer,
+    data: ExpertData,
+    *,
+    epochs: int = DEFAULT_EPOCHS,
+    batch_size: int = DEFAULT_BATCH,
+    lr: float = DEFAULT_LR,
+    seed: int = 0,
+) -> WarmstartResult:
+    """状況に合う意図を上位方策に教える（交差エントロピー）。"""
+    if len(data) == 0:
+        return WarmstartResult(samples=0, first_loss=0.0, last_loss=0.0)
+
+    policy = trainer.policy
+    return _regress(
+        [*policy.meta_trunk.parameters(), *policy.meta_head.parameters()],
+        lambda x: policy.meta_head(policy.meta_trunk(x)),
+        (_tensor(data.obs),),
+        _tensor(data.options),
+        epochs=epochs,
+        batch_size=batch_size,
+        lr=lr,
+        seed=seed,
+        label="意図",
+        loss_fn=F.cross_entropy,
+    )
+
+
+def _tensor(a: np.ndarray) -> torch.Tensor:
+    return torch.from_numpy(np.ascontiguousarray(a))
 
 
 def set_exploration(trainer, std: float = WARMSTART_STD) -> float:
@@ -225,14 +265,27 @@ def fit_value(
         return WarmstartResult(samples=0, first_loss=0.0, last_loss=0.0)
 
     policy = trainer.policy
-    return _regress(
-        [policy.value_trunk, policy.value_head],
-        lambda x: policy.value_head(policy.value_trunk(x)).squeeze(-1),
-        torch.from_numpy(np.ascontiguousarray(data.obs)),
-        torch.from_numpy(np.ascontiguousarray(data.returns)),
+    result = _regress(
+        [*policy.value_trunk.parameters(), *policy.value_head.parameters()],
+        policy.sub_value,
+        (_tensor(data.obs), _tensor(data.options)),
+        _tensor(data.returns),
         epochs=epochs,
         batch_size=batch_size,
         lr=lr,
         seed=seed,
         label="価値",
     )
+    # 上位の価値も同じリターンへ寄せる（止まる前提の価値を残すと、走り出した直後に崩れるのは上位も同じ）
+    _regress(
+        [*policy.meta_value_trunk.parameters(), *policy.meta_value_head.parameters()],
+        lambda x: policy.meta(x)[1],
+        (_tensor(data.obs),),
+        _tensor(data.returns),
+        epochs=epochs,
+        batch_size=batch_size,
+        lr=lr,
+        seed=seed,
+        label="上位の価値",
+    )
+    return result

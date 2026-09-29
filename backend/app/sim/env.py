@@ -13,6 +13,7 @@ import numpy as np
 from app import config
 from app.contracts import (
     AssistDanger,
+    DriveState,
     EpisodeResult,
     FrameSnapshot,
     InterventionEvent,
@@ -99,6 +100,12 @@ REVERSE_SHIFT_MPS = 0.05
 REVERSE_GAIN = 0.6
 REVERSE_MAX_THROTTLE = 0.5
 
+# エキスパートが運転したステップの意図の教師（`option_labels`）。上から順に当てはまったものにする
+OPTION_LABEL_RED_M = 30.0
+OPTION_LABEL_PEDESTRIAN_M = 20.0
+OPTION_LABEL_JUNCTION_M = 15.0
+OPTION_LABEL_LEAD_M = 30.0
+
 
 class SimulationEnv:
     """複数車両の物理更新・観測生成・報酬計算をまとめた環境。"""
@@ -122,6 +129,12 @@ class SimulationEnv:
         self._obs_stale = False
         self._episode_lateral = np.zeros(n, dtype=np.float64)
         self._episode_reward = np.zeros(n, dtype=np.float32)
+        # 下位方策の整形に使う、前のステップに実際に出した操作。エピソードの頭は「前」が無い
+        self._prev_command = np.zeros((n, config.ACTION_DIM), dtype=np.float32)
+        self._command_fresh = np.ones(n, dtype=bool)
+        self._prev_accel = np.zeros(n, dtype=np.float64)
+        #: 階層型の方策がいま選んでいる意図（`config.HRL_OPTIONS` の添字）。None なら frame に載せない
+        self.current_options: np.ndarray | None = None
 
         # 実用モードで徴用している 1 台。**この間だけエピソードを閉じない**（決定 2）
         self.commandeered_slot: int = -1
@@ -342,6 +355,56 @@ class SimulationEnv:
             danger.held[s] = abs(speed) >= TRAFFIC_HOLD_MPS or self.traffic_hold(s)
         return danger
 
+    def option_labels(self, slots: np.ndarray) -> np.ndarray:
+        """いまの状況に合う意図（`config.HRL_OPTIONS` の添字）の真値。`slots` 以外は -1。エキスパートの教師に使う。"""
+        n = config.MAX_VEHICLES
+        labels = np.full(n, -1, dtype=np.int64)
+        world = self.world
+        for slot in np.flatnonzero(np.asarray(slots, dtype=bool).reshape(n)):
+            s = int(slot)
+            if not world.fleet.active[s]:
+                continue
+            distance, phase = world.next_signal(s)
+            if self.traffic_hold(s) or (int(phase) == RED and distance <= OPTION_LABEL_RED_M):
+                labels[s] = config.HRL_OPTIONS.index("STOP")
+            elif (
+                self._pedestrian_gap(s) <= OPTION_LABEL_PEDESTRIAN_M
+                or world.next_junction(s) <= OPTION_LABEL_JUNCTION_M
+            ):
+                labels[s] = config.HRL_OPTIONS.index("YIELD")
+            elif self._lead_gap(s) <= OPTION_LABEL_LEAD_M:
+                labels[s] = config.HRL_OPTIONS.index("FOLLOW")
+            else:
+                labels[s] = config.HRL_OPTIONS.index("CRUISE")
+        return labels
+
+    def _drive_state(
+        self, active: np.ndarray, command: np.ndarray, speed_before: np.ndarray
+    ) -> DriveState:
+        """1 ステップ後の走りの真値。前走車は方策が運転する車だけ引く（経路追従の車には要らない）。"""
+        n = config.MAX_VEHICLES
+        fleet = self.world.fleet
+        lead_speed = np.full(n, np.nan, dtype=np.float64)
+        for slot in np.flatnonzero(active):
+            gap, speed, _leader = self._lead_state(int(slot))
+            if math.isfinite(gap):
+                lead_speed[int(slot)] = speed
+        diff = command - self._prev_command
+        fresh = self._command_fresh
+        delta_sq = np.where(fresh, 0.0, np.sum(diff * diff, axis=1))
+        accel = (fleet.speed.astype(np.float64) - speed_before) / config.DT
+        jerk = np.where(fresh, 0.0, (accel - self._prev_accel) / config.DT)
+        self._prev_command[:] = command
+        self._prev_accel[:] = accel
+        self._command_fresh[:] = ~np.asarray(fleet.active, dtype=bool)
+        return DriveState(
+            speed=fleet.speed.astype(np.float64),
+            lateral=self.world.lateral.astype(np.float64),
+            lead_speed=lead_speed,
+            action_delta_sq=(delta_sq * active).astype(np.float64),
+            jerk=(jerk * active).astype(np.float64),
+        )
+
     def _pedestrian_gap(self, slot: int) -> float:
         """前方の進路上にいる歩行者までの距離 [m]。"""
         people = self.world.pedestrian_xy
@@ -421,6 +484,7 @@ class SimulationEnv:
         """1 スロット分のエピソード統計を 0 に戻す。"""
         self._episode_reward[slot] = np.float32(0.0)
         self._episode_lateral[slot] = 0.0
+        self._command_fresh[slot] = True
 
     def _reset_stats_for_changed(self, active_before: np.ndarray) -> None:
         """アクティブ状態が変わったスロットの統計を落とす。"""
@@ -447,6 +511,7 @@ class SimulationEnv:
         self.curriculum.reset_incidents()
         self._episode_reward[:] = 0.0
         self._episode_lateral[:] = 0.0
+        self._command_fresh[:] = True
         self.world.set_event_flags(
             np.zeros(config.MAX_VEHICLES, dtype=bool),
             np.zeros(config.MAX_VEHICLES, dtype=bool),
@@ -499,6 +564,7 @@ class SimulationEnv:
         self._refresh_observations()
 
         active_before = self.world.fleet.active.copy()
+        speed_before = self.world.fleet.speed.astype(np.float64)
         accel_cmd = np.where(active_before, act[:, 0], 0.0).astype(np.float32)
         steer_cmd = np.where(active_before, act[:, 1], 0.0).astype(np.float32)
 
@@ -518,6 +584,7 @@ class SimulationEnv:
             expert_mask = np.asarray(expert, dtype=bool).reshape(n) & active_before & ~overridden
             expert_mask[piloted] = False
         # エキスパートは経路追従そのものなので、前走車・歩行者の手前でも止める
+        expert_options = self.option_labels(expert_mask) if expert_mask.any() else None
         driven = np.union1d(piloted, np.flatnonzero(expert_mask)).astype(np.int64)
         steered = np.union1d(driven, np.flatnonzero(overridden)).astype(np.int64)
         self._shift_out_of_reverse(active_before, assisted)
@@ -597,6 +664,8 @@ class SimulationEnv:
         expert_mask &= self.world.fleet.gear >= 0
         expert_actions[expert_mask, 0] = accel_cmd[expert_mask]
         expert_actions[expert_mask, 1] = steer_cmd[expert_mask]
+        if expert_options is not None:
+            expert_options[~expert_mask] = -1
 
         self.world.set_braking(accel_cmd)
         self.world.fleet.step(accel_cmd, steer_cmd, config.DT, max_speed)
@@ -634,6 +703,14 @@ class SimulationEnv:
         self._episode_lateral += np.abs(self.world.lateral) * active_before
         rewards = (rewards * active_before).astype(np.float32)
         self._episode_reward += rewards
+
+        policy_driven = active_before.copy()
+        policy_driven[piloted] = False
+        drive = self._drive_state(
+            policy_driven,
+            np.stack([accel_cmd, steer_cmd], axis=1).astype(np.float32),
+            speed_before,
+        )
 
         dones = (reached | collided | offroad | timeout) & active_before
         truncated = timeout & ~(reached | collided | offroad) & active_before
@@ -695,6 +772,8 @@ class SimulationEnv:
             learn=active_before & ~overridden & ~forced_brake,
             assisted=expert_mask,
             expert_actions=expert_actions,
+            expert_options=expert_options,
+            drive=drive,
         )
 
     def _incidents_enabled(self) -> bool:
@@ -919,6 +998,10 @@ class SimulationEnv:
             if vehicle.active:
                 vehicle.assist = self.safety.assist(vehicle.id)
                 vehicle.v2x_links = list(self.v2x_links.get(vehicle.id, ()))
+                if self.current_options is not None and not self.autopilot_all:
+                    option = int(self.current_options[vehicle.id])
+                    if 0 <= option < len(config.HRL_OPTIONS):
+                        vehicle.current_option = config.HRL_OPTIONS[option]
         return frame
 
     def _detections_wire(self) -> dict[int, list[dict[str, Any]]]:

@@ -52,6 +52,7 @@ def _vehicle() -> VehicleSnapshot:
         goal=(1.0, 1.0),
         # 省略できる欄も載せる（載せないと、その欄が protocol.ts に宣言されているかを確かめられない）
         v2x_links=[2],
+        current_option="STOP",
         route=[(0.0, 0.0), (1.0, 1.0)],
     )
 

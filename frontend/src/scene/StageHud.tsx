@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react'
 import { currentCameraNotice, sceneStats } from './sceneStats'
 import { frameBuffer } from '../store/frameBuffer'
 import { useSimStore } from '../store/simStore'
+import { OptionBadge } from '../panel/OptionBadge'
 
 interface HudState {
   tick: number
@@ -13,6 +14,8 @@ interface HudState {
   hz: number
   drawCalls: number
   notice: string
+  /** 追跡中の車が選んでいる意図。追跡していない・意図が無ければ空 */
+  option: string
 }
 
 const EMPTY_HUD: HudState = {
@@ -23,6 +26,7 @@ const EMPTY_HUD: HudState = {
   hz: 0,
   drawCalls: 0,
   notice: '',
+  option: '',
 }
 
 /** 要求倍速に対してこの割合を下回ったら「追いつけていない」と見なす */
@@ -38,6 +42,7 @@ function hudSignature(h: HudState): string {
     h.hz.toFixed(1),
     h.drawCalls,
     h.notice,
+    h.option,
   ].join('|')
 }
 
@@ -51,6 +56,7 @@ export function StageHud() {
   const actualSpeed = simHz > 0 ? stepsPerSec / simHz : 0
   const keepingUp =
     requestedSpeed <= 0 || actualSpeed >= requestedSpeed * SPEED_SHORTFALL_RATIO
+  const followTarget = useSimStore((s) => s.followTarget)
   const [hud, setHud] = useState<HudState>(EMPTY_HUD)
   const lastSample = useRef({ received: 0, at: performance.now() })
   const lastSignature = useRef(hudSignature(EMPTY_HUD))
@@ -78,6 +84,7 @@ export function StageHud() {
         hz,
         drawCalls: sceneStats.drawCalls,
         notice: currentCameraNotice(),
+        option: curr?.vehicles.find((v) => v.id === followTarget && v.active)?.currentOption ?? '',
       }
       const sig = hudSignature(next)
       if (sig === lastSignature.current) return
@@ -85,7 +92,7 @@ export function StageHud() {
       setHud(next)
     }, 250)
     return () => window.clearInterval(timer)
-  }, [visible])
+  }, [visible, followTarget])
 
   if (!mapLoaded) return null
 
@@ -100,6 +107,12 @@ export function StageHud() {
       <div className="app-hud-item">
         ステップ<span className="app-hud-value">{hud.tick.toLocaleString()}</span>
       </div>
+      {hud.option && (
+        <div className="app-hud-item" title="追跡中の車の上位方策が選んでいる意図">
+          追跡 #{followTarget}
+          <OptionBadge option={hud.option} />
+        </div>
+      )}
       <div className="app-hud-item">
         障害物<span className="app-hud-value">{hud.obstacles}</span>
       </div>

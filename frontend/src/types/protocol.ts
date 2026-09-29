@@ -262,9 +262,15 @@ export interface VehicleState {
   assist?: AssistKind
   /** V2X でこの車がメッセージを受け取った相手（近い順）。いなければ省略 */
   v2xConnectedIds?: number[]
+  /** 階層型の方策がいま選んでいる意図（protocol.md 2.3）。方策が運転していない車は省略 */
+  currentOption?: DriveOption
   /** 目的地までの経路。変化があったフレームのみ含まれる。省略時は前回値を保持 */
   route?: Vec2[]
 }
+
+/** 階層型の方策の意図。並びはサーバーの `config.HRL_OPTIONS`（上位方策の出力の添字）と同じ */
+export const DRIVE_OPTIONS = ['CRUISE', 'FOLLOW', 'YIELD', 'STOP'] as const
+export type DriveOption = (typeof DRIVE_OPTIONS)[number]
 
 /** 安全ギミックの介入の種類。**バックエンドの `sim/safety.py` の ASSIST_* と同じ値** */
 export type AssistKind =
@@ -407,6 +413,10 @@ export interface MetricsMessage {
   incidentsTriggered?: number
   /** 直近 50 件のヒヤリハットを自力で回避できた割合。まだ 1 件も見届けていなければ null。 */
   incidentsAvoidedRate?: number | null
+  /** 直近 10 秒の方策が運転したステップで選ばれていた意図の割合（`DRIVE_OPTIONS` の順）。無ければ空配列。 */
+  optionShares?: number[]
+  /** 同じステップの加加速度の二乗平均平方根 [m/s^3]。方策が運転したステップが無ければ null。 */
+  jerkRms?: number | null
 }
 
 /** 学習ジョブの段階 */

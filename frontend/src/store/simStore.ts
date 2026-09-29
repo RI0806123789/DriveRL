@@ -43,6 +43,8 @@ export interface MetricsSeries {
   curriculumLevel: number[]
   /** ヒヤリハットの回避率。まだ見届けていなければ NaN（グラフは飛ばす） */
   incidentsAvoidedRate: number[]
+  /** 方策が運転したステップの加加速度の二乗平均平方根 [m/s^3]。届いていなければ NaN（グラフは飛ばす） */
+  jerk: number[]
 }
 
 function emptyMetricsSeries(): MetricsSeries {
@@ -58,6 +60,7 @@ function emptyMetricsSeries(): MetricsSeries {
     assistRate: [],
     curriculumLevel: [],
     incidentsAvoidedRate: [],
+    jerk: [],
   }
 }
 
@@ -422,6 +425,9 @@ export const useSimStore = create<SimStore>((set, get) => ({
           series.assistRate.push(normalizeAssistRate(msg.assistRate) ?? 0)
           series.curriculumLevel.push(normalizeRatio(msg.curriculumLevel) ?? 0)
           series.incidentsAvoidedRate.push(normalizeRatio(msg.incidentsAvoidedRate) ?? Number.NaN)
+          series.jerk.push(
+            typeof msg.jerkRms === 'number' && Number.isFinite(msg.jerkRms) ? msg.jerkRms : Number.NaN,
+          )
           return { metricsRevision: s.metricsRevision + 1, latestMetrics: msg }
         })
         break
