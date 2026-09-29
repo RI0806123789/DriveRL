@@ -591,5 +591,5 @@ class PPOTrainer:
         return True
 
     def _can_widen(self, saved_obs: int) -> bool:
-        """周囲カメラの欄を足す前の観測次元なら、入力を 0 埋めして読み込める。"""
-        return saved_obs == int(config.OBS_DIM_BEFORE_SURROUND) and self.obs_dim == int(config.OBS_DIM)
+        """周囲カメラ・V2X の欄を足す前の観測次元なら、入力を 0 埋めして読み込める。"""
+        return saved_obs in config.OBS_WIDENABLE_DIMS and self.obs_dim == int(config.OBS_DIM)

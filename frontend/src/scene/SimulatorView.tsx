@@ -10,6 +10,7 @@ import { Ground } from './Ground'
 import { InteractionPlane } from './InteractionPlane'
 import { LaneDetectionOverlay } from './LaneDetectionOverlay'
 import { NpcPedestrians } from './NpcPedestrians'
+import { V2XLinks } from './V2XLinks'
 import { Obstacles } from './Obstacles'
 import { PedestrianSignals } from './PedestrianSignals'
 import { NavScreen } from './NavScreen'
@@ -133,6 +134,7 @@ export function SimulatorView() {
           <RearViewMirrors />
           <Obstacles castShadow={view.shadows} />
           <NpcPedestrians castShadow={view.shadows} />
+          {!taxiMode && <V2XLinks maxVehicles={maxVehicles} />}
           <Rain />
 
           {taxiMode && <TaxiMarkers />}

@@ -10,6 +10,7 @@ import { vehicleColor } from '../scene/vehicleColors'
 import { Button } from '../ui/Button'
 import { Card } from '../ui/Card'
 import { Chip } from '../ui/Chip'
+import { V2XStatusChip } from './V2XStatusChip'
 import { Collapse } from '../ui/Collapse'
 import { startRipple } from '../ui/motion'
 import { Slider } from '../ui/Slider'
@@ -41,6 +42,8 @@ interface VehicleRow {
   laneDepartures: number
   collided: boolean
   reachedGoal: boolean
+  /** V2X でメッセージを受け取っている相手 */
+  v2x: number[]
 }
 
 /** 一覧の表示に関わる値が変わったかどうか。 */
@@ -58,7 +61,8 @@ function sameRows(a: VehicleRow[], b: VehicleRow[]): boolean {
       x.laneDepartures !== y.laneDepartures ||
       x.speed.toFixed(1) !== y.speed.toFixed(1) ||
       Math.round(x.goalDistance) !== Math.round(y.goalDistance) ||
-      Math.round(x.progress * 100) !== Math.round(y.progress * 100)
+      Math.round(x.progress * 100) !== Math.round(y.progress * 100) ||
+      x.v2x.join(',') !== y.v2x.join(',')
     ) {
       return false
     }
@@ -115,6 +119,7 @@ export function SimulationTab() {
         laneDepartures: v.laneDepartures,
         collided: v.collided,
         reachedGoal: v.reachedGoal,
+        v2x: v.v2xConnectedIds ?? [],
       }))
       setRows((prev) => (sameRows(prev, next) ? prev : next))
     }, 250)
@@ -352,6 +357,11 @@ export function SimulationTab() {
               {tracked.collided && <Chip small tone="error">衝突</Chip>}
               {tracked.reachedGoal && <Chip small tone="ok">到達</Chip>}
             </div>
+            {tracked.v2x.length > 0 && (
+              <div className="m3-row m3-row--wrap">
+                <V2XStatusChip links={tracked.v2x} />
+              </div>
+            )}
 
             <div className="m3-statgrid">
               <div className="m3-stat">

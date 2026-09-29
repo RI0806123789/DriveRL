@@ -452,8 +452,9 @@ def verify_observation(index) -> None:
         f"{np.round(rear, 3).tolist()}",
     )
     check(
-        "観測は 75 次元で、周囲カメラの欄は末尾",
-        config.OBS_DIM == 75 and base + config.OBS_SURROUND_DIM == config.OBS_DIM,
+        "周囲カメラの欄は V2X の欄の手前（後から足した欄は末尾へ足していく）",
+        base + config.OBS_SURROUND_DIM == OBS_OFFSETS["v2x"]
+        and OBS_OFFSETS["v2x"] + config.OBS_V2X_DIM == config.OBS_DIM,
         f"OBS_DIM {config.OBS_DIM} / 欄の先頭 {base}",
     )
 
@@ -529,7 +530,11 @@ def verify_checkpoint() -> None:
     rng = np.random.default_rng(0)
     x_old = rng.uniform(-1, 1, size=(64, config.OBS_DIM_BEFORE_SURROUND)).astype(np.float32)
     x_new = np.concatenate(
-        [x_old, rng.uniform(-1, 1, size=(64, config.OBS_SURROUND_DIM)).astype(np.float32)], axis=1
+        [
+            x_old,
+            rng.uniform(-1, 1, size=(64, config.OBS_DIM - config.OBS_DIM_BEFORE_SURROUND)).astype(np.float32),
+        ],
+        axis=1,
     )
     with torch.no_grad():
         d_old, v_old = old.policy.forward(torch.from_numpy(x_old))

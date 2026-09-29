@@ -28,7 +28,8 @@
     "verify:conventions": "node scripts/verify-conventions.ts",
     "verify:assist": "node scripts/verify-assist-protocol.ts",
     "verify:curriculum": "node scripts/verify-curriculum-hud.ts",
-    "verify": "npm run verify:signals && npm run verify:speedsigns && npm run verify:camera && npm run verify:playout && npm run verify:colors && npm run verify:vehicles && npm run verify:sun && npm run verify:detections && npm run verify:markings && npm run verify:weather && npm run verify:pedestrian && npm run verify:taximap && npm run verify:nav && npm run verify:taxiauto && npm run verify:conventions && npm run verify:assist && npm run verify:curriculum"
+    "verify:v2x": "node scripts/verify-v2x-links.ts",
+    "verify": "npm run verify:signals && npm run verify:speedsigns && npm run verify:camera && npm run verify:playout && npm run verify:colors && npm run verify:vehicles && npm run verify:sun && npm run verify:detections && npm run verify:markings && npm run verify:weather && npm run verify:pedestrian && npm run verify:taximap && npm run verify:nav && npm run verify:taxiauto && npm run verify:conventions && npm run verify:assist && npm run verify:curriculum && npm run verify:v2x"
   },
   "dependencies": {
     "@react-three/drei": "^10.7.8",

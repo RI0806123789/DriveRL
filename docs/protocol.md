@@ -68,7 +68,7 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
     "maxVehicles": 8,       // 事前確保するエージェントスロット数
     "maxPedestrians": 64,   // 街を歩く NPC 歩行者の上限
     "simHz": 20,            // 物理・学習ステップの周波数
-    "obsDim": 66,
+    "obsDim": 79,
     "actionDim": 2
   },
   "weatherPresets": [       // 天候の選択肢。**(rain, fog) の数値はここが唯一の出典**
@@ -213,6 +213,7 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
       "turnSignal": 0,        // 方向指示器。-1=左 / 0=消灯 / +1=右
       "reverse": false,       // 後退ギア（R）か。後退中は speed が負になる
       "assist": "",           // 安全ギミックの介入（下の表）。介入していなければ空文字
+      "v2xConnectedIds": [2, 5],  // V2X でメッセージを受け取った相手（近い順）。いなければ省略
       "route": [[x, y], ...]  // 目的地までの経路（省略可。変化時のみ入る場合あり）
     }
   ],
@@ -474,7 +475,8 @@ true のときの学習中の車だけ。判断は検出枠と推定距離から
     "weatherAuto": false,     // true の間はサーバーが simTime から天候を決める
     "safetyAssist": false,    // 学習中の車にも安全ギミック（検出枠連動の停止・切り返し）を掛けるか
     "onlineAssist": true,     // 学習中の車に経路追従（エキスパート）を割り込ませ、模倣の教師にするか
-    "incidentCurriculum": true  // 成績に応じて学習中の車にヒヤリハット（飛び出し・前走車の急制動）を起こすか
+    "incidentCurriculum": true, // 成績に応じて学習中の車にヒヤリハット（飛び出し・前走車の急制動）を起こすか
+    "v2xComm": true           // 車車間通信（V2X）で近くの車のメッセージを観測の末尾 4 次元に足すか
   }
 }
 ```
@@ -504,6 +506,13 @@ true のときの学習中の車だけ。判断は検出枠と推定距離から
 前走車も学習中の車なので、**急制動を掛けている間のその車のステップは PPO の経験に積まない**（方策が出していない操作）。
 報酬と終了条件はそのまま（ぶつかれば衝突の罰）。1 台に続けては起こさない（8 秒空ける）。実用モードでは起こさない。
 難易度はエンジンを起動し直すかマップを読み直すと 0 に戻る。
+
+`v2xComm` が true の間、各車は 4 次元のメッセージ（車速 / `maxSpeed`・右左折の意図（方向指示器と同じ -1/0/+1）・
+自車のカメラ（前方と周囲）に写った歩行者・障害物の近さ `max(0, 1 - d/30)`・交差点（信号の無い交差点の入口か次の
+停止線の近いほう）への近さ `max(0, 1 - d/30)`）を出し、**30m 以内の近い 2 台**から受け取ったものの平均を
+観測の末尾 4 次元（`OBS_LAYOUT` の `v2x`）に入れる（`sim/v2x.py`）。電波なので建物で遮られない。
+近くに車がいなければ 0 で、false にしたときも 0（近くに車がいないときと同じ）。受け取った相手は
+`frame.vehicles[].v2xConnectedIds` に載る（2.3）。実用モードでも観測は同じように作る。
 
 `rewardOverspeed` は**超え「始めた」ステップに 1 回だけ**入る（超えている間ずっとではない）。
 毎ステップ入れると、1 度超えただけで戻るまでの数十ステップぶん罰が積み上がり、
@@ -571,7 +580,7 @@ true のときの学習中の車だけ。判断は検出枠と推定距離から
 {
   "type": "network",
   "updates": 1234,
-  "obsDim": 66,
+  "obsDim": 79,
   "actionDim": 2,
   "hiddenSizes": [128, 128],
   "layers": [
@@ -951,6 +960,9 @@ asyncio 側から触ると更新中の重みを壊す）。
 無視できるキーで、`speed` が負になるのは後退中だけ（古いクライアントは速度計が 0 に張り付く程度）。
 `config.obsDim` は 66 から 75 へ増えたが、**66 次元の重みは入力を 0 で足して読み込める**
 （`rl/ppo.py` の `widen_observation`。足した入力の重みが 0 なので、読み込んだ直後の振る舞いは元と同じ）。
+車車間通信（`v2xComm` / `frame.vehicles[].v2xConnectedIds`）を足したときも 2 のまま据え置いた。
+`config.obsDim` は 75 から 79 へ増えたが、欄を末尾に足したので **66・75 次元の重みも同じく 0 で足して読み込める**
+（`config.OBS_WIDENABLE_DIMS`）。`v2xConnectedIds` は古いクライアントが無視できるキー。
 
 不正なメッセージには `error` (`INVALID_MESSAGE`) を返し、接続は維持する。
 
@@ -998,10 +1010,10 @@ WebSocket に載せないものはここに置く。バイナリの受け渡し�
 TorchScript の入出力：
 
 ```
-forward(obs: float32[B, 66]) -> (action: float32[B, 2], value: float32[B])
+forward(obs: float32[B, 79]) -> (action: float32[B, 2], value: float32[B])
 ```
 
-観測の次元（66）は `config.OBS_DIM` が出典で、書き出したメタデータの `model.obsDim` にも入る。
+観測の次元（79）は `config.OBS_DIM` が出典で、書き出したメタデータの `model.obsDim` にも入る。
 
 `action` は方策分布の平均（学習時と同じく `tanh` で `[-1, 1]` に収めたもの）で、決定論的な行動。
 学習時と同じ確率的な行動が欲しい場合は、同梱の buffer `log_std` を使って
@@ -1044,7 +1056,7 @@ TorchScript や Keras 形式を渡した場合は、その旨を説明する `40
   "sizeBytes": 578601,
   "checkpoint": {
     "updates": 585,
-    "obsDim": 66,
+    "obsDim": 79,
     "actionDim": 2,
     "hiddenSizes": [128, 128],
     "hasOptimizer": true,          // false だと学習の立ち上がりが鈍る

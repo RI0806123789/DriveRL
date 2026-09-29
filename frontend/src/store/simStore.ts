@@ -129,6 +129,7 @@ const DEFAULT_PARAMS: SimParams = {
   safetyAssist: false,
   onlineAssist: true,
   incidentCurriculum: true,
+  v2xComm: true,
 }
 
 /** `init` の `config.maxPedestrians` が無い（古いサーバー）ときの上限 */
@@ -138,7 +139,7 @@ const DEFAULT_CONFIG: SimConfig = {
   maxVehicles: 8,
   maxPedestrians: DEFAULT_MAX_PEDESTRIANS,
   simHz: 20,
-  obsDim: 75,
+  obsDim: 79,
   actionDim: 2,
 }
 

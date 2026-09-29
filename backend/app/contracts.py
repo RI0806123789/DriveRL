@@ -362,6 +362,7 @@ _PARAM_SPECS: dict[str, _ParamSpec] = {
     "safety_assist": _ParamSpec("safetyAssist", bool),
     "online_assist": _ParamSpec("onlineAssist", bool),
     "incident_curriculum": _ParamSpec("incidentCurriculum", bool),
+    "v2x_comm": _ParamSpec("v2xComm", bool),
 }
 
 _TRUE_WORDS = {"true", "1", "yes", "on"}
@@ -430,6 +431,8 @@ class SimParams:
     #: 成績に応じて学習中の車にヒヤリハット（歩行者の飛び出し・前走車の急制動）を起こすか
     #: （`sim/curriculum.py`）。実用モードでは起こさない
     incident_curriculum: bool = True
+    #: 車車間通信（V2X）で近くの車のメッセージを観測に足すか（`sim/v2x.py`）。切ると観測の V2X の欄は 0
+    v2x_comm: bool = True
 
     def to_wire(self) -> dict[str, Any]:
         return {spec.wire: getattr(self, snake) for snake, spec in _PARAM_SPECS.items()}
@@ -518,6 +521,8 @@ class VehicleSnapshot:
     reverse: bool = False
     #: 安全ギミックが介入している内容（`sim/safety.py` の ASSIST_*）。介入していなければ空
     assist: str = ""
+    #: V2X でこの車がメッセージを受け取った相手（近い順）
+    v2x_links: list[int] = field(default_factory=list)
     route: list[tuple[float, float]] | None = None
 
     def to_wire(self) -> dict[str, Any]:
@@ -543,6 +548,8 @@ class VehicleSnapshot:
             "reverse": self.reverse,
             "assist": self.assist,
         }
+        if self.v2x_links:
+            out["v2xConnectedIds"] = [int(v) for v in self.v2x_links]
         if self.route is not None:
             out["route"] = [[round(px, 2), round(py, 2)] for px, py in self.route]
         return out

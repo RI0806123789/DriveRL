@@ -48,6 +48,7 @@ _OFF_OBSTACLE = OBS_OFFSETS["obstacles"]
 _OFF_PEDESTRIAN = OBS_OFFSETS["pedestrians"]
 _OFF_FREESPACE = OBS_OFFSETS["freespace"]
 _OFF_SURROUND = OBS_OFFSETS["surround"]
+_OFF_V2X = OBS_OFFSETS["v2x"]
 assert len(SURROUND_CAMERAS) == config.OBS_SURROUND_CAMERAS, "周囲カメラの台数と観測の欄が合わない"
 
 _ROUTE_OFFSETS = np.arange(1, config.OBS_ROUTE_POINTS + 1, dtype=np.float32) * np.float32(
@@ -281,8 +282,9 @@ def encode_observations(
     freespace: dict[int, np.ndarray] | None = None,
     spec: CameraSpec = DEFAULT_CAMERA,
     surround: dict[int, dict[str, PerceptionResult]] | None = None,
+    v2x: np.ndarray | None = None,
 ) -> np.ndarray:
-    """認識結果とナビ情報から (MAX_VEHICLES, OBS_DIM) float32 を作る。"""
+    """認識結果とナビ情報から (MAX_VEHICLES, OBS_DIM) float32 を作る。`v2x` は近くの車から受け取ったメッセージの平均 (N, 4)。"""
     n = config.MAX_VEHICLES
     obs = np.zeros((n, config.OBS_DIM), dtype=np.float32)
 
@@ -338,6 +340,9 @@ def encode_observations(
         )
         if surround is not None:
             _encode_surround(obs[slot], surround.get(slot))
+
+    if v2x is not None:
+        obs[sel, _OFF_V2X : _OFF_V2X + config.OBS_V2X_DIM] = np.asarray(v2x, dtype=np.float32)[sel]
 
     obs[~active, :] = 0.0
     np.nan_to_num(obs, copy=False, nan=0.0, posinf=1.0, neginf=-1.0)

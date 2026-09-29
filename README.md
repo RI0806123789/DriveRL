@@ -31,6 +31,7 @@ DriveRL/
 │   ├── verify_log_std.py           方策分布（log_std）の健全性チェック
 │   ├── verify_online_assist.py     オンライン模倣（経路追従の割り込みと模倣の損失）
 │   ├── verify_curriculum.py        ヒヤリハットのオートカリキュラム（飛び出し・前走車の急制動）
+│   ├── verify_v2x_comm.py          車車間通信（V2X）のメッセージと観測の末尾 4 次元
 │   ├── verify_signal_phases.py     信号の現示（交差する流れが同時に青にならないか）
 │   ├── verify_publish_routes.py    経路の配信（取りこぼしてもクライアントへ届くか）
 │   ├── verify_route_start.py       配車の経路の出だし（道なりに出るか・建物を突き抜けないか）
@@ -39,7 +40,7 @@ DriveRL/
 │   ├── pytest.ini                  pytest の設定（tests/ の場所・重いテストの印）
 │   ├── tests/                      自動テスト（契約・プロトコルの突き合わせ・verify_*.py を回すラッパー）
 │   ├── app/
-│   │   ├── config.py               定数（観測 75 次元の内訳・車両諸元・PPO 設定）
+│   │   ├── config.py               定数（観測 79 次元の内訳・車両諸元・PPO 設定）
 │   │   ├── contracts.py            パッケージ間の共有型。ここが内部の契約
 │   │   ├── main.py                 FastAPI + WebSocket。重い処理は書かない
 │   │   ├── map/
@@ -63,7 +64,7 @@ DriveRL/
 │   │   │   ├── trainer.py          認識器の学習本体。**CLI と画面が共有する唯一の実装**
 │   │   │   ├── evaluate.py         収集前に現行の認識器を採点（弱点を狙う重み）
 │   │   │   ├── groundtruth.py      真値から作る「理想の検出結果」（教師データ兼フォールバック）
-│   │   │   ├── encoder.py          検出結果 -> 観測ベクトル（75 次元。末尾 9 次元が周囲カメラ）
+│   │   │   ├── encoder.py          検出結果 -> 観測ベクトル（79 次元。周囲カメラ 9 次元・V2X 4 次元が末尾）
 │   │   │   └── types.py            検出結果の型。**学習と可視化の契約**
 │   │   ├── rl/
 │   │   │   ├── policy.py           共有 Actor-Critic
@@ -1060,7 +1061,7 @@ OSM の `highway=traffic_signals` から実際の交差点位置を取り、
 | **Keras（`.keras`）**| 同じネットワークを Keras 3 のモデルとして組み直したもの。Keras / TensorFlow 系のツールで扱う |
 
 いずれにも**観測ベクトルの構成と行動のスケール**がメタデータとして埋め込まれます。
-これが無いと、受け取った側は 75 次元の入力に何を入れればよいか分からず、
+これが無いと、受け取った側は 79 次元の入力に何を入れればよいか分からず、
 ファイルは読めても実際には使えません。観測の正規化に使う `vehicle.maxSpeed` は
 **定数ではなく実行時に変えられるパラメータ**なので、書き出した時点の値を
 メタデータに入れてあります（`steerRate` / `maxLateralAccel` も、舵角を再現するには
@@ -1080,7 +1081,7 @@ meta = json.loads(extra["metadata.json"])
 print(meta["observation"]["layout"])   # 66 次元の内訳
 print(meta["action"]["fields"])        # accel / steer の物理量への換算
 
-obs = torch.zeros(1, meta["model"]["obsDim"])   # (B, 66) float32
+obs = torch.zeros(1, meta["model"]["obsDim"])   # (B, 79) float32
 action, value = policy(obs)                     # action: (B, 2), value: (B,)
 
 accel_cmd, steer_cmd = action[0].tolist()
@@ -1116,7 +1117,7 @@ with zipfile.ZipFile("autoware-sim_ginza_upd427_20260905-211557.keras") as z:
     meta = json.loads(z.read("autoware_sim_metadata.json"))
 print(meta["observation"]["layout"])        # 66 次元の内訳
 
-obs = np.zeros((1, meta["model"]["obsDim"]), dtype="float32")   # (B, 66) float32
+obs = np.zeros((1, meta["model"]["obsDim"]), dtype="float32")   # (B, 79) float32
 action, value = model.predict(obs)          # action: (B, 2), value: (B,)（TorchScript 版と同じ shape）
 print(meta["policy"]["logStd"])             # 探索ノイズを再現したいとき用
 ```
@@ -1251,6 +1252,7 @@ cd frontend; npm run verify:taxiauto    # 配車の自動操作（段階の順�
 cd frontend; npm run verify:conventions # コメント規約と CSS の遷移規約
 cd frontend; npm run verify:assist      # オンライン模倣のアシスト率（値の正規化・表示・契約ファイルとの突き合わせ）
 cd frontend; npm run verify:curriculum  # ヒヤリハットの難易度ゲージと回避率（0 で割らない・契約ファイルとバックエンドの定数との突き合わせ）
+cd frontend; npm run verify:v2x         # V2X のリンクの線分（重複なし・座標変換）・近傍の選び方・契約ファイルとの突き合わせ
 
 # 操作パネルの部品の描画テスト（node --test。.tsx は devDependencies の typescript で変換して読む）
 cd frontend; npm run test:ui
@@ -1259,6 +1261,7 @@ cd frontend; npm run test:ui
 cd backend; .venv\Scripts\python.exe verify_log_std.py        # 方策分布（log_std）
 cd backend; .venv\Scripts\python.exe verify_online_assist.py  # オンライン模倣（割り込みの確率・危険の判定・模倣の損失。合成の碁盤の目で走らせる）
 cd backend; .venv\Scripts\python.exe verify_curriculum.py     # ヒヤリハットのオートカリキュラム（昇降格・飛び出し・前走車の急制動。合成の道路で走らせる）
+cd backend; .venv\Scripts\python.exe verify_v2x_comm.py      # 車車間通信（近傍の選び方・メッセージ・観測の末尾 4 次元・旧い重みの読み込み）
 cd backend; .venv\Scripts\python.exe verify_signal_phases.py  # 信号の現示（プリセット名を渡せば 1 つだけ）
 cd backend; .venv\Scripts\python.exe verify_publish_routes.py # 配車と frame の経路が配信で落ちないか
 cd backend; .venv\Scripts\python.exe verify_route_start.py    # 配車の経路が道なりに出て建物を突き抜けないか
