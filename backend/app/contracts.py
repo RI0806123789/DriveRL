@@ -360,6 +360,7 @@ _PARAM_SPECS: dict[str, _ParamSpec] = {
     "weather_fog": _ParamSpec("weatherFog", float, 0.0, 1.0),
     "weather_auto": _ParamSpec("weatherAuto", bool),
     "safety_assist": _ParamSpec("safetyAssist", bool),
+    "online_assist": _ParamSpec("onlineAssist", bool),
 }
 
 _TRUE_WORDS = {"true", "1", "yes", "on"}
@@ -422,6 +423,9 @@ class SimParams:
     #: 開発モードでも、学習中の車に安全ギミック（検出枠連動の停止・切り返し）を掛けるか。
     #: 実用モードの経路追従の車にはこの値に関係なく掛かる
     safety_assist: bool = False
+    #: 学習中の車に経路追従（エキスパート）を割り込ませ、その操作を模倣の教師にするか
+    #: （`rl/online_assist.py`）。実用モードでは学習しないので効かない
+    online_assist: bool = True
 
     def to_wire(self) -> dict[str, Any]:
         return {spec.wire: getattr(self, snake) for snake, spec in _PARAM_SPECS.items()}
@@ -663,6 +667,10 @@ class MetricsSnapshot:
     signal_violations: float = 0.0
     speed_violations: float = 0.0
     lane_deviation: float = 0.0
+    #: 直近 10 秒の学習中の車のステップのうち、エキスパートが運転した割合
+    assist_rate: float = 0.0
+    #: 直前の PPO 更新での模倣の損失（エキスパートが運転したステップが無ければ 0）
+    bc_loss: float = 0.0
 
     def to_wire(self) -> dict[str, Any]:
         return {
@@ -683,6 +691,8 @@ class MetricsSnapshot:
             "signalViolations": round(self.signal_violations, 3),
             "speedViolations": round(self.speed_violations, 3),
             "laneDeviation": round(self.lane_deviation, 3),
+            "assistRate": round(self.assist_rate, 3),
+            "bcLoss": round(self.bc_loss, 5),
         }
 
 
@@ -718,6 +728,32 @@ class StepResult:
     #: 学習に使ってよいスロット。`active` から、安全ギミックが操作を丸ごと引き受けた車を除いたもの
     #: （方策が出していない操作を方策の経験として積まない）。None なら `active` と同じ
     learn: np.ndarray | None = None
+    #: エキスパート（経路追従）が運転したスロット（`step(expert=...)`）と、実際に出した操作
+    assisted: np.ndarray | None = None
+    expert_actions: np.ndarray | None = None
+
+
+@dataclass(slots=True)
+class AssistDanger:
+    """危険の判定に使う真値（スロットごとの配列）。`SimulationEnv.assist_danger()` が作る。"""
+
+    lane_offset: np.ndarray
+    speed: np.ndarray
+    ttc: np.ndarray
+    red_distance: np.ndarray
+    #: 赤信号・前走車・歩行者・安全ギミックに止められているか
+    held: np.ndarray
+
+    @classmethod
+    def safe(cls, n: int) -> "AssistDanger":
+        """何の危険も無い状態（試験と、計算しないスロットの既定値）。"""
+        return cls(
+            lane_offset=np.zeros(n, dtype=np.float64),
+            speed=np.zeros(n, dtype=np.float64),
+            ttc=np.full(n, np.inf, dtype=np.float64),
+            red_distance=np.full(n, np.inf, dtype=np.float64),
+            held=np.ones(n, dtype=bool),
+        )
 
 
 @dataclass

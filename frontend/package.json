@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "test": "node --test \"src/**/*.test.ts\"",
+    "test:ui": "node --test \"src/panel/__tests__/*.test.ts\"",
     "icons": "node scripts/make-icons.ts",
     "verify:signals": "node scripts/verify-signal-geometry.ts",
     "verify:speedsigns": "node scripts/verify-sign-geometry.ts",
@@ -25,7 +26,8 @@
     "verify:nav": "node scripts/verify-nav-cost.ts",
     "verify:taxiauto": "node scripts/verify-taxi-auto.ts",
     "verify:conventions": "node scripts/verify-conventions.ts",
-    "verify": "npm run verify:signals && npm run verify:speedsigns && npm run verify:camera && npm run verify:playout && npm run verify:colors && npm run verify:vehicles && npm run verify:sun && npm run verify:detections && npm run verify:markings && npm run verify:weather && npm run verify:pedestrian && npm run verify:taximap && npm run verify:nav && npm run verify:taxiauto && npm run verify:conventions"
+    "verify:assist": "node scripts/verify-assist-protocol.ts",
+    "verify": "npm run verify:signals && npm run verify:speedsigns && npm run verify:camera && npm run verify:playout && npm run verify:colors && npm run verify:vehicles && npm run verify:sun && npm run verify:detections && npm run verify:markings && npm run verify:weather && npm run verify:pedestrian && npm run verify:taximap && npm run verify:nav && npm run verify:taxiauto && npm run verify:conventions && npm run verify:assist"
   },
   "dependencies": {
     "@react-three/drei": "^10.7.8",

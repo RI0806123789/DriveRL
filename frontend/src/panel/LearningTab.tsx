@@ -5,12 +5,14 @@ import { send } from '../store/connection'
 import { formatBytes, startExport, startImport, useModelTransfer } from '../store/exportModel'
 import type { ExportKind } from '../store/exportModel'
 import { useSimStore } from '../store/simStore'
+import { AssistRateChip } from './AssistRateChip'
 import { MetricsChart } from './MetricsChart'
 import { NetworkGraph } from './NetworkGraph'
 import { Button } from '../ui/Button'
 import { Card } from '../ui/Card'
 import { Collapse } from '../ui/Collapse'
 import { Slider } from '../ui/Slider'
+import { Switch } from '../ui/Switch'
 import { ValueFlash } from '../ui/ValueFlash'
 import {
   BrainIcon,
@@ -58,6 +60,11 @@ export function LearningTab() {
             {suspended
               ? '「モデル作成」タブで認識器を学習している間は、強化学習も止まります。完了・中断すると自動で再開します。'
               : 'マップを読み込むと学習が始まります。ここには開始後の推移が表示されます。'}
+          </div>
+        )}
+        {params.onlineAssist && (
+          <div className="m3-row m3-row--wrap">
+            <AssistRateChip rate={latest?.assistRate} />
           </div>
         )}
         <div className="m3-statgrid">
@@ -129,6 +136,11 @@ export function LearningTab() {
           歩行者は信号に従って横断するので、<strong>これが増えているときは車が
           歩行者用信号の青（＝車両側の赤）を無視して交差点へ入っています</strong>。
           <br />
+          <strong>Assist Rate</strong>は、学習中の車を経路追従（お手本）が代わりに運転した割合です。
+          学習の始めは 100% で、経験が積もるにつれて 5% まで下がります。車線を外れかけたとき・
+          ぶつかりそうなとき・赤信号へ突っ込みそうなとき・理由なく止まったままのときは、
+          割合に関わらずお手本が代わります。
+          <br />
           <strong>車線逸脱</strong>は走るべき車線の中心からどれだけ横にずれているかの平均です。
           市街地の車線幅はおおむね 3m なので、<strong>1.5m を超えると隣の車線や対向車線に
           はみ出している</strong>とみてよく、0.5m 以下なら車線をよく保てています。
@@ -189,6 +201,15 @@ export function LearningTab() {
           marks={metricsMarks}
           color="var(--m3-warning)"
           format={(v) => `${v.toFixed(2)} m`}
+          height={48}
+        />
+        <MetricsChart
+          title="Assist Rate（お手本が運転した割合）"
+          values={series.assistRate}
+          revision={revision}
+          marks={metricsMarks}
+          color="var(--m3-warning)"
+          format={(v) => `${(v * 100).toFixed(0)}%`}
           height={48}
         />
         <MetricsChart
@@ -262,6 +283,15 @@ export function LearningTab() {
           format={(v) => v.toFixed(3)}
           onChange={(v) => patchParamsLocal({ entropyCoef: v })}
           onCommit={(v) => send({ type: 'set_params', params: { entropyCoef: v } })}
+        />
+        <Switch
+          label="お手本のアシスト（オンライン模倣）"
+          description="学習中の車を経路追従がときどき代わりに運転し、その操作を模倣の教師にします。止まったまま固まるのと、学習の始めの衝突の繰り返しを防ぎます"
+          checked={params.onlineAssist}
+          onChange={(v) => {
+            patchParamsLocal({ onlineAssist: v })
+            send({ type: 'set_params', params: { onlineAssist: v } })
+          }}
         />
       </Card>
 

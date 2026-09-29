@@ -28,6 +28,7 @@ import { MOCK_PRESETS, MockSignals, buildMockMap } from './mock/map.ts'
 import { mockSurround } from './mock/surround.ts'
 import { MockTaxi } from './mock/taxi.ts'
 import { MockTraffic } from './mock/traffic.ts'
+import { ASSIST_P_MIN } from './assistRate.ts'
 
 const MOCK_CONFIG: SimConfig = {
   maxVehicles: 8,
@@ -69,6 +70,7 @@ const DEFAULT_PARAMS: SimParams = {
   weatherFog: 0,
   weatherAuto: false,
   safetyAssist: false,
+  onlineAssist: true,
 }
 
 const MOCK_MAX_PEDESTRIANS = MOCK_CONFIG.maxPedestrians ?? 64
@@ -188,6 +190,9 @@ class MockServer {
       signalViolations: 0,
       speedViolations: 0,
       laneDeviation: 0,
+      // 実機と同じ下がり方（`rl/online_assist.py`）。乱数は引かない（引く順番を変えない）
+      assistRate: this.params.onlineAssist ? Math.max(ASSIST_P_MIN, 1 - p) : 0,
+      bcLoss: this.params.onlineAssist ? 0.02 * Math.max(ASSIST_P_MIN, 1 - p) : 0,
     }
     this.send(metrics)
   }

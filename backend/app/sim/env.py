@@ -12,6 +12,7 @@ import numpy as np
 
 from app import config
 from app.contracts import (
+    AssistDanger,
     EpisodeResult,
     FrameSnapshot,
     InterventionEvent,
@@ -32,7 +33,7 @@ from app.percep.types import (
 from app.percep.weather import Weather, auto_weather
 from app.sim.safety import FRESH_SEC as SAFETY_FRESH_SEC
 from app.sim.safety import SafetyCommand, SafetySupervisor
-from app.sim.signals import GREEN, STOP_MARGIN_M, constrain_accel, stop_speed_limit
+from app.sim.signals import GREEN, RED, STOP_MARGIN_M, constrain_accel, stop_speed_limit
 from app.sim.world import SPAWN_CLEARANCE_M2, World
 
 #: 1 ステップで再スポーンに使ってよい時間 [秒]。1 台ぶんは必ず処理するので、
@@ -268,10 +269,14 @@ class SimulationEnv:
 
     def _lead_gap(self, slot: int) -> float:
         """前方の同じ進路上にいる他車までの車間 [m]。"""
+        return self._lead_state(slot)[0]
+
+    def _lead_state(self, slot: int) -> tuple[float, float]:
+        """前方の同じ進路上にいる直近の他車の (車体の中心どうしの距離 [m], 自車の向きの速さ [m/s])。"""
         fleet = self.world.fleet
         idx = np.flatnonzero(fleet.active)
         if idx.size <= 1:
-            return float("inf")
+            return float("inf"), 0.0
         heading = float(fleet.heading[slot])
         cos_h = math.cos(heading)
         sin_h = math.sin(heading)
@@ -288,8 +293,40 @@ class SimulationEnv:
             & (same_way >= AUTOPILOT_SAME_WAY_COS)
         )
         if not ahead.any():
-            return float("inf")
-        return float(lon[ahead].min())
+            return float("inf"), 0.0
+        nearest = int(np.flatnonzero(ahead)[np.argmin(lon[ahead])])
+        lead_speed = float(fleet.speed[idx[nearest]]) * float(same_way[nearest])
+        return float(lon[nearest]), lead_speed
+
+    def assist_danger(self, slots: np.ndarray) -> AssistDanger:
+        """オンライン模倣の危険の判定に使う真値（`rl/online_assist.py`）。`slots` 以外は危険なしで埋める。"""
+        n = config.MAX_VEHICLES
+        danger = AssistDanger.safe(n)
+        world = self.world
+        fleet = world.fleet
+        for slot in np.flatnonzero(np.asarray(slots, dtype=bool).reshape(n)):
+            s = int(slot)
+            if not fleet.active[s]:
+                continue
+            speed = float(fleet.speed[s])
+            danger.speed[s] = speed
+            danger.lane_offset[s] = abs(float(world.lateral[s]))
+            ttc = float("inf")
+            gap, lead_speed = self._lead_state(s)
+            closing = speed - lead_speed
+            if math.isfinite(gap) and closing > 0.0:
+                ttc = max(0.0, gap - config.VEHICLE_LENGTH) / closing
+            person = self._pedestrian_gap(s)
+            if math.isfinite(person) and speed > 0.0:
+                reach = config.VEHICLE_LENGTH / 2.0 + config.PEDESTRIAN_RADIUS
+                ttc = min(ttc, max(0.0, person - reach) / speed)
+            danger.ttc[s] = ttc
+            distance, phase = world.next_signal(s)
+            if int(phase) == RED:
+                danger.red_distance[s] = distance
+            # 止められているかは、遅いときにだけ要る（固まりの判定）
+            danger.held[s] = abs(speed) >= TRAFFIC_HOLD_MPS or self.traffic_hold(s)
+        return danger
 
     def _pedestrian_gap(self, slot: int) -> float:
         """前方の進路上にいる歩行者までの距離 [m]。"""
@@ -439,8 +476,8 @@ class SimulationEnv:
             if time.perf_counter() - started >= RESPAWN_BUDGET_SEC:
                 break
 
-    def step(self, actions: np.ndarray) -> StepResult:
-        """1 ステップ進める。終了したスロットは再スポーン待ちへ積む（`_drain_respawn_queue`）。"""
+    def step(self, actions: np.ndarray, expert: np.ndarray | None = None) -> StepResult:
+        """1 ステップ進める。`expert` のスロットは方策の代わりに経路追従が運転する（オンライン模倣）。"""
         n = config.MAX_VEHICLES
         act = np.asarray(actions, dtype=np.float32).reshape(n, config.ACTION_DIM)
         act = np.clip(np.nan_to_num(act, nan=0.0, posinf=1.0, neginf=-1.0), -1.0, 1.0)
@@ -460,7 +497,14 @@ class SimulationEnv:
         overridden = np.zeros(n, dtype=bool)
         for slot in assisted:
             overridden[int(slot)] = commands[int(slot)].override
-        steered = np.union1d(piloted, np.flatnonzero(overridden)).astype(np.int64)
+        # オンライン模倣でエキスパートが運転する車。安全ギミックが引き受けている車は除く
+        expert_mask = np.zeros(n, dtype=bool)
+        if expert is not None:
+            expert_mask = np.asarray(expert, dtype=bool).reshape(n) & active_before & ~overridden
+            expert_mask[piloted] = False
+        # エキスパートは経路追従そのものなので、前走車・歩行者の手前でも止める
+        driven = np.union1d(piloted, np.flatnonzero(expert_mask)).astype(np.int64)
+        steered = np.union1d(driven, np.flatnonzero(overridden)).astype(np.int64)
         self._shift_out_of_reverse(active_before, assisted)
 
         params = self.params
@@ -478,7 +522,7 @@ class SimulationEnv:
         limit = np.minimum(limit, self.world.stop_speed_limits())
         # 車間は経路追従の車にだけ掛ける。学習中の車に掛けると
         #   「追突しない世界」になり、PPO から見た環境が変わってしまう
-        for slot in piloted:
+        for slot in driven:
             limit[slot] = min(
                 float(limit[slot]),
                 float(
@@ -527,6 +571,11 @@ class SimulationEnv:
             s = int(slot)
             if commands[s].reverse or int(self.world.fleet.gear[s]) < 0:
                 accel_cmd[s], steer_cmd[s] = self._reverse_control(s, commands[s])
+
+        expert_actions = np.zeros((n, config.ACTION_DIM), dtype=np.float32)
+        expert_mask &= self.world.fleet.gear >= 0
+        expert_actions[expert_mask, 0] = accel_cmd[expert_mask]
+        expert_actions[expert_mask, 1] = steer_cmd[expert_mask]
 
         self.world.set_braking(accel_cmd)
         self.world.fleet.step(accel_cmd, steer_cmd, config.DT, max_speed)
@@ -622,6 +671,8 @@ class SimulationEnv:
             final_obs=final_obs,
             episodes=episodes,
             learn=active_before & ~overridden,
+            assisted=expert_mask,
+            expert_actions=expert_actions,
         )
 
     def _reverse_control(self, slot: int, command: SafetyCommand) -> tuple[float, float]:

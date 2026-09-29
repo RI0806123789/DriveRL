@@ -85,6 +85,7 @@ class _PendingUpdate:
     value_losses: list[float] = field(default_factory=list)
     entropies: list[float] = field(default_factory=list)
     kls: list[float] = field(default_factory=list)
+    bc_losses: list[float] = field(default_factory=list)
     grad_sums: dict[str, float] = field(default_factory=dict)
     grad_counts: dict[str, int] = field(default_factory=dict)
     grad_totals: list[float] = field(default_factory=list)
@@ -147,6 +148,11 @@ class PPOTrainer:
     def updates(self) -> int:
         return self._updates
 
+    @property
+    def experience_steps(self) -> int:
+        """これまでに学習へ積んだステップ数の目安（更新回数 × ロールアウト長 + 収集中の分）。"""
+        return int(self._updates) * int(self.rollout_length) + int(self.buffer.size)
+
     def act(
         self, obs: np.ndarray, active: np.ndarray
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -182,6 +188,8 @@ class PPOTrainer:
         truncated: np.ndarray | None = None,
         final_obs: np.ndarray | None = None,
         learn: np.ndarray | None = None,
+        expert_actions: np.ndarray | None = None,
+        assisted: np.ndarray | None = None,
     ) -> None:
         """1 ステップ分をバッファに積む。"""
         raw = self._last_raw_actions
@@ -218,6 +226,8 @@ class PPOTrainer:
             truncated,
             truncated_values,
             learn,
+            expert_actions,
+            assisted,
         )
 
     def maybe_update(
@@ -301,7 +311,17 @@ class PPOTrainer:
             adv = batch["advantages"]
             surr1 = ratio * adv
             surr2 = torch.clamp(ratio, 1.0 - clip, 1.0 + clip) * adv
-            policy_loss = -torch.min(surr1, surr2).mean()
+            surrogate = torch.min(surr1, surr2)
+            # エキスパートが運転したステップの行動は方策から引いたものではないので、方策の勾配に入れない
+            assisted = batch["assisted"]
+            own = ~assisted
+            own_count = int(own.sum())
+            if own_count == int(own.numel()):
+                policy_loss = -surrogate.mean()
+            elif own_count > 0:
+                policy_loss = -surrogate[own].mean()
+            else:
+                policy_loss = surrogate.sum() * 0.0
 
             old_values = batch["values"]
             returns = batch["returns"]
@@ -316,6 +336,16 @@ class PPOTrainer:
                 + float(config.PPO_VALUE_COEF) * value_loss
                 - float(self.entropy_coef) * entropy_mean
             )
+            if bool(assisted.any()):
+                mean_action = self.policy.mean_action(batch["obs"][assisted])
+                target = torch.clamp(
+                    batch["expert_actions"][assisted],
+                    -float(config.PPO_BC_TEACH_LIMIT),
+                    float(config.PPO_BC_TEACH_LIMIT),
+                )
+                bc_loss = ((mean_action - target) ** 2).sum(dim=-1).mean()
+                loss = loss + float(config.PPO_BC_COEF) * bc_loss
+                pending.bc_losses.append(float(bc_loss.detach()))
 
             self.optimizer.zero_grad(set_to_none=True)
             loss.backward()
@@ -337,7 +367,8 @@ class PPOTrainer:
             self.policy.clamp_log_std()
 
             with torch.no_grad():
-                approx_kl = ((ratio - 1.0) - log_ratio).mean()
+                kl_terms = (ratio - 1.0) - log_ratio
+                approx_kl = kl_terms[own].mean() if own_count > 0 else kl_terms.sum() * 0.0
             pending.policy_losses.append(float(policy_loss.detach()))
             pending.value_losses.append(float(value_loss.detach()))
             pending.entropies.append(float(entropy_mean.detach()))
@@ -369,6 +400,7 @@ class PPOTrainer:
             "value_loss": float(np.mean(pending.value_losses)),
             "entropy": float(np.mean(pending.entropies)),
             "approx_kl": float(np.mean(pending.kls)),
+            "bc_loss": float(np.mean(pending.bc_losses)) if pending.bc_losses else 0.0,
         }
 
     def network_snapshot(self) -> dict[str, Any]:

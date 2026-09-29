@@ -169,6 +169,9 @@ cd backend
   「止まる」に固まる（実測 -1.710。立て直しは `warmstart_policy.py`）
 - **方策を立て直すときは価値関数と探索の幅も必ずセットで直す。** 「止まる前提」の
   価値を残したまま走り出すと、advantage の誤差で**2 更新で元へ戻る**（実測）
+- **オンライン模倣（`rl/online_assist.py`）でエキスパートが運転したステップは PPO の代理損失に入れない。**
+  価値の損失と模倣の損失にだけ使う（`RolloutBuffer.assisted`）。`learn`（安全ギミックが引き受けたステップを外す）とは
+  別の印で、`assisted` は `learn` の部分集合。検査は `backend/verify_online_assist.py`
 - **`map/loader.py` と `public/sw.js` の `CACHE_VERSION` は、生成物の中身を変えたら上げる**
 - **実用モード（自動運転タクシー）では重みの更新だけが止まる。** 物理も推論も配信も動き続ける。
   この間は**全車**を PPO ではなく経路追従（Pure Pursuit）で走らせ、徴用した 1 台は
