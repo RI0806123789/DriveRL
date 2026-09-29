@@ -134,6 +134,22 @@ console.log('CSS はレイアウトを起こすプロパティを遷移させな
 }
 
 console.log('')
+console.log('大文字と小文字だけが違うファイル名を置かない（Windows では拡張子を省いた import が別のファイルを掴む）')
+{
+  const stems = new Map<string, string>()
+  const clashes: Array<[string, string]> = []
+  for (const f of unique) {
+    const stem = f.replace(/\.(tsx?|py)$/, '')
+    const key = stem.toLowerCase()
+    const seen = stems.get(key)
+    if (seen !== undefined && seen !== stem) clashes.push([seen, stem])
+    else stems.set(key, stem)
+  }
+  check('拡張子を除いた名前が大文字と小文字の違いだけで重なるファイルは 0 組', clashes.length === 0, `${clashes.length} 組`)
+  for (const [x, y] of clashes.slice(0, 10)) console.log(`        ${x} <-> ${y}`)
+}
+
+console.log('')
 console.log('='.repeat(70))
 if (failures > 0) {
   console.log(`結果: ${failures} 件の不合格`)
