@@ -610,6 +610,9 @@ class SimulationEngine:
             self._trainer.reset_rollout()
         self._assist.reset()
         self._assist_log.clear()
+        if self._env is not None:
+            # 起こしかけのヒヤリハット（前走車の急制動）を実用モードへ持ち越さない
+            self._env.curriculum.reset_incidents()
         self._publish_taxi()
         self._notify(
             "実用モードに入りました。学習は止まり、いまの重みのまま走ります"
@@ -1010,9 +1013,14 @@ class SimulationEngine:
                     except Exception:
                         logger.exception("チェックポイントの自動保存に失敗しました")
 
+            track = env.params.incident_curriculum
             for episode in result.episodes:
                 self._episode_log.append(episode)
                 self._total_episodes += 1
+                if track:
+                    env.curriculum.record_episode_end(
+                        episode.reason == "goal", episode.reason == "collision"
+                    )
 
         self._tick += 1
         self._sim_time = env.sim_time
@@ -1126,6 +1134,7 @@ class SimulationEngine:
         assisted_steps = sum(a for a, _ in self._assist_log)
         learned_steps = sum(b for _, b in self._assist_log)
         assist_rate = assisted_steps / learned_steps if learned_steps > 0 else 0.0
+        curriculum = self._env.curriculum if self._env is not None else None
         return MetricsSnapshot(
             tick=self._tick,
             wall_time=time.perf_counter() - self._started_at,
@@ -1146,4 +1155,7 @@ class SimulationEngine:
             lane_deviation=lane_deviation,
             assist_rate=assist_rate,
             bc_loss=float(stats.get("bc_loss", 0.0)),
+            curriculum_level=curriculum.level if curriculum is not None else 0.0,
+            incidents_triggered=curriculum.triggered if curriculum is not None else 0,
+            incidents_avoided_rate=curriculum.avoided_rate if curriculum is not None else None,
         )

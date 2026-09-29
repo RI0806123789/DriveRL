@@ -172,6 +172,8 @@ cd backend
 - **オンライン模倣（`rl/online_assist.py`）でエキスパートが運転したステップは PPO の代理損失に入れない。**
   価値の損失と模倣の損失にだけ使う（`RolloutBuffer.assisted`）。`learn`（安全ギミックが引き受けたステップを外す）とは
   別の印で、`assisted` は `learn` の部分集合。検査は `backend/verify_online_assist.py`
+- **ヒヤリハット（`sim/curriculum.py`）で急制動を掛けた前走車のステップは学習に使わない**（前走車も PPO の車）。
+  難易度 0 の間は乱数を引かず、ON でも OFF でも結果は 1 ビットも変わらない。検査は `backend/verify_curriculum.py`
 - **`map/loader.py` と `public/sw.js` の `CACHE_VERSION` は、生成物の中身を変えたら上げる**
 - **実用モード（自動運転タクシー）では重みの更新だけが止まる。** 物理も推論も配信も動き続ける。
   この間は**全車**を PPO ではなく経路追従（Pure Pursuit）で走らせ、徴用した 1 台は

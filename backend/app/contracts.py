@@ -361,6 +361,7 @@ _PARAM_SPECS: dict[str, _ParamSpec] = {
     "weather_auto": _ParamSpec("weatherAuto", bool),
     "safety_assist": _ParamSpec("safetyAssist", bool),
     "online_assist": _ParamSpec("onlineAssist", bool),
+    "incident_curriculum": _ParamSpec("incidentCurriculum", bool),
 }
 
 _TRUE_WORDS = {"true", "1", "yes", "on"}
@@ -426,6 +427,9 @@ class SimParams:
     #: 学習中の車に経路追従（エキスパート）を割り込ませ、その操作を模倣の教師にするか
     #: （`rl/online_assist.py`）。実用モードでは学習しないので効かない
     online_assist: bool = True
+    #: 成績に応じて学習中の車にヒヤリハット（歩行者の飛び出し・前走車の急制動）を起こすか
+    #: （`sim/curriculum.py`）。実用モードでは起こさない
+    incident_curriculum: bool = True
 
     def to_wire(self) -> dict[str, Any]:
         return {spec.wire: getattr(self, snake) for snake, spec in _PARAM_SPECS.items()}
@@ -671,6 +675,12 @@ class MetricsSnapshot:
     assist_rate: float = 0.0
     #: 直前の PPO 更新での模倣の損失（エキスパートが運転したステップが無ければ 0）
     bc_loss: float = 0.0
+    #: ヒヤリハットの難易度 0.0〜1.0
+    curriculum_level: float = 0.0
+    #: いまのマップで起こしたヒヤリハットの件数
+    incidents_triggered: int = 0
+    #: 直近 50 件のヒヤリハットを自力で回避できた割合。まだ 1 件も見届けていなければ None
+    incidents_avoided_rate: float | None = None
 
     def to_wire(self) -> dict[str, Any]:
         return {
@@ -693,6 +703,13 @@ class MetricsSnapshot:
             "laneDeviation": round(self.lane_deviation, 3),
             "assistRate": round(self.assist_rate, 3),
             "bcLoss": round(self.bc_loss, 5),
+            "curriculumLevel": round(self.curriculum_level, 3),
+            "incidentsTriggered": int(self.incidents_triggered),
+            "incidentsAvoidedRate": (
+                None
+                if self.incidents_avoided_rate is None
+                else round(self.incidents_avoided_rate, 3)
+            ),
         }
 
 

@@ -66,6 +66,8 @@ export interface SimParams {
   safetyAssist: boolean
   /** 学習中の車に経路追従（エキスパート）を割り込ませ、模倣の教師にするか。 */
   onlineAssist: boolean
+  /** 成績に応じて学習中の車にヒヤリハット（歩行者の飛び出し・前走車の急制動）を起こすか。 */
+  incidentCurriculum: boolean
 }
 
 /** いま効いている天候（2.3 frame.weather） */
@@ -395,6 +397,12 @@ export interface MetricsMessage {
   assistRate?: number
   /** 直前の PPO 更新での模倣の損失。 */
   bcLoss?: number
+  /** ヒヤリハットの難易度 0.0〜1.0（古いサーバーは送らない）。 */
+  curriculumLevel?: number
+  /** いまのマップで起こしたヒヤリハットの件数。 */
+  incidentsTriggered?: number
+  /** 直近 50 件のヒヤリハットを自力で回避できた割合。まだ 1 件も見届けていなければ null。 */
+  incidentsAvoidedRate?: number | null
 }
 
 /** 学習ジョブの段階 */
