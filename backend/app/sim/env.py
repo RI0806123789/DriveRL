@@ -31,6 +31,14 @@ from app.percep.types import (
     PerceptionResult,
 )
 from app.percep.weather import Weather, auto_weather
+from app.sim.curriculum import (
+    JAYWALK_AHEAD_M,
+    JAYWALK_LATERAL_M,
+    JAYWALK_PARALLEL_COS,
+    KIND_JAYWALK,
+    KIND_LEADER_BRAKE,
+    CurriculumManager,
+)
 from app.sim.safety import FRESH_SEC as SAFETY_FRESH_SEC
 from app.sim.safety import SafetyCommand, SafetySupervisor
 from app.sim.signals import GREEN, RED, STOP_MARGIN_M, constrain_accel, stop_speed_limit
@@ -134,6 +142,8 @@ class SimulationEnv:
         self._surround_taken: dict[int, dict[str, tuple[float, int]]] = {}
         self._rear_free: dict[int, np.ndarray] = {}
         self.safety = SafetySupervisor()
+        # ヒヤリハットのオートカリキュラム。環境の乱数とは別の乱数で回す（難易度 0 の間は 1 つも引かない）
+        self.curriculum = CurriculumManager(np.random.default_rng([int(seed), 63]))
         # 周囲カメラの検出を frame に載せる車（`watch_surround`）。載せないと転送量が倍になる
         self.watched_surround: frozenset[int] = frozenset()
         self._camera_spec = DEFAULT_CAMERA
@@ -271,12 +281,12 @@ class SimulationEnv:
         """前方の同じ進路上にいる他車までの車間 [m]。"""
         return self._lead_state(slot)[0]
 
-    def _lead_state(self, slot: int) -> tuple[float, float]:
-        """前方の同じ進路上にいる直近の他車の (車体の中心どうしの距離 [m], 自車の向きの速さ [m/s])。"""
+    def _lead_state(self, slot: int) -> tuple[float, float, int]:
+        """前方の同じ進路上にいる直近の他車の (車体の中心どうしの距離 [m], 自車の向きの速さ [m/s], スロット)。"""
         fleet = self.world.fleet
         idx = np.flatnonzero(fleet.active)
         if idx.size <= 1:
-            return float("inf"), 0.0
+            return float("inf"), 0.0, -1
         heading = float(fleet.heading[slot])
         cos_h = math.cos(heading)
         sin_h = math.sin(heading)
@@ -293,10 +303,10 @@ class SimulationEnv:
             & (same_way >= AUTOPILOT_SAME_WAY_COS)
         )
         if not ahead.any():
-            return float("inf"), 0.0
+            return float("inf"), 0.0, -1
         nearest = int(np.flatnonzero(ahead)[np.argmin(lon[ahead])])
         lead_speed = float(fleet.speed[idx[nearest]]) * float(same_way[nearest])
-        return float(lon[nearest]), lead_speed
+        return float(lon[nearest]), lead_speed, int(idx[nearest])
 
     def assist_danger(self, slots: np.ndarray) -> AssistDanger:
         """オンライン模倣の危険の判定に使う真値（`rl/online_assist.py`）。`slots` 以外は危険なしで埋める。"""
@@ -312,7 +322,7 @@ class SimulationEnv:
             danger.speed[s] = speed
             danger.lane_offset[s] = abs(float(world.lateral[s]))
             ttc = float("inf")
-            gap, lead_speed = self._lead_state(s)
+            gap, lead_speed, _leader = self._lead_state(s)
             closing = speed - lead_speed
             if math.isfinite(gap) and closing > 0.0:
                 ttc = max(0.0, gap - config.VEHICLE_LENGTH) / closing
@@ -430,6 +440,7 @@ class SimulationEnv:
         self.params.vehicle_count = self.vehicle_count
         if relocate_walkers:
             self.world.relocate_pedestrians()
+        self.curriculum.reset_incidents()
         self._episode_reward[:] = 0.0
         self._episode_lateral[:] = 0.0
         self.world.set_event_flags(
@@ -572,6 +583,12 @@ class SimulationEnv:
             if commands[s].reverse or int(self.world.fleet.gear[s]) < 0:
                 accel_cmd[s], steer_cmd[s] = self._reverse_control(s, commands[s])
 
+        # ヒヤリハットの急制動。前走車の操作を最大制動で上書きするので、その車のそのステップは学習に使わない
+        forced_brake = self.curriculum.braking_mask() & active_before & ~overridden
+        forced_brake[piloted] = False
+        accel_cmd[forced_brake] = np.float32(-1.0)
+        expert_mask &= ~forced_brake
+
         expert_actions = np.zeros((n, config.ACTION_DIM), dtype=np.float32)
         expert_mask &= self.world.fleet.gear >= 0
         expert_actions[expert_mask, 0] = accel_cmd[expert_mask]
@@ -659,6 +676,7 @@ class SimulationEnv:
 
         self._drain_respawn_queue()
         self.world.set_event_flags(collided, reached)
+        self._update_incidents(collided | offroad, dones, expert_mask, piloted)
 
         self._obs = self._compute_observations()
         self._obs_stale = False
@@ -670,10 +688,101 @@ class SimulationEnv:
             truncated=truncated,
             final_obs=final_obs,
             episodes=episodes,
-            learn=active_before & ~overridden,
+            learn=active_before & ~overridden & ~forced_brake,
             assisted=expert_mask,
             expert_actions=expert_actions,
         )
+
+    def _incidents_enabled(self) -> bool:
+        return bool(self.params.incident_curriculum) and not self.autopilot_all
+
+    def _update_incidents(
+        self,
+        failed: np.ndarray,
+        ended: np.ndarray,
+        assisted: np.ndarray,
+        piloted: np.ndarray,
+    ) -> None:
+        """起こしたヒヤリハットを見届け、条件のそろった車に新しく起こす（`sim/curriculum.py`）。"""
+        curriculum = self.curriculum
+        fleet = self.world.fleet
+        curriculum.advance(failed, ended, assisted, fleet.active)
+        if not self._incidents_enabled() or curriculum.incident_probability <= 0.0:
+            return
+        learners = fleet.active & ~np.asarray(ended, dtype=bool)
+        learners[piloted] = False
+        braking = curriculum.braking_mask()
+        for slot in np.flatnonzero(learners):
+            s = int(slot)
+            speed = float(fleet.speed[s])
+            center, _lead_speed, leader = self._lead_state(s)
+            gap = center - config.VEHICLE_LENGTH
+            following = leader >= 0 and curriculum.leader_geometry(gap, speed)
+            rising = curriculum.update_following(s, following)
+            if not curriculum.can_start(s):
+                continue
+            if (
+                rising
+                and learners[leader]
+                and not braking[leader]
+                and curriculum.should_trigger_leader_braking(gap, speed)
+            ):
+                curriculum.start(s, KIND_LEADER_BRAKE, leader)
+                braking = curriculum.braking_mask()
+                continue
+            person = self._jaywalk_candidate(s, speed)
+            if person >= 0:
+                curriculum.mark_pedestrian(person)
+                if curriculum.roll() and self.world.crowd.force_cross_street(
+                    person, curriculum.dash_speed()
+                ):
+                    curriculum.start(s, KIND_JAYWALK)
+
+    def _jaywalk_candidate(self, slot: int, speed: float) -> int:
+        """飛び出させる歩行者を 1 人選ぶ（前方 8〜18m・横 2〜4m で、渡ると自車の進路を横切る人）。無ければ -1。"""
+        if speed <= 0.0:
+            return -1
+        crowd = self.world.crowd
+        # 動かす相手は NPC だけなので `pedestrian_xy`（利用者の徒歩キャラも並ぶ）ではなく群衆を直接見る
+        idx = np.flatnonzero(crowd.active & ~crowd.crossing & ~crowd.waiting)
+        if idx.size == 0:
+            return -1
+        fleet = self.world.fleet
+        heading = float(fleet.heading[slot])
+        cos_h = math.cos(heading)
+        sin_h = math.sin(heading)
+        dx = crowd.x[idx] - float(fleet.x[slot])
+        dy = crowd.y[idx] - float(fleet.y[slot])
+        lon = dx * cos_h + dy * sin_h
+        lat = -dx * sin_h + dy * cos_h
+        near = (
+            (lon >= JAYWALK_AHEAD_M[0])
+            & (lon <= JAYWALK_AHEAD_M[1])
+            & (np.abs(lat) >= JAYWALK_LATERAL_M[0])
+            & (np.abs(lat) <= JAYWALK_LATERAL_M[1])
+        )
+        if not near.any():
+            return -1
+        pick = idx[near]
+        lat = lat[near]
+        lon = lon[near]
+        edge = crowd.edge[pick]
+        arc = np.clip(crowd.arc[pick], 0.0, crowd.net.length[edge])
+        _cx, _cy, tx, ty = crowd.net.sample(edge, arc)
+        # 道が自車と平行で、渡る向き（歩道の側から反対側へ）が自車の進路へ向かう人だけ
+        parallel = np.abs(tx * cos_h + ty * sin_h) >= JAYWALK_PARALLEL_COS
+        # 渡る向きは (-ty, tx) × 渡る先の側。自車の左向き (-sin, cos) との内積は、回転を打ち消すと t·h になる
+        across = -crowd.side[pick].astype(np.float64)
+        move_lat = across * (tx * cos_h + ty * sin_h)
+        toward = np.sign(move_lat) == -np.sign(lat)
+        ok = parallel & toward
+        for k in np.flatnonzero(ok)[np.argsort(lon[ok])]:
+            person = int(pick[k])
+            if not self.curriculum.pedestrian_ready(person):
+                continue
+            if self.curriculum.jaywalk_geometry(float(lon[k]), float(lat[k]), speed):
+                return person
+        return -1
 
     def _reverse_control(self, slot: int, command: SafetyCommand) -> tuple[float, float]:
         """後退の操作（まっすぐ下がる）。前進から後退・後退から前進へは、止まってからギアを入れ替える。"""

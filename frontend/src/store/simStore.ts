@@ -22,6 +22,7 @@ import type {
 import { PROTOCOL_VERSION } from '../types/protocol'
 import { pushFrame, resetFrameBuffer } from './frameBuffer'
 import { normalizeAssistRate } from './assistRate'
+import { normalizeRatio } from './curriculum'
 
 /** メトリクス履歴に**上限は設けない**。 */
 
@@ -38,6 +39,10 @@ export interface MetricsSeries {
   pedestrianCollisions: number[]
   /** エキスパートが運転した割合（`assistRate`。古いサーバーは 0） */
   assistRate: number[]
+  /** ヒヤリハットの難易度（古いサーバーは 0） */
+  curriculumLevel: number[]
+  /** ヒヤリハットの回避率。まだ見届けていなければ NaN（グラフは飛ばす） */
+  incidentsAvoidedRate: number[]
 }
 
 function emptyMetricsSeries(): MetricsSeries {
@@ -51,6 +56,8 @@ function emptyMetricsSeries(): MetricsSeries {
     laneDeviation: [],
     pedestrianCollisions: [],
     assistRate: [],
+    curriculumLevel: [],
+    incidentsAvoidedRate: [],
   }
 }
 
@@ -121,6 +128,7 @@ const DEFAULT_PARAMS: SimParams = {
   weatherAuto: false,
   safetyAssist: false,
   onlineAssist: true,
+  incidentCurriculum: true,
 }
 
 /** `init` の `config.maxPedestrians` が無い（古いサーバー）ときの上限 */
@@ -411,6 +419,8 @@ export const useSimStore = create<SimStore>((set, get) => ({
           series.laneDeviation.push(msg.laneDeviation)
           series.pedestrianCollisions.push(msg.pedestrianCollisionRate ?? 0)
           series.assistRate.push(normalizeAssistRate(msg.assistRate) ?? 0)
+          series.curriculumLevel.push(normalizeRatio(msg.curriculumLevel) ?? 0)
+          series.incidentsAvoidedRate.push(normalizeRatio(msg.incidentsAvoidedRate) ?? Number.NaN)
           return { metricsRevision: s.metricsRevision + 1, latestMetrics: msg }
         })
         break

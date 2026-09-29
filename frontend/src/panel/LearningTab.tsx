@@ -6,6 +6,7 @@ import { formatBytes, startExport, startImport, useModelTransfer } from '../stor
 import type { ExportKind } from '../store/exportModel'
 import { useSimStore } from '../store/simStore'
 import { AssistRateChip } from './AssistRateChip'
+import { CurriculumGauge } from './CurriculumGauge'
 import { MetricsChart } from './MetricsChart'
 import { NetworkGraph } from './NetworkGraph'
 import { Button } from '../ui/Button'
@@ -147,6 +148,24 @@ export function LearningTab() {
         </div>
       </Card>
 
+      {params.incidentCurriculum && (
+        <Card title="ヒヤリハット（オートカリキュラム）" icon={<WarningIcon size={16} />}>
+          <CurriculumGauge
+            level={latest?.curriculumLevel}
+            triggered={latest?.incidentsTriggered}
+            avoidedRate={latest?.incidentsAvoidedRate}
+          />
+          <div className="m3-note">
+            目的地に着けるようになり衝突が減ってくると（直近 20 エピソードで到達 85% 以上・衝突 10% 以下）、
+            難易度が 5% ずつ上がり、学習中の車の前で<strong>歩行者が車道へ飛び出したり、前の車が急ブレーキを
+            踏んだり</strong>するようになります。衝突が 25% 以上に増えると下がります。
+            <br />
+            <strong>自力で回避</strong>は、起こしてから 5 秒のあいだに衝突も逸脱もせず、お手本（経路追従）にも
+            代わられなかった割合です。
+          </div>
+        </Card>
+      )}
+
       <Card title="ネットワーク" icon={<BrainIcon size={16} />}>
         <div className="m3-note">
           方策（アクセル・操舵を決める側）と価値（その状況の見込みを評価する側）の
@@ -212,6 +231,28 @@ export function LearningTab() {
           format={(v) => `${(v * 100).toFixed(0)}%`}
           height={48}
         />
+        {params.incidentCurriculum && (
+          <>
+            <MetricsChart
+              title="Curriculum Level（ヒヤリハットの難易度）"
+              values={series.curriculumLevel}
+              revision={revision}
+              marks={metricsMarks}
+              color="var(--m3-tertiary)"
+              format={(v) => `${(v * 100).toFixed(0)}%`}
+              height={48}
+            />
+            <MetricsChart
+              title="ヒヤリハットを自力で回避した割合"
+              values={series.incidentsAvoidedRate}
+              revision={revision}
+              marks={metricsMarks}
+              color="var(--m3-secondary)"
+              format={(v) => `${(v * 100).toFixed(0)}%`}
+              height={48}
+            />
+          </>
+        )}
         <MetricsChart
           title="ポリシー損失"
           values={series.policyLoss}
@@ -291,6 +332,15 @@ export function LearningTab() {
           onChange={(v) => {
             patchParamsLocal({ onlineAssist: v })
             send({ type: 'set_params', params: { onlineAssist: v } })
+          }}
+        />
+        <Switch
+          label="ヒヤリハットのオートカリキュラム"
+          description="成績が上がると、学習中の車の前で歩行者の飛び出しや前走車の急ブレーキを起こします。報酬と終了条件はそのまま（ぶつかれば衝突の罰）で、実用モードでは起こしません"
+          checked={params.incidentCurriculum}
+          onChange={(v) => {
+            patchParamsLocal({ incidentCurriculum: v })
+            send({ type: 'set_params', params: { incidentCurriculum: v } })
           }}
         />
       </Card>

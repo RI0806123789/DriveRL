@@ -258,6 +258,9 @@ class PedestrianCrowd:
         self.waiting = np.zeros(n, dtype=bool)
         #: 待っている端がエッジの終点側か（信号を引くのに使う）
         self.wait_forward = np.zeros(n, dtype=bool)
+        #: 横断歩道でない所から小走りで車道へ出ている（ヒヤリハット。`sim/curriculum.py`）
+        self.jaywalking = np.zeros(n, dtype=bool)
+        self.dash_speed = np.zeros(n, dtype=np.float64)
         self.stride = np.zeros(n, dtype=np.float64)
 
         self.x = np.zeros(n, dtype=np.float64)
@@ -329,6 +332,7 @@ class PedestrianCrowd:
         self.crossing[slot] = False
         self.cross[slot] = 0.0
         self.waiting[slot] = False
+        self.jaywalking[slot] = False
         self.stride[slot] = float(rng.uniform(0.0, 2.0 * math.pi))
         self.speed[slot] = float(
             config.PEDESTRIAN_SPEED
@@ -361,17 +365,36 @@ class PedestrianCrowd:
             span = np.maximum(
                 self.net.walk_offset[self.edge[crossing]] * 2.0, 1e-3
             )
-            rate = self.speed[crossing] / np.maximum(span, 1e-3)
+            pace = np.where(
+                self.jaywalking[crossing], self.dash_speed[crossing], self.speed[crossing]
+            )
+            rate = pace / np.maximum(span, 1e-3)
             self.cross[crossing] += np.minimum(rate, 1.0 / CROSS_MIN_SEC) * dt
-            self.stride[crossing] += self.speed[crossing] * dt * 2.0
+            self.stride[crossing] += pace * dt * 2.0
             done = crossing[self.cross[crossing] >= 1.0]
             if done.size:
                 self.side[done] = self.cross_to[done]
                 self.cross[done] = 0.0
                 self.crossing[done] = False
+                self.jaywalking[done] = False
 
         self._handle_ends(walking, phases)
         self._refresh_pose()
+
+    def force_cross_street(self, slot: int, speed: float) -> bool:
+        """歩道を歩いている 1 人を、その場から車道へ直角に小走りで渡らせる（飛び出し）。渡らせられなければ False。"""
+        slot = int(slot)
+        if not (0 <= slot < self.active.size) or not self.active[slot]:
+            return False
+        if self.crossing[slot] or self.waiting[slot]:
+            return False
+        self.crossing[slot] = True
+        self.jaywalking[slot] = True
+        self.dash_speed[slot] = float(speed)
+        self.cross[slot] = 0.0
+        self.cross_to[slot] = -self.side[slot]
+        self._refresh_pose()
+        return True
 
     def _release_waiting(self, idx: np.ndarray, phases: Sequence[int]) -> None:
         """信号待ちの歩行者を、青になったら渡らせる。"""
@@ -536,6 +559,7 @@ class PedestrianCrowd:
         self.crossing[slot] = False
         self.cross[slot] = 0.0
         self.waiting[slot] = False
+        self.jaywalking[slot] = False
         return True
 
     def snapshot(self) -> list[PedestrianSnapshot]:
