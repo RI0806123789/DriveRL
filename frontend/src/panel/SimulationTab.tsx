@@ -11,6 +11,8 @@ import { Button } from '../ui/Button'
 import { Card } from '../ui/Card'
 import { Chip } from '../ui/Chip'
 import { V2XStatusChip } from './V2XStatusChip'
+import { OptionBadge } from './OptionBadge'
+import type { DriveOption } from '../types/protocol'
 import { Collapse } from '../ui/Collapse'
 import { startRipple } from '../ui/motion'
 import { Slider } from '../ui/Slider'
@@ -44,6 +46,8 @@ interface VehicleRow {
   reachedGoal: boolean
   /** V2X でメッセージを受け取っている相手 */
   v2x: number[]
+  /** 階層型の方策がいま選んでいる意図 */
+  option?: DriveOption
 }
 
 /** 一覧の表示に関わる値が変わったかどうか。 */
@@ -62,7 +66,8 @@ function sameRows(a: VehicleRow[], b: VehicleRow[]): boolean {
       x.speed.toFixed(1) !== y.speed.toFixed(1) ||
       Math.round(x.goalDistance) !== Math.round(y.goalDistance) ||
       Math.round(x.progress * 100) !== Math.round(y.progress * 100) ||
-      x.v2x.join(',') !== y.v2x.join(',')
+      x.v2x.join(',') !== y.v2x.join(',') ||
+      x.option !== y.option
     ) {
       return false
     }
@@ -120,6 +125,7 @@ export function SimulationTab() {
         collided: v.collided,
         reachedGoal: v.reachedGoal,
         v2x: v.v2xConnectedIds ?? [],
+        option: v.currentOption,
       }))
       setRows((prev) => (sameRows(prev, next) ? prev : next))
     }, 250)
@@ -353,6 +359,7 @@ export function SimulationTab() {
                 style={{ background: vehicleColor(tracked.id), width: 14, height: 14 }}
               />
               <span style={{ fontSize: 15, fontWeight: 700 }}>車両 #{tracked.id}</span>
+              <OptionBadge option={tracked.option} />
               <span className="m3-grow" />
               {tracked.collided && <Chip small tone="error">衝突</Chip>}
               {tracked.reachedGoal && <Chip small tone="ok">到達</Chip>}
@@ -448,6 +455,7 @@ export function SimulationTab() {
                     style={{ background: vehicleColor(r.id) }}
                   />
                   <span className="m3-vehicle-id">#{r.id}</span>
+                  <OptionBadge option={r.option} />
                   <span className="m3-vehicle-metrics">
                     <span>{r.speed.toFixed(1)} m/s</span>
                     <span>目的地まで {r.goalDistance.toFixed(0)} m</span>

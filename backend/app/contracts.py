@@ -523,6 +523,8 @@ class VehicleSnapshot:
     assist: str = ""
     #: V2X でこの車がメッセージを受け取った相手（近い順）
     v2x_links: list[int] = field(default_factory=list)
+    #: 階層型の方策がいま選んでいる意図（`config.HRL_OPTIONS` の名前）。方策が運転していない車は空
+    current_option: str = ""
     route: list[tuple[float, float]] | None = None
 
     def to_wire(self) -> dict[str, Any]:
@@ -550,6 +552,8 @@ class VehicleSnapshot:
         }
         if self.v2x_links:
             out["v2xConnectedIds"] = [int(v) for v in self.v2x_links]
+        if self.current_option:
+            out["currentOption"] = self.current_option
         if self.route is not None:
             out["route"] = [[round(px, 2), round(py, 2)] for px, py in self.route]
         return out
@@ -688,6 +692,10 @@ class MetricsSnapshot:
     incidents_triggered: int = 0
     #: 直近 50 件のヒヤリハットを自力で回避できた割合。まだ 1 件も見届けていなければ None
     incidents_avoided_rate: float | None = None
+    #: 直近 10 秒の方策が運転したステップで、階層型の方策が選んでいた意図の割合（`config.HRL_OPTIONS` の順）
+    option_shares: list[float] = field(default_factory=list)
+    #: 同じステップの加加速度の二乗平均平方根 [m/s^3]。方策が運転したステップが無ければ None
+    jerk_rms: float | None = None
 
     def to_wire(self) -> dict[str, Any]:
         return {
@@ -717,6 +725,8 @@ class MetricsSnapshot:
                 if self.incidents_avoided_rate is None
                 else round(self.incidents_avoided_rate, 3)
             ),
+            "optionShares": [round(float(v), 3) for v in self.option_shares],
+            "jerkRms": None if self.jerk_rms is None else round(self.jerk_rms, 3),
         }
 
 
@@ -755,6 +765,25 @@ class StepResult:
     #: エキスパート（経路追従）が運転したスロット（`step(expert=...)`）と、実際に出した操作
     assisted: np.ndarray | None = None
     expert_actions: np.ndarray | None = None
+    #: エキスパートが運転したスロットの意図の教師（`config.HRL_OPTIONS` の添字。それ以外は -1）
+    expert_options: np.ndarray | None = None
+    #: 下位方策の報酬の整形に使う真値（`rl/hierarchical_policy.py` の `sub_reward_shaping`）
+    drive: "DriveState | None" = None
+
+
+@dataclass(slots=True)
+class DriveState:
+    """1 ステップ後の走りの真値（スロットごとの配列）。報酬そのものではなく、下位方策の整形に使う。"""
+
+    speed: np.ndarray
+    #: 車線中心からの横ずれ [m]
+    lateral: np.ndarray
+    #: 同じ向きの前走車の速さ [m/s]。いなければ nan
+    lead_speed: np.ndarray
+    #: 実際に出した操作（-1..1）の前のステップからの変化の二乗和。エピソードの最初は 0
+    action_delta_sq: np.ndarray
+    #: 実際の加速度の変化 [m/s^3]（加加速度）。エピソードの最初は 0
+    jerk: np.ndarray
 
 
 @dataclass(slots=True)

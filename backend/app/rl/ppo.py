@@ -16,8 +16,14 @@ import torch
 import torch.nn as nn
 
 from app import config
-from app.contracts import SimParams
+from app.contracts import DriveState, SimParams
 from app.rl.buffer import RolloutBuffer
+from app.rl.hierarchical_policy import (
+    META_MODULES,
+    NUM_OPTIONS,
+    OptionScheduler,
+    sub_reward_shaping,
+)
 from app.rl.policy import ActorCritic
 
 __all__ = [
@@ -29,30 +35,54 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-CHECKPOINT_FORMAT = "autoware-sim-ppo-1"
+CHECKPOINT_FORMAT = "autoware-sim-ppo-2"
 
-KNOWN_CHECKPOINT_FORMATS: frozenset[object] = frozenset({CHECKPOINT_FORMAT, 1})
+#: 1 は階層型にする前（平らな方策）。読み込むときに `upgrade_flat_state` で移す
+FLAT_CHECKPOINT_FORMATS: frozenset[object] = frozenset({"autoware-sim-ppo-1", 1})
+KNOWN_CHECKPOINT_FORMATS: frozenset[object] = frozenset({CHECKPOINT_FORMAT}) | FLAT_CHECKPOINT_FORMATS
 
 
 #: 観測を受け取る入力層（方策と価値の MLP の先頭の Linear）
 _INPUT_WEIGHTS = ("policy_trunk.0.weight", "value_trunk.0.weight")
+_META_INPUT_WEIGHTS = ("meta_trunk.0.weight", "meta_value_trunk.0.weight")
 
 
 def widen_observation(
     state: dict[str, torch.Tensor], saved_obs: int, obs_dim: int
 ) -> dict[str, torch.Tensor]:
-    """入力層の重みの末尾に 0 の列を足す。足した入力は出力に効かないので、読み込んだ直後の振る舞いは元と同じ。"""
+    """入力層の重みの観測の末尾（意図の one-hot の手前）に 0 の列を足す。読み込んだ直後の振る舞いは元と同じ。"""
+    out = dict(state)
+    extra = int(obs_dim) - int(saved_obs)
+    keys = [*_INPUT_WEIGHTS, *(k for k in _META_INPUT_WEIGHTS if k in out)]
+    for key in keys:
+        weight = out.get(key)
+        width = -1 if weight is None or weight.dim() != 2 else int(weight.shape[1])
+        if width not in (int(saved_obs), int(saved_obs) + NUM_OPTIONS):
+            raise ValueError(f"{key} の形が観測 {saved_obs} 次元の入力層ではありません")
+        pad = torch.zeros((int(weight.shape[0]), extra), dtype=weight.dtype, device=weight.device)
+        out[key] = torch.cat([weight[:, : int(saved_obs)], pad, weight[:, int(saved_obs) :]], dim=1)
+    return out
+
+
+def is_flat_state(state: dict[str, torch.Tensor]) -> bool:
+    """階層型にする前（上位方策が無く、下位の入力に意図の one-hot が無い）の重みか。"""
+    return not any(key.startswith(META_MODULES) for key in state)
+
+
+def upgrade_flat_state(
+    state: dict[str, torch.Tensor], fresh: dict[str, torch.Tensor]
+) -> dict[str, torch.Tensor]:
+    """平らな方策の重みを階層型へ移す。意図の入力の重みと偏りは 0、上位方策は `fresh`（初期値）のまま。"""
     out = dict(state)
     for key in _INPUT_WEIGHTS:
-        weight = out.get(key)
-        if weight is None or weight.dim() != 2 or int(weight.shape[1]) != int(saved_obs):
-            raise ValueError(f"{key} の形が観測 {saved_obs} 次元の入力層ではありません")
-        pad = torch.zeros(
-            (int(weight.shape[0]), int(obs_dim) - int(saved_obs)),
-            dtype=weight.dtype,
-            device=weight.device,
-        )
+        weight = out[key]
+        pad = torch.zeros((int(weight.shape[0]), NUM_OPTIONS), dtype=weight.dtype, device=weight.device)
         out[key] = torch.cat([weight, pad], dim=1)
+    # 意図で操作が変わると、読み込んだ直後の振る舞いが元と違ってしまう
+    out["option_bias"] = torch.zeros_like(fresh["option_bias"])
+    for key, value in fresh.items():
+        if key.startswith(META_MODULES):
+            out[key] = value.clone()
     return out
 
 
@@ -86,6 +116,9 @@ class _PendingUpdate:
     entropies: list[float] = field(default_factory=list)
     kls: list[float] = field(default_factory=list)
     bc_losses: list[float] = field(default_factory=list)
+    meta_policy_losses: list[float] = field(default_factory=list)
+    meta_value_losses: list[float] = field(default_factory=list)
+    meta_entropies: list[float] = field(default_factory=list)
     grad_sums: dict[str, float] = field(default_factory=dict)
     grad_counts: dict[str, int] = field(default_factory=dict)
     grad_totals: list[float] = field(default_factory=list)
@@ -134,6 +167,8 @@ class PPOTrainer:
 
         self._updates = 0
         self._last_raw_actions: np.ndarray | None = None
+        self.scheduler = OptionScheduler(self.num_agents, int(config.HRL_OPTION_STEPS))
+        self._last_meta: dict[str, np.ndarray] | None = None
         self._pending: _PendingUpdate | None = None
 
         self._last_grad_norms: dict[str, float] = {}
@@ -143,6 +178,8 @@ class PPOTrainer:
         self._last_delta_norms: dict[str, float] = {}
         #: 直前の `load` が観測の次元を広げて読み込んだなら、元の次元
         self.widened_from: int | None = None
+        #: 直前の `load` が階層型にする前（平らな方策）の重みを移して読み込んだか
+        self.upgraded_flat: bool = False
 
     @property
     def updates(self) -> int:
@@ -153,17 +190,44 @@ class PPOTrainer:
         """これまでに学習へ積んだステップ数の目安（更新回数 × ロールアウト長 + 収集中の分）。"""
         return int(self._updates) * int(self.rollout_length) + int(self.buffer.size)
 
+    @property
+    def current_options(self) -> np.ndarray:
+        """スロットごとにいま保っている意図（`config.HRL_OPTIONS` の添字）。"""
+        return self.scheduler.options.copy()
+
+    def end_options(self, mask: np.ndarray) -> None:
+        """エピソードが終わった車は次のステップで意図を選び直す。"""
+        self.scheduler.restart(mask)
+
     def act(
         self, obs: np.ndarray, active: np.ndarray
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """行動をサンプリングする。"""
+        """行動をサンプリングする。意図は `HRL_OPTION_STEPS` ごと（とエピソードの頭）にだけ選び直す。"""
         n = self.num_agents
         obs_arr = np.asarray(obs, dtype=np.float32).reshape(n, self.obs_dim)
         active_arr = np.asarray(active, dtype=bool).reshape(n)
 
         with torch.no_grad():
             t_obs = torch.from_numpy(np.ascontiguousarray(obs_arr))
-            raw_actions, log_probs, values = self.policy.act(t_obs)
+            due = self.scheduler.due(active_arr)
+            # 上位の対数確率と価値が要るのは選び直したステップだけ（上位の GAE の区切りはそこにしか来ない）
+            meta_log_probs = np.zeros(n, dtype=np.float32)
+            meta_values = np.zeros(n, dtype=np.float32)
+            if due.any():
+                meta_dist, t_meta_values = self.policy.meta(t_obs)
+                sampled = meta_dist.sample()
+                self.scheduler.assign(due, sampled.numpy())
+                meta_log_probs = meta_dist.log_prob(sampled).numpy().astype(np.float32)
+                meta_values = t_meta_values.numpy().astype(np.float32)
+            options = self.scheduler.options.copy()
+            raw_actions, log_probs, values = self.policy.get_action(t_obs, torch.from_numpy(options))
+        self._last_meta = {
+            "options": options,
+            "option_start": due,
+            "meta_log_probs": np.where(due, meta_log_probs, np.float32(0.0)),
+            "meta_values": np.where(due, meta_values, np.float32(0.0)),
+        }
+        self.scheduler.tick(active_arr)
 
         raw = raw_actions.numpy().astype(np.float32, copy=True)
         self._last_raw_actions = raw
@@ -190,8 +254,10 @@ class PPOTrainer:
         learn: np.ndarray | None = None,
         expert_actions: np.ndarray | None = None,
         assisted: np.ndarray | None = None,
+        expert_options: np.ndarray | None = None,
+        drive: DriveState | None = None,
     ) -> None:
-        """1 ステップ分をバッファに積む。"""
+        """1 ステップ分をバッファに積む。下位方策の報酬は `drive` から整形を足したもの。"""
         raw = self._last_raw_actions
         actions_arr = np.asarray(actions, dtype=np.float32).reshape(
             self.num_agents, self.action_dim
@@ -199,8 +265,21 @@ class PPOTrainer:
         if raw is not None and raw.shape == actions_arr.shape:
             actions_arr = raw
         self._last_raw_actions = None
+        n = self.num_agents
+        meta = self._last_meta or {
+            "options": np.zeros(n, dtype=np.int64),
+            "option_start": np.zeros(n, dtype=bool),
+            "meta_log_probs": np.zeros(n, dtype=np.float32),
+            "meta_values": np.zeros(n, dtype=np.float32),
+        }
+        self._last_meta = None
+        env_rewards = np.asarray(rewards, dtype=np.float32).reshape(n)
+        sub_rewards = env_rewards
+        if drive is not None:
+            sub_rewards = env_rewards + sub_reward_shaping(meta["options"], drive, active)
 
         truncated_values: np.ndarray | None = None
+        truncated_meta_values: np.ndarray | None = None
         if final_obs is not None and truncated is not None:
             # 打ち切ったステップでしか作られない（`SimulationEnv.step`）ので、
             # 評価は 200 秒に 1 度ほど。毎ステップの推論は増えない
@@ -212,8 +291,10 @@ class PPOTrainer:
                         )
                     )
                 )
-                _dist, final_values = self.policy.forward(t_obs)
+                final_values = self.policy.sub_value(t_obs, torch.from_numpy(meta["options"]))
+                _meta_dist, final_meta_values = self.policy.meta(t_obs)
             truncated_values = final_values.numpy().astype(np.float32)
+            truncated_meta_values = final_meta_values.numpy().astype(np.float32)
 
         self.buffer.add(
             obs,
@@ -228,7 +309,15 @@ class PPOTrainer:
             learn,
             expert_actions,
             assisted,
+            sub_rewards=sub_rewards,
+            options=meta["options"],
+            option_start=meta["option_start"],
+            meta_log_probs=meta["meta_log_probs"],
+            meta_values=meta["meta_values"],
+            truncated_meta_values=truncated_meta_values,
+            expert_options=expert_options,
         )
+        self.end_options(np.asarray(dones, dtype=bool).reshape(n))
 
     def maybe_update(
         self, last_obs: np.ndarray, last_active: np.ndarray
@@ -254,11 +343,16 @@ class PPOTrainer:
 
         with torch.no_grad():
             t_obs = torch.from_numpy(np.ascontiguousarray(last_obs_arr))
-            _dist, last_values = self.policy.forward(t_obs)
+            last_values = self.policy.sub_value(t_obs, torch.from_numpy(self.scheduler.options))
+            _meta_dist, last_meta_values = self.policy.meta(t_obs)
         last_values_np = last_values.numpy().astype(np.float32)
 
         self.buffer.compute_returns_and_advantages(
-            last_values_np, last_active_arr, self.gamma, config.PPO_GAE_LAMBDA
+            last_values_np,
+            last_active_arr,
+            self.gamma,
+            config.PPO_GAE_LAMBDA,
+            last_meta_values=last_meta_values.numpy().astype(np.float32),
         )
 
         with torch.no_grad():
@@ -303,7 +397,7 @@ class PPOTrainer:
             batch = {k: v[sel] for k, v in data.items()}
 
             new_log_probs, entropy, values = self.policy.evaluate(
-                batch["obs"], batch["actions"]
+                batch["obs"], batch["actions"], batch["options"]
             )
             log_ratio = new_log_probs - batch["log_probs"]
             ratio = torch.exp(log_ratio)
@@ -336,14 +430,26 @@ class PPOTrainer:
                 + float(config.PPO_VALUE_COEF) * value_loss
                 - float(self.entropy_coef) * entropy_mean
             )
+            meta_policy_loss, meta_value_loss, meta_entropy, meta_bc = self._meta_losses(batch, clip)
+            loss = (
+                loss
+                + meta_policy_loss
+                + float(config.PPO_VALUE_COEF) * meta_value_loss
+                - float(config.HRL_META_ENTROPY_COEF) * meta_entropy
+            )
             if bool(assisted.any()):
-                mean_action = self.policy.mean_action(batch["obs"][assisted])
+                # 下位はエキスパートの操作を、そのときの状況に合う意図（`expert_options`）の下で真似る
+                labels = batch["expert_options"][assisted]
+                chosen = batch["options"][assisted]
+                mean_action = self.policy.mean_action(
+                    batch["obs"][assisted], torch.where(labels >= 0, labels, chosen)
+                )
                 target = torch.clamp(
                     batch["expert_actions"][assisted],
                     -float(config.PPO_BC_TEACH_LIMIT),
                     float(config.PPO_BC_TEACH_LIMIT),
                 )
-                bc_loss = ((mean_action - target) ** 2).sum(dim=-1).mean()
+                bc_loss = ((mean_action - target) ** 2).sum(dim=-1).mean() + meta_bc
                 loss = loss + float(config.PPO_BC_COEF) * bc_loss
                 pending.bc_losses.append(float(bc_loss.detach()))
 
@@ -373,6 +479,9 @@ class PPOTrainer:
             pending.value_losses.append(float(value_loss.detach()))
             pending.entropies.append(float(entropy_mean.detach()))
             pending.kls.append(float(approx_kl))
+            pending.meta_policy_losses.append(float(meta_policy_loss.detach()))
+            pending.meta_value_losses.append(float(meta_value_loss.detach()))
+            pending.meta_entropies.append(float(meta_entropy.detach()))
 
         pending.cursor = end
         if pending.cursor < len(pending.schedule):
@@ -401,7 +510,42 @@ class PPOTrainer:
             "entropy": float(np.mean(pending.entropies)),
             "approx_kl": float(np.mean(pending.kls)),
             "bc_loss": float(np.mean(pending.bc_losses)) if pending.bc_losses else 0.0,
+            "meta_policy_loss": float(np.mean(pending.meta_policy_losses)),
+            "meta_value_loss": float(np.mean(pending.meta_value_losses)),
+            "meta_entropy": float(np.mean(pending.meta_entropies)),
         }
+
+    def _meta_losses(
+        self, batch: dict[str, torch.Tensor], clip: float
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """上位方策の (PPO の代理損失, 価値の損失, エントロピー, 意図の模倣の交差エントロピー)。"""
+        obs = batch["obs"]
+        dist, meta_values = self.policy.meta(obs)
+        zero = meta_values.sum() * 0.0
+        starts = batch["option_start"]
+        own = starts & ~batch["assisted"]
+
+        policy_loss = zero
+        if bool(own.any()):
+            new_log_probs = dist.log_prob(batch["options"])[own]
+            ratio = torch.exp(new_log_probs - batch["meta_log_probs"][own])
+            adv = batch["meta_advantages"][own]
+            surrogate = torch.min(ratio * adv, torch.clamp(ratio, 1.0 - clip, 1.0 + clip) * adv)
+            policy_loss = -surrogate.mean()
+
+        value_loss = zero
+        if bool(starts.any()):
+            old = batch["meta_values"][starts]
+            returns = batch["meta_returns"][starts]
+            values = meta_values[starts]
+            clipped = old + torch.clamp(values - old, -clip, clip)
+            value_loss = 0.5 * torch.max((values - returns) ** 2, (clipped - returns) ** 2).mean()
+
+        labeled = batch["expert_options"] >= 0
+        bc = zero
+        if bool(labeled.any()):
+            bc = -dist.log_prob(batch["expert_options"].clamp(min=0))[labeled].mean()
+        return policy_loss, value_loss, dist.entropy().mean(), bc
 
     def network_snapshot(self) -> dict[str, Any]:
         """層ごとの重み・勾配・変化量を返す。"""
@@ -416,7 +560,7 @@ class PPOTrainer:
                 layers.append(
                     {
                         "name": name.removesuffix(".weight"),
-                        "role": "value" if name.startswith("value") else "policy",
+                        "role": "value" if "value" in name else "policy",
                         "inDim": int(in_dim),
                         "outDim": int(out_dim),
                         "weightAbsMean": float(w.abs().mean()),
@@ -454,6 +598,8 @@ class PPOTrainer:
         """収集中のロールアウトを捨てる。**世界が不連続に変わったときに呼ぶ。**"""
         self.buffer.clear()
         self._last_raw_actions = None
+        self._last_meta = None
+        self.scheduler.restart()
         self._drop_pending()
 
     def apply_params(self, params: SimParams) -> None:
@@ -488,6 +634,8 @@ class PPOTrainer:
         self.buffer.clear()
         self._updates = 0
         self._last_raw_actions = None
+        self._last_meta = None
+        self.scheduler.restart()
         self._drop_pending()
         self._last_grad_norms = {}
         self._last_grad_total = 0.0
@@ -525,6 +673,7 @@ class PPOTrainer:
         """チェックポイントを読み込む。読めたら True、形状不一致等なら False。"""
         path = Path(path)
         self.widened_from = None
+        self.upgraded_flat = False
         if not path.exists():
             return False
         try:
@@ -557,14 +706,18 @@ class PPOTrainer:
             return False
         widened = saved_obs != self.obs_dim
         before = copy.deepcopy(self.policy.state_dict())
+        flat = False
         try:
             self._drop_pending()
             state = payload["policy"]
+            flat = isinstance(state, dict) and is_flat_state(state)
             if widened:
                 state = widen_observation(state, saved_obs, self.obs_dim)
+            if flat:
+                state = upgrade_flat_state(state, before)
             self.policy.load_state_dict(state)
             # 入力の形が変わった重みの Adam の統計は使えないので、移行したときは捨てる
-            if "optimizer" in payload and not widened:
+            if "optimizer" in payload and not widened and not flat:
                 self.optimizer.load_state_dict(payload["optimizer"])
                 for group in self.optimizer.param_groups:
                     group["lr"] = self.learning_rate
@@ -579,9 +732,16 @@ class PPOTrainer:
         finally:
             self.buffer.clear()
             self._last_raw_actions = None
+            self._last_meta = None
+            self.scheduler.restart()
         self.policy.clamp_log_std()
         self._updates = int(payload.get("updates", 0))
         self.widened_from = saved_obs if widened else None
+        self.upgraded_flat = flat
+        if flat:
+            logger.info(
+                "階層型にする前のチェックポイントを移して読み込みました（意図の入力の重みは 0・上位方策は初期値）"
+            )
         if widened:
             logger.info(
                 "観測 %d 次元のチェックポイントを %d 次元へ広げて読み込みました（足した入力の重みは 0）",

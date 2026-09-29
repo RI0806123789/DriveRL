@@ -1250,6 +1250,50 @@ button.m3-chip:active:not(:disabled) {
   font-size: 11px;
 }
 
+.option-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 20px;
+  padding: 0 8px;
+  border-radius: var(--m3-shape-full);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  transition:
+    background-color var(--m3-dur-medium) var(--m3-ease-emphasized),
+    color var(--m3-dur-medium) var(--m3-ease-emphasized);
+}
+.option-badge--cruise {
+  background: var(--m3-option-cruise-container);
+  color: var(--m3-on-option-cruise-container);
+}
+.option-badge--follow {
+  background: var(--m3-option-follow-container);
+  color: var(--m3-on-option-follow-container);
+}
+.option-badge--yield {
+  background: var(--m3-option-yield-container);
+  color: var(--m3-on-option-yield-container);
+}
+.option-badge--stop {
+  background: var(--m3-option-stop-container);
+  color: var(--m3-on-option-stop-container);
+}
+.option-shares {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.option-shares-row {
+  display: grid;
+  grid-template-columns: 76px 1fr 40px;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
 .m3-row {
   display: flex;
   align-items: center;

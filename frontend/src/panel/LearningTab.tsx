@@ -9,6 +9,8 @@ import { AssistRateChip } from './AssistRateChip'
 import { CurriculumGauge } from './CurriculumGauge'
 import { MetricsChart } from './MetricsChart'
 import { NetworkGraph } from './NetworkGraph'
+import { OptionShares } from './OptionShares'
+import { jerkText } from '../store/driveOption'
 import { Button } from '../ui/Button'
 import { Card } from '../ui/Card'
 import { Collapse } from '../ui/Collapse'
@@ -166,10 +168,27 @@ export function LearningTab() {
         </Card>
       )}
 
+      <Card title="意図（階層型の方策）" icon={<TuneIcon size={16} />}>
+        <OptionShares shares={latest?.optionShares} />
+        <div className="m3-statgrid">
+          <div className="m3-stat">
+            <span className="m3-stat-label">加加速度（Jerk）</span>
+            <ValueFlash className="m3-stat-value">{jerkText(latest?.jerkRms)}</ValueFlash>
+          </div>
+        </div>
+        <div className="m3-note">
+          上位方策が <strong>1 秒（20 ステップ）ごと</strong>に「巡航・追従・徐行・停止」のどれで走るかを決め、
+          下位方策がその意図の下で毎ステップのアクセルと操舵を決めます。割合は直近 10 秒に方策が運転した
+          ステップで選ばれていた意図です（お手本が代わったステップは数えません）。
+          <br />
+          <strong>加加速度</strong>は加速度の変わる速さで、アクセルとブレーキを小刻みに踏み替えるほど大きくなります。
+        </div>
+      </Card>
+
       <Card title="ネットワーク" icon={<BrainIcon size={16} />}>
         <div className="m3-note">
           方策（アクセル・操舵を決める側）と価値（その状況の見込みを評価する側）の
-          2 本のネットワークです。<strong>全車両がこの 1 つを共有</strong>していて、
+          2 本のネットワークです（図は下位方策。上位方策の意図を選ぶ側と、その価値の 2 本は下の表に並びます）。<strong>全車両がこの 1 つを共有</strong>していて、
           車両ごとに別々の学習はしていません。台数を増やすのは、
           学習者を増やすためではなく<strong>経験を集める速度を上げる</strong>ためです。
         </div>
@@ -220,6 +239,15 @@ export function LearningTab() {
           marks={metricsMarks}
           color="var(--m3-warning)"
           format={(v) => `${v.toFixed(2)} m`}
+          height={48}
+        />
+        <MetricsChart
+          title="加加速度（Jerk の二乗平均平方根）"
+          values={series.jerk}
+          revision={revision}
+          marks={metricsMarks}
+          color="var(--m3-primary)"
+          format={(v) => `${v.toFixed(1)} m/s³`}
           height={48}
         />
         <MetricsChart

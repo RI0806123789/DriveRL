@@ -31,6 +31,7 @@ import { MockTaxi } from './mock/taxi.ts'
 import { MockTraffic } from './mock/traffic.ts'
 import { ASSIST_P_MIN } from './assistRate.ts'
 import { mockCurriculum } from './curriculum.ts'
+import { MockOptions, mockOptionMetrics } from './mock/options.ts'
 import { nearestPeers } from '../scene/v2xLinks.ts'
 
 const MOCK_CONFIG: SimConfig = {
@@ -100,6 +101,7 @@ const MOCK_MIN_VISIBILITY_M = 15
 class MockServer {
   private readonly emit: (json: string) => void
   private readonly rng = makeRng(20260905)
+  private readonly options = new MockOptions()
   private params: SimParams = { ...DEFAULT_PARAMS }
   private status: StatusPayload = {
     state: 'idle',
@@ -210,8 +212,18 @@ class MockServer {
       assistRate: this.params.onlineAssist ? Math.max(ASSIST_P_MIN, 1 - p) : 0,
       bcLoss: this.params.onlineAssist ? 0.02 * Math.max(ASSIST_P_MIN, 1 - p) : 0,
       ...mockCurriculum(this.params.incidentCurriculum, p, this.updates),
+      ...mockOptionMetrics(p),
     }
     this.send(metrics)
+  }
+
+  /** 実用モード（全車が経路追従）では意図を載せない（実機と同じ） */
+  private withOptions(vehicles: VehicleState[]): VehicleState[] {
+    if (this.status.practicalMode) {
+      this.options.reset()
+      return vehicles
+    }
+    return this.options.apply(vehicles, this.tick)
   }
 
   private step(): void {
@@ -240,7 +252,7 @@ class MockServer {
       type: 'frame',
       tick: this.tick,
       simTime: this.simTime,
-      vehicles: withV2xLinks(this.traffic.vehicleStates(), this.params.v2xComm),
+      vehicles: this.withOptions(withV2xLinks(this.traffic.vehicleStates(), this.params.v2xComm)),
       obstacles: this.traffic.obstacles,
     }
     const pedestrians = this.traffic.pedestrianStates()

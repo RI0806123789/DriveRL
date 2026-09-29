@@ -141,6 +141,8 @@ class SimulationEngine:
         # オンライン模倣（学習中の車へのエキスパートの割り込み）と、その割合の直近の記録
         self._assist = OnlineAssistController(config.MAX_VEHICLES, seed=0)
         self._assist_log: deque[tuple[int, int]] = deque(maxlen=_ASSIST_WINDOW)
+        # 方策が運転したステップの意図の数（`config.HRL_OPTIONS` の順）と、加加速度の二乗和・数
+        self._option_log: deque[tuple[np.ndarray, float, int]] = deque(maxlen=_ASSIST_WINDOW)
 
         # 徒歩キャラの位置を最後に受け取った時刻。0 なら街に居ない
         self._player_pose_at: float = 0.0
@@ -610,6 +612,7 @@ class SimulationEngine:
             self._trainer.reset_rollout()
         self._assist.reset()
         self._assist_log.clear()
+        self._option_log.clear()
         if self._env is not None:
             # 起こしかけのヒヤリハット（前走車の急制動）を実用モードへ持ち越さない
             self._env.curriculum.reset_incidents()
@@ -843,11 +846,11 @@ class SimulationEngine:
         restored = trainer.load(config.CHECKPOINT_PATH)
         stale = not restored and config.CHECKPOINT_PATH.exists()
         widened = restored and trainer.widened_from is not None
-        if widened:
-            # 自動保存で上書きされる前に、旧い観測の重みを控える（前の版のコードへ戻れるように）
-            backup = config.CHECKPOINT_PATH.with_name(
-                f"{config.CHECKPOINT_PATH.name}.obs{trainer.widened_from}"
-            )
+        upgraded = restored and trainer.upgraded_flat
+        if widened or upgraded:
+            # 自動保存で上書きされる前に、移す前の重みを控える（前の版のコードへ戻れるように）
+            suffix = f"obs{trainer.widened_from}" if widened else "flat"
+            backup = config.CHECKPOINT_PATH.with_name(f"{config.CHECKPOINT_PATH.name}.{suffix}")
             try:
                 if not backup.exists():
                     shutil.copy2(config.CHECKPOINT_PATH, backup)
@@ -870,6 +873,11 @@ class SimulationEngine:
                 f"{config.OBS_DIM} 次元に増えた（周囲カメラ・V2X の欄）ので、"
                 "足した入力の重みを 0 で読み込みました（元のファイルは "
                 f"{config.CHECKPOINT_PATH.name}.obs{trainer.widened_from} に控えました）"
+            )
+        elif upgraded:
+            self._notify(
+                "前回の学習済みモデルを階層型の方策へ移して復元しました（意図を選ぶ上位方策は初期値から学び直します。"
+                f"元のファイルは {config.CHECKPOINT_PATH.name}.flat に控えました）"
             )
         elif restored:
             self._notify("前回の学習済みモデルを復元しました")
@@ -939,6 +947,7 @@ class SimulationEngine:
         self._last_metrics_at = 0.0
         self._assist.reset()
         self._assist_log.clear()
+        self._option_log.clear()
 
         initial_frame = self._env.snapshot(self._tick, self._sim_time)
         initial_frame.signals = self._env.signal_phases
@@ -975,6 +984,7 @@ class SimulationEngine:
         active = env.active_mask
 
         actions, log_probs, values = trainer.act(obs, active)
+        env.current_options = None if practical else trainer.current_options
         expert = None
         if not practical and env.params.online_assist:
             expert = self._assist.decide(
@@ -999,10 +1009,24 @@ class SimulationEngine:
                 # エキスパートが運転した車は、方策の勾配に入れず模倣の損失に使う
                 expert_actions=result.expert_actions,
                 assisted=result.assisted,
+                expert_options=result.expert_options,
+                drive=result.drive,
             )
             learnable = result.active if result.learn is None else result.learn
             assisted_count = 0 if result.assisted is None else int(result.assisted.sum())
             self._assist_log.append((assisted_count, int(np.count_nonzero(learnable))))
+            own = np.asarray(learnable, dtype=bool)
+            if result.assisted is not None:
+                own = own & ~result.assisted
+            options = trainer.current_options[own]
+            jerk = result.drive.jerk[own] if result.drive is not None else np.zeros(0)
+            self._option_log.append(
+                (
+                    np.bincount(options, minlength=len(config.HRL_OPTIONS)),
+                    float(np.sum(jerk * jerk)),
+                    int(jerk.size),
+                )
+            )
 
             stats = trainer.maybe_update(result.obs, result.active)
             if stats is not None:
@@ -1022,6 +1046,9 @@ class SimulationEngine:
                     env.curriculum.record_episode_end(
                         episode.reason == "goal", episode.reason == "collision"
                     )
+        else:
+            # 学習しない間も、エピソードが終わった車は次のステップで意図を選び直す
+            trainer.end_options(result.dones)
 
         self._tick += 1
         self._sim_time = env.sim_time
@@ -1136,6 +1163,14 @@ class SimulationEngine:
         learned_steps = sum(b for _, b in self._assist_log)
         assist_rate = assisted_steps / learned_steps if learned_steps > 0 else 0.0
         curriculum = self._env.curriculum if self._env is not None else None
+        option_counts = np.zeros(len(config.HRL_OPTIONS), dtype=np.float64)
+        jerk_sq = 0.0
+        jerk_n = 0
+        for counts, sq, count in self._option_log:
+            option_counts += counts
+            jerk_sq += sq
+            jerk_n += count
+        total_options = float(option_counts.sum())
         return MetricsSnapshot(
             tick=self._tick,
             wall_time=time.perf_counter() - self._started_at,
@@ -1159,4 +1194,8 @@ class SimulationEngine:
             curriculum_level=curriculum.level if curriculum is not None else 0.0,
             incidents_triggered=curriculum.triggered if curriculum is not None else 0,
             incidents_avoided_rate=curriculum.avoided_rate if curriculum is not None else None,
+            option_shares=(
+                [float(c) / total_options for c in option_counts] if total_options > 0 else []
+            ),
+            jerk_rms=float(np.sqrt(jerk_sq / jerk_n)) if jerk_n > 0 else None,
         )

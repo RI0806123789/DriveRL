@@ -192,6 +192,25 @@ PPO_BC_COEF = 0.5
 #: 模倣の教師の操作はここで頭打ちにする（方策の平均は tanh なので ±1 には届かない）
 PPO_BC_TEACH_LIMIT = 0.98
 
+#: 階層型の方策のマクロな意図（`rl/hierarchical_policy.py`）。並びが上位方策の出力の添字
+HRL_OPTIONS = ("CRUISE", "FOLLOW", "YIELD", "STOP")
+#: 上位方策が意図を選び直す周期 [ステップ]（20 ステップ = 1 秒）
+HRL_OPTION_STEPS = 20
+#: 上位方策のエントロピーの重み
+HRL_META_ENTROPY_COEF = 0.01
+#: 下位方策の報酬の整形。操作の変化の二乗・車線中心からの横ずれ [m] の二乗・意図の速度帯からの外れ
+HRL_JERK_COEF = 0.05
+HRL_LANE_COEF = 0.01
+HRL_CONSISTENCY_COEF = 0.05
+#: 意図ごとの速度帯 [m/s]。CRUISE は下限だけ、YIELD と STOP は上限だけ、FOLLOW は前走車の速さに合わせる
+HRL_CRUISE_MIN_MPS = 5.0
+HRL_YIELD_MAX_MPS = 2.78
+HRL_STOP_MAX_MPS = 0.5
+#: 速度帯からこれだけ外れると整形の罰が頭打ちになる [m/s]
+HRL_CONSISTENCY_SPAN_MPS = 3.0
+#: 意図の初期の偏り（アクセルの tanh の前）。CRUISE は前へ、STOP は後ろへ引く
+HRL_OPTION_ACCEL_PRIOR = (0.4, 0.1, -0.3, -0.7)
+
 TORCH_NUM_THREADS = 4
 
 LANE_DEPARTURE_M = 1.75

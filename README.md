@@ -32,6 +32,7 @@ DriveRL/
 │   ├── verify_online_assist.py     オンライン模倣（経路追従の割り込みと模倣の損失）
 │   ├── verify_curriculum.py        ヒヤリハットのオートカリキュラム（飛び出し・前走車の急制動）
 │   ├── verify_v2x_comm.py          車車間通信（V2X）のメッセージと観測の末尾 4 次元
+│   ├── verify_hierarchical_policy.py  階層型の方策（上位の意図の選択と下位の連続値の操作）
 │   ├── verify_signal_phases.py     信号の現示（交差する流れが同時に青にならないか）
 │   ├── verify_publish_routes.py    経路の配信（取りこぼしてもクライアントへ届くか）
 │   ├── verify_route_start.py       配車の経路の出だし（道なりに出るか・建物を突き抜けないか）
@@ -67,7 +68,8 @@ DriveRL/
 │   │   │   ├── encoder.py          検出結果 -> 観測ベクトル（79 次元。周囲カメラ 9 次元・V2X 4 次元が末尾）
 │   │   │   └── types.py            検出結果の型。**学習と可視化の契約**
 │   │   ├── rl/
-│   │   │   ├── policy.py           共有 Actor-Critic
+│   │   │   ├── policy.py           共有 Actor-Critic（hierarchical_policy.py の別名）
+│   │   │   ├── hierarchical_policy.py  階層型の方策（上位: 意図 4 つを 1 秒ごとに選ぶ / 下位: 意図の下でアクセル・操舵）
 │   │   │   ├── buffer.py           ロールアウトバッファ（GAE）
 │   │   │   ├── ppo.py              PPO 更新・永続化
 │   │   │   ├── warmstart.py        経路追従を教師にした行動クローニング
@@ -1215,7 +1217,8 @@ cd backend; .venv\Scripts\python.exe -m pytest --lf                # 前回落�
 - **単体テスト**（`frontend/src/__tests__/`）: 日の出・日の入りの境界（白夜・極夜・切り替わりの前後）、
   ENU と three の座標変換・右ハンドル・周囲カメラの向き、角度の最短回りの補間
 - **描画テスト**（`frontend/src/panel/__tests__/`。`npm run test:ui` で単独でも回せる）: 学習タブのアシスト率のチップと
-  ヒヤリハットの難易度ゲージが値どおりに描かれるか・件数 0 で NaN を出さないか（`react-dom/server` で HTML にする。
+  ヒヤリハットの難易度ゲージ・意図の色付きバッジ（STOP は赤・CRUISE は青）と意図の割合が値どおりに描かれるか・
+  件数 0 で NaN を出さないか（`react-dom/server` で HTML にする。
   jsdom や Vitest は足していない）
 - 重いもの（マップを読む `verify_*.py`）は `--runslow` を付けたときだけ回ります。**マップのキャッシュが
   無いか版が古いプリセットはスキップします**（テストの途中で Overpass から取り直さないため）。
@@ -1253,6 +1256,7 @@ cd frontend; npm run verify:conventions # コメント規約と CSS の遷移規
 cd frontend; npm run verify:assist      # オンライン模倣のアシスト率（値の正規化・表示・契約ファイルとの突き合わせ）
 cd frontend; npm run verify:curriculum  # ヒヤリハットの難易度ゲージと回避率（0 で割らない・契約ファイルとバックエンドの定数との突き合わせ）
 cd frontend; npm run verify:v2x         # V2X のリンクの線分（重複なし・座標変換）・近傍の選び方・契約ファイルとの突き合わせ
+cd frontend; npm run verify:options     # 意図のバッジ（配色・アイコン・クラスの排他性・昼夜のトークンとコントラスト・バックエンドの定数との突き合わせ）
 
 # 操作パネルの部品の描画テスト（node --test。.tsx は devDependencies の typescript で変換して読む）
 cd frontend; npm run test:ui
@@ -1262,6 +1266,7 @@ cd backend; .venv\Scripts\python.exe verify_log_std.py        # 方策分布（l
 cd backend; .venv\Scripts\python.exe verify_online_assist.py  # オンライン模倣（割り込みの確率・危険の判定・模倣の損失。合成の碁盤の目で走らせる）
 cd backend; .venv\Scripts\python.exe verify_curriculum.py     # ヒヤリハットのオートカリキュラム（昇降格・飛び出し・前走車の急制動。合成の道路で走らせる）
 cd backend; .venv\Scripts\python.exe verify_v2x_comm.py      # 車車間通信（近傍の選び方・メッセージ・観測の末尾 4 次元・旧い重みの読み込み）
+cd backend; .venv\Scripts\python.exe verify_hierarchical_policy.py  # 階層型の方策（意図の分布・20 ステップ保つ・上位の GAE・勾配・整形・平らな重みの移し替え・書き出し）
 cd backend; .venv\Scripts\python.exe verify_signal_phases.py  # 信号の現示（プリセット名を渡せば 1 つだけ）
 cd backend; .venv\Scripts\python.exe verify_publish_routes.py # 配車と frame の経路が配信で落ちないか
 cd backend; .venv\Scripts\python.exe verify_route_start.py    # 配車の経路が道なりに出て建物を突き抜けないか

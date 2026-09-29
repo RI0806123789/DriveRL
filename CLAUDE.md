@@ -51,6 +51,7 @@ npm run dev             # Vite だけ立てる。?mock=1 でバックエンド�
 .venv\Scripts\python.exe verify_online_assist.py    # オンライン模倣（割り込みの確率・危険の判定・模倣の損失。合成の碁盤の目で走らせる）
 .venv\Scripts\python.exe verify_curriculum.py       # ヒヤリハットのオートカリキュラム（昇降格・飛び出し・急制動。合成の道路で走らせる）
 .venv\Scripts\python.exe verify_v2x_comm.py        # 車車間通信（近傍の選び方・メッセージ・観測の末尾 4 次元・旧い重みの読み込み）
+.venv\Scripts\python.exe verify_hierarchical_policy.py  # 階層型の方策（意図の分布・20 ステップ保つ・上位の GAE・勾配・整形・平らな重みの移し替え・書き出し）
 .venv\Scripts\python.exe verify_signal_phases.py    # 信号の現示（交差する流れが同時に青にならないか）
 .venv\Scripts\python.exe verify_publish_routes.py  # 経路の配信（取りこぼしても届くか）
 .venv\Scripts\python.exe verify_route_start.py     # 配車の経路の出だし（道なりに出るか・建物を突き抜けないか）
@@ -2273,6 +2274,74 @@ UV の v をずらして「その車の段」だけを貼ります（`vehicleMat
 - 検査は `backend/verify_curriculum.py`（難易度の昇降格・飛び出しの動き・環境の中での発火・急制動と学習からの除外・見届け。
   合成の道路で走らせる）と `npm run verify:curriculum` / `npm run test:ui`
 
+### 階層型の方策（`rl/hierarchical_policy.py`。#65）
+
+方策を**上位（意図を選ぶ離散方策）**と**下位（意図の下でアクセル・操舵を出す連続方策）**の 2 段に分けてあります
+（`HierarchicalActorCritic`。`rl/policy.py` の `ActorCritic` はこれの別名）。意図は `config.HRL_OPTIONS` の 4 つです。
+
+| 添字 | 意図 | 下位に期待する動き | 速度帯（整形の罰が 0 になる範囲）| 画面 |
+|---|---|---|---|---|
+| 0 | `CRUISE` | 規制速度へ向けて滑らかに加速 | 5.0m/s 以上 | 青 |
+| 1 | `FOLLOW` | 前走車の速さに合わせる | 前走車の速さ（いなければ CRUISE と同じ）| 緑 |
+| 2 | `YIELD` | 交差点・歩行者の手前で徐行 | 2.78m/s（10km/h）以下 | 黄 |
+| 3 | `STOP` | 停止線・障害物の手前で止まる | 0.5m/s 以下 | 赤 |
+
+| 部品 | 入力 → 出力 | 名前（state_dict）|
+|---|---|---|
+| 上位の方策 / 価値 | 観測 79 → 意図のロジット 4 / 価値 | `meta_trunk` + `meta_head` / `meta_value_trunk` + `meta_value_head` |
+| 下位の方策 / 価値 | 観測 79 + 意図の one-hot 4 = 83 → 操作の平均 2 / 価値 | `policy_trunk` + `mu_head` + `option_bias` / `value_trunk` + `value_head` |
+
+- ★ **意図は `config.HRL_OPTION_STEPS`（20 ステップ = 1 秒）ごとにだけ選び直す**（`OptionScheduler`。スロットごと）。
+  エピソードが終わった車（`PPOTrainer.store` と、学習しない間は `engine` が `end_options(dones)` を呼ぶ）と、
+  走り出したばかりの車は次のステップで選び直します。issue は engine の `step_count % 20` を挙げていましたが、
+  再スポーンした車が前のエピソードの意図を最大 19 ステップ持ち越すので、スロットごとに数えています
+- ★ **下位の部品の名前は平らな方策のころのまま**にしてあります。**階層型にする前の重みは、下位の入力に足した
+  意図の one-hot の列と `option_bias` を 0 にして読み込むこと**（`ppo.upgrade_flat_state`。上位は初期値のまま）。
+  こうすると読み込んだ直後はどの意図でも元と 1 ビットも同じ操作を出します（`verify_hierarchical_policy.py` が検査）。
+  移したときは元のファイルを `shared_policy.pt.flat` へ控え、Adam の統計は捨てます。`CHECKPOINT_FORMAT` は
+  `autoware-sim-ppo-2` で、1 は読み込める形式として残してあります。66・75 次元の重みも、観測の列を広げてから同じく移します
+  （`widen_observation` は意図の one-hot の**手前**へ 0 の列を差し込む）
+- ★ **新しく作る方策では `option_bias` のアクセルに偏りを入れてある**（`config.HRL_OPTION_ACCEL_PRIOR` =
+  CRUISE +0.4 / FOLLOW +0.1 / YIELD -0.3 / STOP -0.7。tanh の前）。これで**同じ観測でも STOP は負・CRUISE は正**の
+  アクセルから始まります。上位が「進む」意図を選んでいる限り、下位は前へ出る側から学び始めるので、
+  「止まる」に固まる形（「方策が「止まる」に固まるのを防ぐ」の節）に構造的に入りにくくなります。平らな重みを移すときに
+  0 にするのは、読み込んだ直後の振る舞いを変えないためです
+- **報酬を分けてある。** 上位は環境の報酬そのもの（前進・信号無視・衝突など）を、意図 1 つを 1 手として**区間の割引和**で
+  受け取ります（`RolloutBuffer._compute_meta`。SMDP の GAE。区間の終わりで次の意図の価値を γ^区間長 で借り、advantage も
+  γ^区間長 λ で連ねる）。下位は環境の報酬に整形を足したもの（`sub_reward_shaping`）を毎ステップ受け取ります
+
+  | 整形 | 式 | 重み（`config`）|
+  |---|---|---|
+  | 加加速度 | 実際に出した操作（-1..1）の前のステップからの変化の二乗和 | `HRL_JERK_COEF` 0.05 |
+  | 車線維持 | 車線中心からの横ずれ [m] の二乗 | `HRL_LANE_COEF` 0.01 |
+  | 意図との整合 | 意図の速度帯からの外れ / 3m/s（1 で頭打ち）| `HRL_CONSISTENCY_COEF` 0.05 |
+
+  ★ **報酬そのもの（`StepResult.rewards`・metrics・エピソードの成績）は変えないこと。** 整形は学習器の中で下位の報酬に
+  だけ足します（`PPOTrainer.store(drive=...)`）。整形に使う真値は `contracts.DriveState`（`StepResult.drive`）で、
+  env は報酬と同じく真値から作ります（観測はカメラ由来のまま）
+- ★ **上位の対数確率と価値は、意図を選び直したステップにしか要らない**（上位の GAE の区切りはそこにしか来ない。
+  バッファの末尾は `last_meta_values`、打ち切りは `truncated_meta_values` で補う）。毎ステップ上位を通すと、
+  8 台の `act` が main の 0.7ms から 1.5ms になっていました（選び直すときだけ通して 0.9ms）
+- **お手本（オンライン模倣）とのつなぎ。** お手本が運転したステップには、env がその状況に合う意図を真値から付けます
+  （`env.option_labels`: 止められている・赤の 30m 手前 → STOP / 歩行者 20m・信号の無い交差点 15m → YIELD /
+  前走車 30m → FOLLOW / それ以外 → CRUISE）。下位はその意図の下でお手本の操作を真似（`mean_action(obs, 教師の意図)`）、
+  上位はその意図を交差エントロピーで真似ます（どちらも `PPO_BC_COEF`）。★ **お手本が運転し始めたときに選んだ意図は、
+  上位の方策の勾配に入れない**（その区間の報酬はお手本の走りで決まるため。上位の advantage の正規化も外して行う）。
+  ウォームスタート（`rl/warmstart.py`）も同じ教師で、`fit_options` が上位を、`fit_value` が上位と下位の両方の価値を合わせます
+- ★ **書き出したモデルは呼ばれるたびに上位のいちばん確率の高い意図を選ぶ**（`InferencePolicy`。20 ステップ保つのは
+  アプリの中だけ。メタデータの `model.options` に書いてある）。**Keras は argmax を標準の層で書けないので、上位のロジットを
+  温度 `KERAS_OPTION_TEMPERATURE`（1e-8）で割った softmax で one-hot を作ります**（Lambda 層を使うと受け取った側で
+  読めなくなる）。温度を 1e-6 にしていたときは、初期の上位方策で 2 万件のうち 35〜46 件の意図が混ざり、操作が最大 0.38 ずれました。
+  1e-8 で 6 万件のうち 1 件（float32 で同点に近いもの）が 1e-3 ずれるだけです。TorchScript は完全に一致します
+- `network` の `layers` には上位の 4 層も並びます（`role` は名前に `value` を含むかで決める）。学習タブの図は下位だけを描きます
+- 画面: 開発モードの走っている車に `frame.vehicles[].currentOption`（実用モードでは載せない）、学習タブに
+  `metrics.optionShares`（直近 10 秒の方策が運転したステップの意図の割合）と `jerkRms`（同じステップの加加速度の二乗平均平方根。
+  実際の速度の変化から出す）。バッジは車両の一覧・追跡中の車両のカード・画面右下の HUD に出します
+  （`panel/OptionBadge.tsx`。配色は `styles/tokens.css` の `--m3-option-*`、対応表は `store/driveOption.ts`）
+- 検査は `backend/verify_hierarchical_policy.py`（意図の分布・意図で操作が変わるか・20 ステップ保つか・上位の GAE・
+  上位と下位の勾配・意図の模倣・整形・平らな重みの移し替え・書き出し・env の教師と `currentOption`・`act` の時間。
+  合成の碁盤の目で走らせる）と `npm run verify:options` / `npm run test:ui`
+
 ### モデルの入出力
 
 - **チェックポイントは必ず `weights_only=True` で読む。フォールバックしない。**
@@ -2291,6 +2360,7 @@ UV の v をずらして「その車の段」だけを貼ります（`vehicleMat
   入れたとき書き出し側だけ `clamp` / `hard_tanh` のまま残り、**書き出した行動がアプリ内の方策と
   最大 0.238 ずれていました**（生の値 1.0 で clip は 1.0、tanh は 0.762）。型チェックも書き出しも
   通るので、受け取った側で走らせるまで気づけません。直した後の差は TorchScript 0 / Keras 4.5e-7 です。
+- ★ **書き出した推論モデルは上位と下位の両方を持つ**（「階層型の方策」の節。Keras は意図を温度の低い softmax で作る）
 - ★ **観測の区画の並びと大きさは `config.OBS_LAYOUT` が唯一の出典**です。`percep/encoder.py` の添字
   （`OBS_OFFSETS`）も、書き出しのメタデータの `layout`（`rl/export.py`）もここから導きます。
   以前は書き出し側が「`encoder.py` の連結順と一致していること」として並びを手で書いていました。
