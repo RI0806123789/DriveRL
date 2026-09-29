@@ -10,8 +10,8 @@ import {
   nearestPeers,
   v2xStatusText,
   writeLinkSegments,
-} from '../src/scene/v2xLinks.ts'
-import type { LinkVehicle } from '../src/scene/v2xLinks.ts'
+} from '../src/scene/v2xLinkGeometry.ts'
+import type { LinkVehicle } from '../src/scene/v2xLinkGeometry.ts'
 
 let failures = 0
 

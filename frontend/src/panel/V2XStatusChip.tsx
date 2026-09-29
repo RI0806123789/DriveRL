@@ -1,6 +1,6 @@
 /** 追跡中の車が V2X でメッセージを受け取っている相手のチップ。相手がいなければ何も出さない。 */
 
-import { v2xStatusText } from '../scene/v2xLinks'
+import { v2xStatusText } from '../scene/v2xLinkGeometry'
 import { Chip } from '../ui/Chip'
 
 export function V2XStatusChip({ links }: { links: readonly number[] | undefined }) {

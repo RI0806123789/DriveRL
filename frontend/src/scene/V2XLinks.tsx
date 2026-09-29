@@ -7,7 +7,7 @@ import { frameBuffer } from '../store/frameBuffer'
 import { useSimStore } from '../store/simStore'
 import { computeAlpha, createPose, sampleVehicle } from './interpolation'
 import { useHiddenFromMirrors } from './mirrorHidden'
-import { V2X_MAX_PEERS, linkPairs, writeLinkSegments } from './v2xLinks'
+import { V2X_MAX_PEERS, linkPairs, writeLinkSegments } from './v2xLinkGeometry'
 
 const LINK_COLOR = '#4dd0e1'
 const LINK_OPACITY = 0.85

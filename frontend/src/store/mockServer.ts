@@ -32,7 +32,7 @@ import { MockTraffic } from './mock/traffic.ts'
 import { ASSIST_P_MIN } from './assistRate.ts'
 import { mockCurriculum } from './curriculum.ts'
 import { MockOptions, mockOptionMetrics } from './mock/options.ts'
-import { nearestPeers } from '../scene/v2xLinks.ts'
+import { nearestPeers } from '../scene/v2xLinkGeometry.ts'
 
 const MOCK_CONFIG: SimConfig = {
   maxVehicles: 8,
