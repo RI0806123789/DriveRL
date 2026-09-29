@@ -46,6 +46,12 @@ IMPORT_BACKUP_LABEL = "before-import"
 MAX_IMPORT_BACKUPS = 10
 
 
+#: Keras が無いときに画面へ出す文。例外の文をそのまま HTTP の応答へ載せないよう、main.py もこれを返す
+KERAS_MISSING_MESSAGE = (
+    "Keras 形式で書き出すには keras が必要です。`pip install -r requirements.txt` で導入してください"
+)
+
+
 class ExportError(RuntimeError):
     """書き出しに失敗したときに投げる。"""
 
@@ -302,10 +308,7 @@ def _import_keras():
     try:
         import keras  # noqa: PLC0415
     except ImportError as exc:  # pragma: no cover - 依存が無い環境向け
-        raise ExportError(
-            "Keras 形式で書き出すには keras が必要です。"
-            "`pip install -r requirements.txt` で導入してください"
-        ) from exc
+        raise ExportError(KERAS_MISSING_MESSAGE) from exc
     return keras
 
 

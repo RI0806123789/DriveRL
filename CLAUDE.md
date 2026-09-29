@@ -2517,6 +2517,10 @@ OSM キャッシュ・チェックポイント・認識器と教師データ・�
   `.ts` → `.tsx` の順に探すので、Windows（大文字と小文字を区別しない）では `./V2XLinks` が部品の `V2XLinks.tsx` ではなく
   純粋関数の `v2xLinks.ts` を掴み、「`V2XLinks` という export が無い」で画面ごと落ちました（Linux では起きないので CI でも
   気づけない）。純粋関数のほうを `v2xLinkGeometry.ts` へ改名し、`npm run verify:conventions` が検査します
+- ★ **HTTP の応答に例外の文（`str(exc)` / `f"...{exc}"`）を載せないこと。** 例外は `logger.exception` でサーバーのログに残し、
+  応答には固定の文を返します（CodeQL の「Information exposure through an exception」。`main.py` の 2 か所で指摘された）。
+  画面に出したい文が例外の中にあるなら、定数にして両方から使うこと（`rl/export.py` の `KERAS_MISSING_MESSAGE`）。
+  `backend/tests/test_error_responses.py` が `main.py` を ast で読んで検査します
 - **失敗を握りつぶすときは必ず初回だけログを残す。**
   黙らせると「衝突しない世界」「速度超過 0 件」のように**成績が良くなる方向**に症状が出て、
   外から絶対に気づけなくなります
