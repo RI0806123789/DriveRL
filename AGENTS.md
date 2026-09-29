@@ -50,14 +50,25 @@ Python は `backend/.venv`、Node は `frontend/`。詳しいコマンドは `CL
 
 ## 確かめる
 
-**自動テストのフレームワークは入っていません**（pytest も vitest も無い）。確認手段は次の 3 つです。
+自動テストの入口は 2 つです。どちらも既存の検証スクリプト（`frontend/scripts/verify-*.ts` /
+`backend/verify_*.py`）を子プロセスで回して終了コードで合否を決め、加えて純粋関数と契約の単体テストを持ちます。
+詳しい約束（一覧の出典・重いテストの切り分け・マップのキャッシュが古いときのスキップ）は `CLAUDE.md`「テスト」節にあります。
 
 ```powershell
 cd frontend
 npm run typecheck   # tsc --noEmit
 npm run build       # typecheck + vite build
+npm test            # node --test（ライブラリ無し）。verify:* の全本 + src/__tests__ の単体テスト
 npm run verify      # 幾何検証と規約の検査（ブラウザ不要。一覧の出典は package.json）
+
+cd backend
+.venv\Scripts\python.exe -m pip install -r ..\requirements-dev.txt   # 初回だけ（pytest）
+.venv\Scripts\python.exe -m pytest              # 契約テストと、数秒で終わる検証
+.venv\Scripts\python.exe -m pytest --runslow    # verify_*.py もすべて（重い。-k ginza で絞れる）
 ```
+
+新しい `verify_*.py` を足したら `backend/tests/test_verify_wrappers.py` の `PLANS` に読むマップを書くこと
+（書かないとテストが落ちる。書かないまま回すと、キャッシュが古いときに Overpass から取り直してしまう）。
 
 `npm run verify` がある理由は、**3D の向きは間違っていても型チェックもビルドも通る**からです。
 幾何計算を React から切り離した純粋モジュールへ置き、数値で不変条件を検査しています
@@ -97,6 +108,8 @@ npm run verify      # 幾何検証と規約の検査（ブラウザ不要。一�
 - 利用者が作業完了（機能の実装やバグ修正の完了）を報告したら、
   **プライバシーの確認**（個人情報・鍵・ローカルの絶対パスはプレースホルダーへ）をしたうえで
   プルリクエストを出す。既存ブランチの再利用でかまわない
+- PR を出す前に `npm test`（frontend）と `python -m pytest`（backend）を回す。
+  経路・信号・地図・安全ギミックに触れたら `--runslow` も（確認項目は `.github/pull_request_template.md`）
 - ★ **対応する issue があれば、PR 本文の末尾に `Closes #N` を書く**（複数なら 1 行ずつ）。
   本文中に `#N` と書くだけでは**参照リンクになるだけで、マージしても閉じません**
 - PR・コミットにセッション URL を書かない

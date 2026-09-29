@@ -34,6 +34,8 @@ DriveRL/
 │   ├── verify_route_start.py       配車の経路の出だし（道なりに出るか・建物を突き抜けないか）
 │   ├── verify_route_signals.py     経路上の信号と規制速度（通る辺のものか・後ろの停止線を 0m 先の赤と数えないか）
 │   ├── verify_safety_gimmicks.py   前後左右のカメラと安全ギミック（切り返し・後退 AEB・巻き込み防止）
+│   ├── pytest.ini                  pytest の設定（tests/ の場所・重いテストの印）
+│   ├── tests/                      自動テスト（契約・プロトコルの突き合わせ・verify_*.py を回すラッパー）
 │   ├── app/
 │   │   ├── config.py               定数（観測 75 次元の内訳・車両諸元・PPO 設定）
 │   │   ├── contracts.py            パッケージ間の共有型。ここが内部の契約
@@ -80,6 +82,7 @@ DriveRL/
 │   │   ├── sw.js                   Service Worker（手書き。ライブラリを足さない）
 │   │   └── icon-*.png              アイコン（make-icons.ts が生成。手で描かない）
 │   └── src/
+│       ├── __tests__/              自動テスト（node --test。verify:* を回すラッパーと純粋関数の単体テスト）
 │       ├── types/protocol.ts       WebSocket メッセージの型
 │       ├── store/                  zustand ストア・WebSocket・モデル入出力・PWA 登録・開発用モック
 │       ├── scene/                  Three.js の描画（道路・標示・信号・車両・カメラ）
@@ -102,6 +105,8 @@ DriveRL/
 ├── run.ps1                         起動スクリプト（-Dev で Vite も一緒に立てる）
 ├── run.cmd                         同上。cmd.exe / ダブルクリック用（ASCII のみ）
 ├── requirements.txt                Python の依存（先頭の --extra-index-url を消さない）
+├── requirements-dev.txt            開発用の依存（pytest。テストを回すときだけ要る）
+├── .github/pull_request_template.md  PR の確認項目（テストを回したか）
 ├── SECURITY.md                     セキュリティ上の前提（ローカル単一利用者・認証なし）
 ├── LICENSE.md                      MIT。地図データは OSM 由来で ODbL
 ├── docs/protocol.md                WebSocket プロトコル仕様（フロント／バックの唯一の契約）
@@ -185,7 +190,7 @@ DriveRL/
 
 前提: **Python 3.13** と **Node.js 22.18 以降**。CUDA 対応 GPU は不要（CPU で学習します）。
 
-Node に 22.18 以降が要るのは、`npm run verify` が `node scripts/verify-*.ts` の形で
+Node に 22.18 以降が要るのは、`npm run verify` と `npm test` が `node scripts/verify-*.ts` / `node --test` の形で
 **TypeScript をそのまま実行する**ためです（型注釈の除去が既定で有効になったのがこの版）。
 動作確認は Node 24.16 / npm 11.13 で行っています。
 
@@ -201,6 +206,12 @@ backend\.venv\Scripts\python.exe -m pip install -r requirements.txt
 `requirements.txt` の先頭にある `--extra-index-url https://download.pytorch.org/whl/cpu` は
 **消さないでください**。CPU 版 PyTorch（`torch==2.14.0+cpu`）は PyPI に無いため、
 この行が無いとインストールに失敗します。
+
+テストを回すときだけ、開発用の依存（pytest）も入れます。本体の依存も一緒に入ります。
+
+```powershell
+backend\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+```
 
 ### フロントエンド
 
@@ -1181,7 +1192,30 @@ Keras 3 は PyTorch をバックエンドにできるので、このプロジェ
 
 ## 検証
 
-自動テストのフレームワークは導入していません。次のもので確認しています。
+自動テストの入口は 2 つです。どちらも下の検証スクリプトを**書き直さずに子プロセスで回し**、
+終了コードで合否を決めます（1 本ずつ単独で回す使い方もそのまま使えます）。
+
+```powershell
+# フロントエンド: node --test（ライブラリを足していない）。verify:* の全本 + src/__tests__ の単体テスト
+cd frontend; npm test
+
+# バックエンド: pytest（初回だけ requirements-dev.txt を入れる）
+cd backend; .venv\Scripts\python.exe -m pytest                     # 契約テストと、数秒で終わる検証
+cd backend; .venv\Scripts\python.exe -m pytest --runslow           # verify_*.py もすべて（安全ギミックだけで 20 分ほど）
+cd backend; .venv\Scripts\python.exe -m pytest --runslow -k ginza  # 1 つのプリセットだけ
+cd backend; .venv\Scripts\python.exe -m pytest --lf                # 前回落ちたものだけ
+```
+
+- **契約テスト**（`backend/tests/`）: `contracts.py` が送るキーが `frontend/src/types/protocol.ts` の型に
+  宣言されているか・必須の欄を送っているか、送る `type` が `protocol.ts`・`docs/protocol.md` の 3 章・
+  `main.py` の受け口でそろっているか、`protocolVersion` が全部の場所で同じか、`SimParams` の値域への丸めと拒否
+- **単体テスト**（`frontend/src/__tests__/`）: 日の出・日の入りの境界（白夜・極夜・切り替わりの前後）、
+  ENU と three の座標変換・右ハンドル・周囲カメラの向き、角度の最短回りの補間
+- 重いもの（マップを読む `verify_*.py`）は `--runslow` を付けたときだけ回ります。**マップのキャッシュが
+  無いか版が古いプリセットはスキップします**（テストの途中で Overpass から取り直さないため）。
+  先に `.venv\Scripts\python.exe -m app.map.prefetch` でキャッシュを作ってください
+
+これとは別に、次のものでも確認しています。
 
 ```powershell
 # フロントエンドの型チェックとビルド
@@ -1217,6 +1251,7 @@ cd backend; .venv\Scripts\python.exe verify_signal_phases.py  # 信号の現示�
 cd backend; .venv\Scripts\python.exe verify_publish_routes.py # 配車と frame の経路が配信で落ちないか
 cd backend; .venv\Scripts\python.exe verify_route_start.py    # 配車の経路が道なりに出て建物を突き抜けないか
 cd backend; .venv\Scripts\python.exe verify_route_signals.py  # 経路上の信号と規制速度が通る辺のものか・始点より後ろを含まないか
+cd backend; .venv\Scripts\python.exe verify_safety_gimmicks.py  # 周囲カメラと安全ギミック（--kanazawa で金沢の 1 ステップも測る）
 ```
 
 `npm run verify` は Node で直接実行する検証スクリプトです。3D の向きは**間違っていても

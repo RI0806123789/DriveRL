@@ -22,6 +22,7 @@ interface Target {
 const TARGETS: Target[] = [
   { dir: '../backend/app', exts: ['.py'], recursive: true },
   { dir: '../backend', exts: ['.py'], recursive: false },
+  { dir: '../backend/tests', exts: ['.py'], recursive: true },
   { dir: 'src', exts: ['.ts', '.tsx'], recursive: true },
   { dir: 'scripts', exts: ['.ts'], recursive: true },
 ]
@@ -45,7 +46,7 @@ const files: string[] = []
 for (const t of TARGETS) files.push(...collect(t))
 const unique = [...new Set(files)]
 
-console.log(`対象 ${unique.length} ファイル（backend/app・backend・src・scripts）`)
+console.log(`対象 ${unique.length} ファイル（backend/app・backend・backend/tests・src・scripts）`)
 
 console.log('')
 console.log(`コードに ${MARK} を書かない（設計の意図は CLAUDE.md 側へ）`)
