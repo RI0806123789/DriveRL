@@ -11,6 +11,7 @@ import type {
   SimParams,
   StatusPayload,
   SurroundDetections,
+  VehicleState,
   WeatherPreset,
   WeatherState,
 } from '../types/protocol.ts'
@@ -30,12 +31,13 @@ import { MockTaxi } from './mock/taxi.ts'
 import { MockTraffic } from './mock/traffic.ts'
 import { ASSIST_P_MIN } from './assistRate.ts'
 import { mockCurriculum } from './curriculum.ts'
+import { nearestPeers } from '../scene/v2xLinks.ts'
 
 const MOCK_CONFIG: SimConfig = {
   maxVehicles: 8,
   maxPedestrians: 64,
   simHz: SIM_HZ,
-  obsDim: 75,
+  obsDim: 79,
   actionDim: 2,
 }
 
@@ -73,9 +75,21 @@ const DEFAULT_PARAMS: SimParams = {
   safetyAssist: false,
   onlineAssist: true,
   incidentCurriculum: true,
+  v2xComm: true,
 }
 
 const MOCK_MAX_PEDESTRIANS = MOCK_CONFIG.maxPedestrians ?? 64
+
+/** 実機と同じ規則（届く距離の中で近い 2 台）で V2X の相手を載せる。乱数は引かない */
+function withV2xLinks(vehicles: VehicleState[], enabled: boolean): VehicleState[] {
+  if (!enabled) return vehicles
+  const peers = nearestPeers(vehicles)
+  for (const v of vehicles) {
+    const links = peers.get(v.id)
+    if (links) v.v2xConnectedIds = links
+  }
+  return vehicles
+}
 
 const MOCK_WEATHER_PERIOD_SEC = 480
 /** 周囲カメラの検出を載せ続ける時間 [ms]。本物の `engine.SURROUND_WATCH_TTL_SEC` と同じ */
@@ -226,7 +240,7 @@ class MockServer {
       type: 'frame',
       tick: this.tick,
       simTime: this.simTime,
-      vehicles: this.traffic.vehicleStates(),
+      vehicles: withV2xLinks(this.traffic.vehicleStates(), this.params.v2xComm),
       obstacles: this.traffic.obstacles,
     }
     const pedestrians = this.traffic.pedestrianStates()

@@ -50,6 +50,7 @@ npm run dev             # Vite だけ立てる。?mock=1 でバックエンド�
 .venv\Scripts\python.exe verify_log_std.py           # 方策分布の健全性チェック
 .venv\Scripts\python.exe verify_online_assist.py    # オンライン模倣（割り込みの確率・危険の判定・模倣の損失。合成の碁盤の目で走らせる）
 .venv\Scripts\python.exe verify_curriculum.py       # ヒヤリハットのオートカリキュラム（昇降格・飛び出し・急制動。合成の道路で走らせる）
+.venv\Scripts\python.exe verify_v2x_comm.py        # 車車間通信（近傍の選び方・メッセージ・観測の末尾 4 次元・旧い重みの読み込み）
 .venv\Scripts\python.exe verify_signal_phases.py    # 信号の現示（交差する流れが同時に青にならないか）
 .venv\Scripts\python.exe verify_publish_routes.py  # 経路の配信（取りこぼしても届くか）
 .venv\Scripts\python.exe verify_route_start.py     # 配車の経路の出だし（道なりに出るか・建物を突き抜けないか）
@@ -145,7 +146,7 @@ world（真値）
   │      ↓ 画像
   ├─ percep/detector.py   CNN（Keras 3 / torch バックエンド。TensorFlow は入れない）
   │      ↓ 検出結果 (percep/types.py)
-  ├─ percep/encoder.py    → 観測 75 次元（末尾 9 次元が周囲カメラ）
+  ├─ percep/encoder.py    → 観測 79 次元（66〜74 が周囲カメラ、末尾 4 次元が V2X。sim/v2x.py）
   │      ↓ 同じ検出結果
   ├─ sim/safety.py        検出枠と推定距離に連動する安全ギミック（経路追従の車だけ。下の「安全ギミック」）
   └─ percep/groundtruth.py  真値から作る「理想の検出結果」
@@ -1126,14 +1127,47 @@ HTTP 側の `finally` で消すと、504 を返した後にエンジンが
 
 **観測の周囲カメラの欄（Late Fusion）** は `config.OBS_LAYOUT` の**末尾**に 9 次元
 （後方・左・右の順に、いちばん近い車両・障害物・歩行者の (dx, dy) / 20m と信頼度）を足しました。
-観測は 66 → 75 次元です。
+観測は 66 → 75 次元です（その後 V2X の 4 次元を末尾に足して 79 次元。「車車間通信」の節）。
 
-- ★ **周囲カメラの欄は必ず末尾に置くこと。** 66 次元の重みは入力層の末尾に 0 の列を足して読み込みます
+- ★ **後から足す欄は必ず末尾に置くこと。** 66 次元の重みは入力層の末尾に 0 の列を足して読み込みます
   （`rl/ppo.py` の `widen_observation`。足した入力の重みが 0 なので、**読み込んだ直後の振る舞いは元と
   1 ビットも変わらない**。実測で方策の平均・価値とも最大差 0.0）。途中に挟むと、この移行ができません
-- 移行して読んだときは、自動保存で上書きされる前に元のファイルを `shared_policy.pt.obs66` に控えます
-  （`engine._ensure_trainer`）。Adam の統計は入力の形が変わるので捨てます
-- 書き出したファイルからの再開（`rl/importer.py`）も 66 次元を受け付けます
+- 移行して読んだときは、自動保存で上書きされる前に元のファイルを `shared_policy.pt.obs66`（75 次元なら `.obs75`）に
+  控えます（`engine._ensure_trainer`）。Adam の統計は入力の形が変わるので捨てます
+- 書き出したファイルからの再開（`rl/importer.py`）も 66・75 次元を受け付けます（`config.OBS_WIDENABLE_DIMS`）
+
+### 車車間通信（`sim/v2x.py`。#64）
+
+各車が 4 次元のメッセージを出し、**30m 以内の近い 2 台**（`config.V2X_RANGE_M` / `V2X_MAX_PEERS`）から受け取ったものを
+平均して、観測の末尾 4 次元（`OBS_LAYOUT` の `v2x`）に入れます。観測は 75 → 79 次元です。既定で ON
+（`SimParams.v2x_comm` / `v2xComm`。学習タブのスイッチ）。
+
+| 要素 | 中身 |
+|---|---|
+| 車速 | v / `maxSpeed`（0〜1。後退中は 0）|
+| 右左折の意図 | 方向指示器と同じ -1 / 0 / +1（`world.turn_signal`）|
+| 危険 | 自車のカメラ（前方と周囲）に写った歩行者・障害物の近さ `max(0, 1 - d/30)` |
+| 交差点への近さ | 信号の無い交差点の入口（`world.next_junction`）か次の停止線の近いほう `min(1, max(0, 1 - d/30))` |
+
+- ★ **危険は自車のカメラの検出から作ること**（`_nearest_danger`。真値ではない）。「観測はカメラ由来」の約束は
+  V2X でも同じで、受け取る側の観測に真値が混ざると、CNN で走ったときに見えないはずのものが見えてしまいます。
+  車両は載せません（受け取る側も自分のカメラで見られるうえ、送り手自身が車両なので）
+- ★ **交差点への近さは 1 で止めること**（`_nearness`）。`next_junction` は交差点を越えた直後（`JUNCTION_PASSED_M` の
+  余裕の間）に負を返すので、そのまま `1 - d/30` にすると 1 を超えます（検査で見つかった）
+- **電波なので建物で遮りません**（死角の共有が目的）。距離は総当たりで測ります（最大 `MAX_VEHICLES` 台なので、
+  KD-Tree を組むより速く、scipy も足さずに済む。issue は KD-Tree を挙げていた）。実測（8 台）: 近傍の選び方と平均は
+  中央値 0.084ms、メッセージ作りを含めて 0.235ms
+- 近くに車がいなければ 0 で、スイッチを切ったときも 0（近くに車がいないときと同じ）。**切っても先頭 75 次元と報酬は
+  1 ビットも変わりません**（`verify_v2x_comm.py` が検査）
+- メッセージは `_compute_observations` の最後に、その場の認識結果から作ります（1 ステップ遅れない）。打ち切りの
+  観測（`_encode_last_perception`）も同じ関数を通ります
+- 受け取った相手は `frame.vehicles[].v2xConnectedIds`（相手がいなければ**キーごと省略**。転送量を増やさない）。
+  画面は開発モードで車どうしを水色の線で結び（`scene/V2XLinks.tsx`。車体と同じ時刻・同じ区間で補間する）、
+  追跡中の車のカードに「V2X: 車両#2とリンク中」のチップを出します（`panel/V2XStatusChip.tsx`）。線は鏡・周囲カメラには
+  写しません（`useHiddenFromMirrors`）。線分の組み立ては `scene/v2xLinks.ts` で、モックも同じ近傍の規則で相手を決めます
+- 検査は `backend/verify_v2x_comm.py`（近傍の選び方・メッセージ・観測の末尾 4 次元・66/75 次元の重みの読み込み・
+  79 次元での PPO の更新・所要時間。合成の碁盤の目で走らせる）と `npm run verify:v2x` / `npm run test:ui`
+- issue の完了条件の「金沢の T 字路で出会い頭の急ブレーキが減るか」は**まだ測っていません**（マップのキャッシュが要る）
 
 ### 安全ギミック（`sim/safety.py`）
 
@@ -2244,14 +2278,14 @@ UV の v をずらして「その車の段」だけを貼ります（`vehicleMat
 - **チェックポイントは必ず `weights_only=True` で読む。フォールバックしない。**
   `rl/importer.py` がこれを宣言しており、`SECURITY.md` にも書いてあります。
 - 書き出し（`.pt` / TorchScript / `.keras`）には観測レイアウトと行動スケールを
-  メタデータとして必ず埋めます。無いと受け取った側が 75 次元（`config.OBS_DIM`）に何を入れるか分かりません。
+  メタデータとして必ず埋めます。無いと受け取った側が 79 次元（`config.OBS_DIM`）に何を入れるか分かりません。
 - ★ **読み込む前に今の重みを `exports/` へ `before-import` として退避できなければ、読み込みを止めること**
   （`engine._handle_import` が理由を返す）。以前は `ExportError` をログに残すだけで読み込みを続け、元の重みを
   `trainer.load()` と `trainer.save(CHECKPOINT_PATH)` で上書きしていました。画面は `backup` が無いと何も
   出さないので、利用者は退避されたと思ったままになります（`SECURITY.md` の「取り戻せます」が成り立たない）
-- 観測次元を変えると過去のモデルは読み込めなくなります（50 → 54 → 56 → 57 → 66 → 75 の履歴あり。
-  66 は歩行者の欄、75 は周囲カメラの欄を足したとき）。**66 → 75 だけは例外で、入力を 0 で足して
-  読み込めます**（「前後左右のカメラ」の節。欄を末尾に足したからできる）。
+- 観測次元を変えると過去のモデルは読み込めなくなります（50 → 54 → 56 → 57 → 66 → 75 → 79 の履歴あり。
+  66 は歩行者の欄、75 は周囲カメラの欄、79 は V2X の欄を足したとき）。**66 と 75 だけは例外で、入力を 0 で足して
+  読み込めます**（`config.OBS_WIDENABLE_DIMS`。欄を末尾に足したからできる）。
 - ★ **書き出した推論モデルも、方策の平均と同じ `tanh` を通すこと**（`rl/export.py` の
   `InferencePolicy.forward` と、Keras の `action` 層の活性）。`policy._distribution` に `tanh` を
   入れたとき書き出し側だけ `clamp` / `hard_tanh` のまま残り、**書き出した行動がアプリ内の方策と

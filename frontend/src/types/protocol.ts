@@ -68,6 +68,8 @@ export interface SimParams {
   onlineAssist: boolean
   /** 成績に応じて学習中の車にヒヤリハット（歩行者の飛び出し・前走車の急制動）を起こすか。 */
   incidentCurriculum: boolean
+  /** 車車間通信（V2X）で近くの車のメッセージを観測に足すか。 */
+  v2xComm: boolean
 }
 
 /** いま効いている天候（2.3 frame.weather） */
@@ -258,6 +260,8 @@ export interface VehicleState {
   reverse?: boolean
   /** 安全ギミックの介入（protocol.md 2.3）。介入していなければ空文字 */
   assist?: AssistKind
+  /** V2X でこの車がメッセージを受け取った相手（近い順）。いなければ省略 */
+  v2xConnectedIds?: number[]
   /** 目的地までの経路。変化があったフレームのみ含まれる。省略時は前回値を保持 */
   route?: Vec2[]
 }

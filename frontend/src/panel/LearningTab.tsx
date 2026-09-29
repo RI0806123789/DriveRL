@@ -343,6 +343,15 @@ export function LearningTab() {
             send({ type: 'set_params', params: { incidentCurriculum: v } })
           }}
         />
+        <Switch
+          label="車車間通信（V2X）"
+          description="30m 以内の近い 2 台から、車速・右左折の意図・危険（歩行者・障害物）・交差点への近さを受け取り、観測の末尾 4 次元に足します。切ると 0（近くに車がいないときと同じ）"
+          checked={params.v2xComm}
+          onChange={(v) => {
+            patchParamsLocal({ v2xComm: v })
+            send({ type: 'set_params', params: { v2xComm: v } })
+          }}
+        />
       </Card>
 
       <Card title="報酬の重み" icon={<TuneIcon size={16} />} variant="outlined">

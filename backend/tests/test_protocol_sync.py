@@ -50,6 +50,8 @@ def _vehicle() -> VehicleSnapshot:
         collided=False,
         reached_goal=False,
         goal=(1.0, 1.0),
+        # 省略できる欄も載せる（載せないと、その欄が protocol.ts に宣言されているかを確かめられない）
+        v2x_links=[2],
         route=[(0.0, 0.0), (1.0, 1.0)],
     )
 

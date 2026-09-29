@@ -42,6 +42,7 @@ from app.sim.curriculum import (
 from app.sim.safety import FRESH_SEC as SAFETY_FRESH_SEC
 from app.sim.safety import SafetyCommand, SafetySupervisor
 from app.sim.signals import GREEN, RED, STOP_MARGIN_M, constrain_accel, stop_speed_limit
+from app.sim.v2x import V2XMessageRouter
 from app.sim.world import SPAWN_CLEARANCE_M2, World
 
 #: 1 ステップで再スポーンに使ってよい時間 [秒]。1 台ぶんは必ず処理するので、
@@ -144,6 +145,9 @@ class SimulationEnv:
         self.safety = SafetySupervisor()
         # ヒヤリハットのオートカリキュラム。環境の乱数とは別の乱数で回す（難易度 0 の間は 1 つも引かない）
         self.curriculum = CurriculumManager(np.random.default_rng([int(seed), 63]))
+        # 車車間通信。受け取ったメッセージの平均は観測の末尾へ、受け取った相手は frame へ載せる
+        self.v2x = V2XMessageRouter()
+        self.v2x_links: dict[int, tuple[int, ...]] = {}
         # 周囲カメラの検出を frame に載せる車（`watch_surround`）。載せないと転送量が倍になる
         self.watched_surround: frozenset[int] = frozenset()
         self._camera_spec = DEFAULT_CAMERA
@@ -914,6 +918,7 @@ class SimulationEnv:
         for vehicle in frame.vehicles:
             if vehicle.active:
                 vehicle.assist = self.safety.assist(vehicle.id)
+                vehicle.v2x_links = list(self.v2x_links.get(vehicle.id, ()))
         return frame
 
     def _detections_wire(self) -> dict[int, list[dict[str, Any]]]:
@@ -1079,7 +1084,22 @@ class SimulationEnv:
             freespace=freespace,
             spec=spec,
             surround=self.latest_surround,
+            v2x=self._exchange_v2x(perceptions, spec),
         )
+
+    def _exchange_v2x(self, perceptions: dict[int, PerceptionResult], spec: CameraSpec) -> np.ndarray:
+        """V2X のメッセージを作って近くの車へ配り、受け取った平均 (N, 4) を返す（`sim/v2x.py`）。切っていれば 0。"""
+        n = config.MAX_VEHICLES
+        if not self.params.v2x_comm:
+            self.v2x_links = {}
+            return np.zeros((n, config.OBS_V2X_DIM), dtype=np.float32)
+        fleet = self.world.fleet
+        messages = self.v2x.compute_messages(
+            self.world, float(self.params.max_speed), perceptions, self.latest_surround, spec
+        )
+        xy = np.column_stack((fleet.x, fleet.y))
+        inbox, self.v2x_links = self.v2x.route_and_aggregate(xy, fleet.active, messages)
+        return inbox
 
     def _detect_cnn(
         self, idx: np.ndarray, weather: Weather
@@ -1227,4 +1247,5 @@ class SimulationEnv:
             freespace=self._latest_freespace,
             spec=self._camera_spec,
             surround=self.latest_surround,
+            v2x=self._exchange_v2x(self.latest_perception, self._camera_spec),
         )

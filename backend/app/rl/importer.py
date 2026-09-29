@@ -142,11 +142,8 @@ def inspect_checkpoint(
     except (TypeError, ValueError, OverflowError) as exc:
         raise CheckpointImportError("チェックポイントのモデル定義が壊れています") from exc
 
-    # 周囲カメラの欄を足す前のモデルは、入力を 0 埋めして読み込める（`rl/ppo.py` の widen_observation）
-    widenable = (
-        obs_dim == int(config.OBS_DIM_BEFORE_SURROUND)
-        and int(expected_obs_dim) == int(config.OBS_DIM)
-    )
+    # 周囲カメラ・V2X の欄を足す前のモデルは、入力を 0 埋めして読み込める（`rl/ppo.py` の widen_observation）
+    widenable = obs_dim in config.OBS_WIDENABLE_DIMS and int(expected_obs_dim) == int(config.OBS_DIM)
     if obs_dim != expected_obs_dim and not widenable:
         raise CheckpointImportError(
             f"観測ベクトルの次元が違います（ファイル: {obs_dim} / このアプリ: {expected_obs_dim}）。"

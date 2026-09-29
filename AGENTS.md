@@ -174,6 +174,8 @@ cd backend
   別の印で、`assisted` は `learn` の部分集合。検査は `backend/verify_online_assist.py`
 - **ヒヤリハット（`sim/curriculum.py`）で急制動を掛けた前走車のステップは学習に使わない**（前走車も PPO の車）。
   難易度 0 の間は乱数を引かず、ON でも OFF でも結果は 1 ビットも変わらない。検査は `backend/verify_curriculum.py`
+- **V2X（`sim/v2x.py`）の「危険」は自車のカメラの検出から作る**（真値を混ぜると、CNN で走ったとき見えないはずの
+  ものが観測に入る）。近くに車がいなければ観測の末尾 4 次元は 0。検査は `backend/verify_v2x_comm.py`
 - **`map/loader.py` と `public/sw.js` の `CACHE_VERSION` は、生成物の中身を変えたら上げる**
 - **実用モード（自動運転タクシー）では重みの更新だけが止まる。** 物理も推論も配信も動き続ける。
   この間は**全車**を PPO ではなく経路追従（Pure Pursuit）で走らせ、徴用した 1 台は
@@ -232,9 +234,9 @@ cd backend
   `scene/cameraMath.ts` の `SURROUND_CAMERAS` と揃えないと、4 分割に出す検出枠が実物からずれる
   （`npm run verify:detections` が `types.py` を読んで照合する）。**前方カメラは 1 ビットも変えない**
   （観測の 66 次元までと学習済みの認識器がこれを前提にする）
-- **観測は 75 次元。周囲カメラの 9 次元は末尾に足してある**（`config.OBS_LAYOUT` の `surround`）。
-  66 次元の重みは読み込み時にゼロ詰めで広げる（`rl/ppo.py` の `widen_observation`。元の重みは
-  `.obs66` へ控える）。**途中へ差し込むと、広げた重みが別の欄を読む**
+- **観測は 79 次元。周囲カメラの 9 次元、V2X の 4 次元の順に末尾へ足してある**（`config.OBS_LAYOUT` の
+  `surround` / `v2x`）。66・75 次元の重みは読み込み時にゼロ詰めで広げる（`rl/ppo.py` の `widen_observation`。
+  元の重みは `.obs66` / `.obs75` へ控える）。**途中へ差し込むと、広げた重みが別の欄を読む**
 - **安全ギミックが運転を奪ったステップは PPO の学習から外す**（`StepResult.learn`）。外さないと、
   方策が出していない操作の結果を方策の手柄として教えることになる（検査は `backend/verify_safety_gimmicks.py`）。
   **外すのは損失のマスク（`RolloutBuffer.learn`）だけで、「生きているか」（`active`）とは分ける**。混ぜると
