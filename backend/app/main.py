@@ -582,12 +582,13 @@ async def export_model_endpoint(kind: str):
         )
 
     if kind == "keras":
-        from app.rl.export import ExportError, preload_keras
+        from app.rl.export import KERAS_MISSING_MESSAGE, ExportError, preload_keras
 
         try:
             await asyncio.to_thread(preload_keras)
-        except ExportError as exc:
-            return JSONResponse({"error": str(exc)}, status_code=500)
+        except ExportError:
+            logger.exception("Keras を読み込めませんでした")
+            return JSONResponse({"error": KERAS_MISSING_MESSAGE}, status_code=500)
 
     ticket = engine.request_export(kind)
     finished = await asyncio.to_thread(ticket.done.wait, EXPORT_TIMEOUT_SEC)
@@ -643,10 +644,10 @@ async def import_model_endpoint(file: UploadFile = File(...)):
                             status_code=413,
                         )
                     out.write(chunk)
-        except Exception as exc:
+        except Exception:
             logger.exception("アップロードの保存に失敗しました")
             return JSONResponse(
-                {"ok": False, "error": f"アップロードの保存に失敗しました: {exc}"},
+                {"ok": False, "error": "アップロードの保存に失敗しました（詳しい理由はサーバーのログに出ています）"},
                 status_code=500,
             )
         finally:
