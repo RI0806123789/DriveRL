@@ -1,0 +1,9 @@
+# DriveRL - 開発用の依存（テストを回すときだけ要る。サーバーの起動には要らない）
+#
+# セットアップ:
+#   backend/.venv/Scripts/python.exe -m pip install -r requirements-dev.txt
+#
+# 本体の依存（requirements.txt）も一緒に入る。テストの入口は CLAUDE.md「テスト」節。
+-r requirements.txt
+
+pytest==9.1.1

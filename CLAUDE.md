@@ -30,6 +30,7 @@ venv のパスを埋めるだけの薄いラッパーで、中身は `backend/ru
 cd frontend
 npm run typecheck       # tsc --noEmit
 npm run build           # typecheck + vite build
+npm test                # 自動テスト（node --test。verify:* の全本 + src/__tests__ の単体テスト）
 npm run verify          # 幾何検証をまとめて実行（ブラウザ不要）
 npm run verify:signals  # 1 本だけ。**どれがあるかは `frontend/package.json` の
                         #   scripts が唯一の出典**（ここに並べると必ず古くなる）
@@ -37,6 +38,10 @@ npm run icons           # PWA アイコンを再生成（public/icon-*.png。手
 npm run dev             # Vite だけ立てる。?mock=1 でバックエンド無しでも動く（後述）
 
 # バックエンド（backend/ から。`python -m app.x` なら PYTHONPATH は不要）
+.venv\Scripts\python.exe -m pytest                    # 自動テスト（契約と、数秒で終わる検証。要 requirements-dev.txt）
+.venv\Scripts\python.exe -m pytest --runslow          # verify_*.py もすべて（安全ギミックだけで 20 分ほど）
+.venv\Scripts\python.exe -m pytest --runslow -k ginza # 1 つのプリセットだけ（-k は id の部分一致）
+.venv\Scripts\python.exe -m pytest --lf               # 前回落ちたものだけ
 .venv\Scripts\python.exe -m app.map.prefetch          # OSM の事前ダウンロード（初回は数十秒/エリア）
 .venv\Scripts\python.exe train_detector.py --samples 2400 --epochs 12   # 認識器の学習
 .venv\Scripts\python.exe train_detector.py --collect-only              # 教師データ収集だけ
@@ -55,15 +60,52 @@ npm run dev             # Vite だけ立てる。?mock=1 でバックエンド�
 
 ### テスト
 
-**自動テストのフレームワークは入っていません**（pytest も vitest も無い）。確認手段は
-`npm run verify` の幾何検証スクリプト群と、型チェック・ビルド、そして実測です。
-バックエンドの変更を検証するときは、スクラッチにベンチ／比較スクリプトを書いて
-**新旧の結果が一致することと速度**を数値で確かめるのが、このリポジトリで機能している作法です。
+自動テストの入口は 2 つです（#67）。**どちらも既存の検証スクリプトを書き直さず、子プロセスで回して
+終了コードで合否を決めます**（`python verify_*.py` / `npm run verify` を単独で回す使い方はそのまま）。
+
+| 入口 | ランナー | 中身 | 既定の所要（2026-09-29 の実測）|
+|---|---|---|---|
+| `cd frontend; npm test` | `node --test`（**ライブラリを足していない**）| `verify:*` の全本 + `src/__tests__/` の単体テスト | 約 10 秒 |
+| `cd backend; .venv\Scripts\python.exe -m pytest` | pytest（`requirements-dev.txt`。本体の `requirements.txt` には入れない）| `tests/` の契約テスト + 数秒で終わる `verify_*.py` | 約 3 秒 |
+
+確認手段はこれに加えて型チェック・ビルド、そして実測です。バックエンドの変更を検証するときは、
+スクラッチにベンチ／比較スクリプトを書いて**新旧の結果が一致することと速度**を数値で確かめるのが、
+このリポジトリで機能している作法です（テストは「壊していないか」を見るもので、速さの比較の代わりにはなりません）。
+
+- ★ **一覧を手で書かないこと。** フロントは `package.json` の `verify:*` から、バックエンドは
+  `backend/verify_*.py` の glob からテストを作ります。さらに「`npm run verify` の連結が `verify:*` を漏れなく呼ぶか」
+  「`scripts/verify-*.ts` がすべて登録されているか」「`verify_*.py` がすべて `PLANS`（`tests/test_verify_wrappers.py`）に
+  載っているか」を検査するので、足し忘れると落ちます
+- ★ **新しい `verify_*.py` を足したら、`PLANS` に読むマップを書くこと。** テストは実行の前に
+  マップのキャッシュ（`data/map_cache/<id>.json`）の先頭の `"version"` を `map/loader.py` の `CACHE_VERSION` と比べ、
+  **無いか古ければ Overpass へ取りに行かずにスキップします**。登録しないとこの検査を通らず、テストの途中で
+  取り直しが始まります（実測: 版 9 のキャッシュで銀座・梅田・栄を読んだら、取り直しで 1 本 90〜220 秒かかった）。
+  先頭だけを見るのは、`_write_cache` が `{"version":N,` から書き出すためです（金沢の 18MB を読まずに済む）
+- ★ **`verify_*.py` は import せず子プロセスで回すこと。** どれもモジュールの最上位で走るうえ、
+  `groundtruth._STATIC_CACHE` のようなプロセスをまたいで残るキャッシュを持ちます。1 プロセスで続けて回すと
+  前のマップ（金沢なら占有グリッドだけで約 152MB）を握ったまま次へ進みます。子プロセスなら 1 本ごとに手放します
+- **重いものは `slow` の印で分け、`--runslow` を付けたときだけ回します**（`tests/conftest.py`）。
+  既定で回すのは契約テストと、小さい 3 プリセットの `verify_signal_phases.py`（1 本 1 秒未満）だけです。
+  プリセット名を引数で受け取るスクリプト（信号の現示・経路の出だし・経路上の信号）はプリセットごとに分けて回すので、
+  `-k ginza` のように絞れます。**`verify_safety_gimmicks.py` だけは分けません**（1 つのプリセットだけ渡すと、
+  マップに依らない検査もそのプリセットで回り、単独で回したときと中身が変わるため）
+- **`npm test` の `verify:*` は 1 本ずつ順に回します。** `verify:nav` などは描き直しの時間を測るので、
+  並べて回すと CPU の取り合いで落ちます（テストのファイルどうしは `node --test` が並べて回す）
+- **契約テスト（`tests/test_protocol_sync.py`）は、`contracts.py`・`protocol.ts`・`docs/protocol.md`・`main.py` の
+  食い違いを見ます。** `to_wire()` が出すキーが `protocol.ts` の interface に宣言されているか（無ければ
+  フロントが黙って捨てる）・必須の欄を送っているか、送る `type` の集合が `ClientMessage`・文書の 3 章・
+  `main.py` の受け口（`kind == "x"` と `_EVENT_KINDS` などの集合。`ast` で読む）で一致するか、`protocolVersion` が
+  `config.py`・`protocol.ts` の定数と冒頭・文書の題と本文と例のすべてで揃っているか。`protocol.ts` は
+  `export interface` 直下の 2 字下げの欄を正規表現で読むので、**欄を 1 行 1 つで書く今の書き方を変えないこと**
+- `main.py` は import しないこと（最上位で `SimulationEngine()` を作る）
+- 実測（`--runslow` で銀座・梅田・栄）: `verify_route_signals` 1 本 15〜20 秒・`verify_route_start` 4〜9 秒・
+  `verify_publish_routes` 13〜17 秒・`verify_log_std` 13〜23 秒・`verify_safety_gimmicks` 約 20 分。
+  金沢は測っていません（キャッシュを作り直す必要があるため）
 
 `npm run verify` が存在する理由: **3D の向きは間違っていても型チェックもビルドも通る**ため、
 幾何計算を React から切り離した純粋モジュールへ置き、数値で不変条件を検査しています
 （実際に灯火の並びが左右逆になっていたバグをこれが検出しました）。
-Node 22.18 以降が要るのは `node scripts/verify-*.ts` で TS を直接実行するためです。
+Node 22.18 以降が要るのは `node scripts/verify-*.ts` と `node --test` で TS を直接実行するためです。
 
 ★ **本数は `frontend/package.json` の `scripts` が唯一の出典です。** 増やしたら
 ここと `README.md`「検証」節の両方を直すこと。過去に **CLAUDE.md が 7 本 /
@@ -2244,6 +2286,8 @@ OSM キャッシュ・チェックポイント・認識器と教師データ・�
 - 利用者が作業完了（機能の実装やバグ修正の完了）を報告したら、
   **プライバシーの確認**（個人情報・鍵・ローカルの絶対パスはプレースホルダーへ）をしたうえで
   プルリクエストを出す。既存ブランチの再利用でかまわない
+- PR を出す前に `npm test`（frontend）と `python -m pytest`（backend）を回す。
+  経路・信号・地図・安全ギミックに触れたら `--runslow` も（確認項目は `.github/pull_request_template.md`）
 - ★ **対応する issue があれば、PR 本文の末尾に `Closes #N` を書く**（複数なら 1 行ずつ）。
   本文中に `#N` と書くだけでは**参照リンクになるだけで、マージしても閉じません**
 - PR・コミットにセッション URL を書かない
