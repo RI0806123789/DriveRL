@@ -24,6 +24,7 @@ from app.contracts import (
     SimParams,
     validate_hidden_sizes,
 )
+from app.rl.online_assist import OnlineAssistController
 from app.runtime.detector_job import DetectorTrainingJob
 from app.runtime.taxi import TaxiService
 
@@ -39,6 +40,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _EPISODE_WINDOW = 50
+#: アシスト率（`metrics.assistRate`）を数えるステップ数（20Hz で 10 秒）
+_ASSIST_WINDOW = 200
 
 #: 徒歩キャラの位置が届かなくなってから、街から消すまで [秒]。
 #: タブを閉じた・回線が切れた利用者を街に置き去りにすると、そこに見えない人が
@@ -135,6 +138,9 @@ class SimulationEngine:
         self._network_snapshot_failed = False
         self._autosave_every = 20
         self._last_autosave_updates = 0
+        # オンライン模倣（学習中の車へのエキスパートの割り込み）と、その割合の直近の記録
+        self._assist = OnlineAssistController(config.MAX_VEHICLES, seed=0)
+        self._assist_log: deque[tuple[int, int]] = deque(maxlen=_ASSIST_WINDOW)
 
         # 徒歩キャラの位置を最後に受け取った時刻。0 なら街に居ない
         self._player_pose_at: float = 0.0
@@ -602,6 +608,8 @@ class SimulationEngine:
         if self._trainer is not None:
             # 走行の連続性が切れるので、溜めかけのロールアウトは捨てる
             self._trainer.reset_rollout()
+        self._assist.reset()
+        self._assist_log.clear()
         self._publish_taxi()
         self._notify(
             "実用モードに入りました。学習は止まり、いまの重みのまま走ります"
@@ -925,6 +933,8 @@ class SimulationEngine:
         self._last_update_stats = {}
         self._step_marks.clear()
         self._last_metrics_at = 0.0
+        self._assist.reset()
+        self._assist_log.clear()
 
         initial_frame = self._env.snapshot(self._tick, self._sim_time)
         initial_frame.signals = self._env.signal_phases
@@ -961,7 +971,12 @@ class SimulationEngine:
         active = env.active_mask
 
         actions, log_probs, values = trainer.act(obs, active)
-        result = env.step(actions)
+        expert = None
+        if not practical and env.params.online_assist:
+            expert = self._assist.decide(
+                trainer.experience_steps, active, env.assist_danger(active)
+            )
+        result = env.step(actions, expert=expert)
 
         # 実用モードでは推論だけ回す。重みは触らない（決定 5）
         if not practical:
@@ -977,7 +992,13 @@ class SimulationEngine:
                 final_obs=result.final_obs,
                 # 安全ギミックが操作を丸ごと引き受けた車は、方策の経験として積まない
                 learn=result.learn,
+                # エキスパートが運転した車は、方策の勾配に入れず模倣の損失に使う
+                expert_actions=result.expert_actions,
+                assisted=result.assisted,
             )
+            learnable = result.active if result.learn is None else result.learn
+            assisted_count = 0 if result.assisted is None else int(result.assisted.sum())
+            self._assist_log.append((assisted_count, int(np.count_nonzero(learnable))))
 
             stats = trainer.maybe_update(result.obs, result.active)
             if stats is not None:
@@ -1102,6 +1123,9 @@ class SimulationEngine:
             steps_per_sec = 0.0
 
         stats = self._last_update_stats
+        assisted_steps = sum(a for a, _ in self._assist_log)
+        learned_steps = sum(b for _, b in self._assist_log)
+        assist_rate = assisted_steps / learned_steps if learned_steps > 0 else 0.0
         return MetricsSnapshot(
             tick=self._tick,
             wall_time=time.perf_counter() - self._started_at,
@@ -1120,4 +1144,6 @@ class SimulationEngine:
             signal_violations=violations,
             speed_violations=speeding,
             lane_deviation=lane_deviation,
+            assist_rate=assist_rate,
+            bc_loss=float(stats.get("bc_loss", 0.0)),
         )

@@ -21,6 +21,7 @@ import type {
 } from '../types/protocol'
 import { PROTOCOL_VERSION } from '../types/protocol'
 import { pushFrame, resetFrameBuffer } from './frameBuffer'
+import { normalizeAssistRate } from './assistRate'
 
 /** メトリクス履歴に**上限は設けない**。 */
 
@@ -35,6 +36,8 @@ export interface MetricsSeries {
   laneDeviation: number[]
   /** 歩行者との衝突（1 エピソードあたりの割合） */
   pedestrianCollisions: number[]
+  /** エキスパートが運転した割合（`assistRate`。古いサーバーは 0） */
+  assistRate: number[]
 }
 
 function emptyMetricsSeries(): MetricsSeries {
@@ -47,6 +50,7 @@ function emptyMetricsSeries(): MetricsSeries {
     violations: [],
     laneDeviation: [],
     pedestrianCollisions: [],
+    assistRate: [],
   }
 }
 
@@ -116,6 +120,7 @@ const DEFAULT_PARAMS: SimParams = {
   weatherFog: 0,
   weatherAuto: false,
   safetyAssist: false,
+  onlineAssist: true,
 }
 
 /** `init` の `config.maxPedestrians` が無い（古いサーバー）ときの上限 */
@@ -405,6 +410,7 @@ export const useSimStore = create<SimStore>((set, get) => ({
           series.violations.push(msg.signalViolations)
           series.laneDeviation.push(msg.laneDeviation)
           series.pedestrianCollisions.push(msg.pedestrianCollisionRate ?? 0)
+          series.assistRate.push(normalizeAssistRate(msg.assistRate) ?? 0)
           return { metricsRevision: s.metricsRevision + 1, latestMetrics: msg }
         })
         break

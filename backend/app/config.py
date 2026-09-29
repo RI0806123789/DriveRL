@@ -177,6 +177,10 @@ PPO_MAX_GRAD_NORM = 0.5
 PPO_LOG_STD_INIT = -0.5
 PPO_LOG_STD_MIN = -5.0
 PPO_LOG_STD_MAX = 0.0
+#: エキスパート（経路追従）が運転したステップに掛ける模倣の損失の重み（`rl/online_assist.py`）
+PPO_BC_COEF = 0.5
+#: 模倣の教師の操作はここで頭打ちにする（方策の平均は tanh なので ±1 には届かない）
+PPO_BC_TEACH_LIMIT = 0.98
 
 TORCH_NUM_THREADS = 4
 

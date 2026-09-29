@@ -58,7 +58,7 @@ class ActorCritic(nn.Module):
         self.clamp_log_std()
 
     def _distribution(self, obs: torch.Tensor) -> Normal:
-        mu = torch.tanh(self.mu_head(self.policy_trunk(obs)))
+        mu = self.mean_action(obs)
         log_std = torch.clamp(self.log_std, config.PPO_LOG_STD_MIN, config.PPO_LOG_STD_MAX)
         std = torch.exp(log_std).expand_as(mu)
         return Normal(mu, std)
@@ -76,6 +76,10 @@ class ActorCritic(nn.Module):
         dist = self._distribution(obs)
         values = self.value_head(self.value_trunk(obs)).squeeze(-1)
         return dist, values
+
+    def mean_action(self, obs: torch.Tensor) -> torch.Tensor:
+        """行動分布の平均（-1..1）。模倣の損失で教師の操作と比べる。"""
+        return torch.tanh(self.mu_head(self.policy_trunk(obs)))
 
     @torch.no_grad()
     def act(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:

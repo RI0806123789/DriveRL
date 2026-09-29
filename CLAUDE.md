@@ -30,7 +30,8 @@ venv のパスを埋めるだけの薄いラッパーで、中身は `backend/ru
 cd frontend
 npm run typecheck       # tsc --noEmit
 npm run build           # typecheck + vite build
-npm test                # 自動テスト（node --test。verify:* の全本 + src/__tests__ の単体テスト）
+npm test                # 自動テスト（node --test。verify:* の全本 + src/**/__tests__ の単体・描画テスト）
+npm run test:ui         # 操作パネルの部品の描画テストだけ（src/panel/__tests__。.tsx は typescript で変換して読む）
 npm run verify          # 幾何検証をまとめて実行（ブラウザ不要）
 npm run verify:signals  # 1 本だけ。**どれがあるかは `frontend/package.json` の
                         #   scripts が唯一の出典**（ここに並べると必ず古くなる）
@@ -47,6 +48,7 @@ npm run dev             # Vite だけ立てる。?mock=1 でバックエンド�
 .venv\Scripts\python.exe train_detector.py --collect-only              # 教師データ収集だけ
 # ↑ どちらも操作パネルの「モデル作成」タブから同じことができる（中身は同じ実装）
 .venv\Scripts\python.exe verify_log_std.py           # 方策分布の健全性チェック
+.venv\Scripts\python.exe verify_online_assist.py    # オンライン模倣（割り込みの確率・危険の判定・模倣の損失。合成の碁盤の目で走らせる）
 .venv\Scripts\python.exe verify_signal_phases.py    # 信号の現示（交差する流れが同時に青にならないか）
 .venv\Scripts\python.exe verify_publish_routes.py  # 経路の配信（取りこぼしても届くか）
 .venv\Scripts\python.exe verify_route_start.py     # 配車の経路の出だし（道なりに出るか・建物を突き抜けないか）
@@ -89,6 +91,12 @@ npm run dev             # Vite だけ立てる。?mock=1 でバックエンド�
   プリセット名を引数で受け取るスクリプト（信号の現示・経路の出だし・経路上の信号）はプリセットごとに分けて回すので、
   `-k ginza` のように絞れます。**`verify_safety_gimmicks.py` だけは分けません**（1 つのプリセットだけ渡すと、
   マップに依らない検査もそのプリセットで回り、単独で回したときと中身が変わるため）
+- ★ **操作パネルの部品の描画テスト（`src/panel/__tests__/`）は Vitest も jsdom も使いません**（依存を足さない約束。
+  issue #62 は Vitest + React Testing Library を挙げていましたが、足さずに済む形にしました）。Node の型の除去は
+  JSX を読めないので、`src/__tests__/support/tsxHooks.ts` を `module.register()` し、`.tsx` だけを devDependencies の
+  `typescript` の `transpileModule` で変換して読みます（拡張子を省いた相対 import も Vite と同じく `.ts` / `.tsx` へ解決する）。
+  描画は `react-dom/server` の `renderToStaticMarkup` で HTML にして調べます。**zustand のストアを読む部品は
+  サーバー描画では初期状態しか見えない**ので、値は props で渡す部品に切り出して試すこと（`AssistRateChip`）
 - **`npm test` の `verify:*` は 1 本ずつ順に回します。** `verify:nav` などは描き直しの時間を測るので、
   並べて回すと CPU の取り合いで落ちます（テストのファイルどうしは `node --test` が並べて回す）
 - **契約テスト（`tests/test_protocol_sync.py`）は、`contracts.py`・`protocol.ts`・`docs/protocol.md`・`main.py` の
@@ -2149,6 +2157,47 @@ UV の v をずらして「その車の段」だけを貼ります（`vehicleMat
 - **サーバーを止めてから実行すること。** 動かしたままだと自動保存と取り合いになり、
   Windows では `PermissionError`（`os.replace` が失敗）になります。
   **止め忘れると、直した重みをサーバーが数更新で壊して上書きします**（実際にやりました）
+
+### オンライン模倣（`rl/online_assist.py`。#62）
+
+`warmstart_policy.py` をサーバーを止めずに学習ループの中でやる形です。開発モードの学習中の車に、
+**ときどき経路追従（エキスパート）を割り込ませ**、その操作を模倣の教師にします（DAgger 風）。
+既定で ON（`SimParams.online_assist` / `onlineAssist`。学習タブのスイッチ）。
+
+| 何で割り込むか | 条件 |
+|---|---|
+| 確率 | `max(0.05, 1 - t / 20,000)`。t は `PPOTrainer.experience_steps`（更新回数 × ロールアウト長 + 収集中の分）|
+| 車線逸脱 | 車線中心から 1.5m 超 |
+| 衝突切迫 | 前走車（同じ向き・前方 45m）か歩行者までの TTC 1.2 秒未満 |
+| 赤信号突破 | 赤の停止線まで 5m 未満かつ 2m/s 超 |
+| 固まり | 0.5m/s 未満のまま、交通に止められてもいない（`env.traffic_hold` が偽）状態が 5 秒続いた |
+
+- ★ **エキスパートが運転したステップは PPO の代理損失に入れないこと**（`RolloutBuffer.assisted`）。行動が方策から
+  引いたものではないので、比（ratio）が意味を持ちません。**価値の損失には入れます** — ウォームスタートの実測で
+  「止まる前提の価値を残したまま走り出すと 1〜2 更新で方策が壊れる」ことが分かっているので、割り込みが 100% の
+  学習の始めにも価値関数は育てる必要があります。模倣の損失は方策の平均（`ActorCritic.mean_action`。`tanh`）と
+  教師の操作の二乗誤差で、重みは `config.PPO_BC_COEF`（0.5）
+- ★ **`learn`（損失に入れるか）と `assisted` を混ぜないこと。** 安全ギミックが操作を丸ごと引き受けたステップは
+  `learn` が偽で、どの損失にも入りません（エキスパートの割り込みも掛けない）。`assisted` は `learn` の部分集合です
+- ★ **advantage の正規化はエキスパートが運転していないステップだけで行う**（`flat_dataset`）。割り込みが無ければ
+  以前と 1 ビットも変わりません（`verify_online_assist.py` が検査）
+- **教師は `constrain_accel` を通した後の、実際に出した操作**（`StepResult.expert_actions`）です。`env.autopilot_actions`
+  （上限で抑える前）ではありません。経路追従はブレーキを踏まないので、抑える前を教えると赤信号や前走車で
+  止まる操作を教えられません。±0.98 で頭打ちにします（`config.PPO_BC_TEACH_LIMIT`。`warmstart.TEACH_LIMIT` も同じ値を読む）
+- ★ **エキスパートが運転する車には前走車・歩行者の手前で止める上限も掛ける**（`env.step` の `driven`）。
+  経路追従は経路しか見ないので、掛けないと止まっている車へ必ず追突します。方策が運転しているステップには
+  掛けません（「追突しない世界」にしない約束はそのまま）
+- ★ **確率で決めた運転者は 2 秒（40 ステップ）続ける**（`ASSIST_SEGMENT_STEPS`）。毎ステップ引き直すと 50ms ごとに
+  運転者が入れ替わり、操作が細切れになります。危険で割り込んだら 1 秒、固まりから起こしたら 3 秒は任せます
+- **危険の判定は真値**（`env.assist_danger`）。報酬・終了条件と同じ側で、観測（カメラ由来）は変えません。
+  実測（合成の碁盤の目・8 台）で 1 ステップ中央値 0.75ms
+- 確率の下限（0.05）は方策が崩れたときの保険なので、**学習の終わりまで割り込みは消えません**。純粋な PPO の
+  振る舞いを見たいときはスイッチを切ること。学習済みの重み（更新回数が多い）を読み込めば、最初から下限です
+- 割合は `metrics.assistRate`（直近 10 秒の学習中の車のステップのうち、エキスパートが運転した割合）で、
+  学習タブのチップ（`panel/AssistRateChip.tsx`）とグラフに出します。表示の形は `store/assistRate.ts`
+- `rl/` は `sim/` を import しない約束なので、危険の判定の入れ物（`AssistDanger`）は `contracts.py` に置いてあります
+- 検査は `backend/verify_online_assist.py`（割り込みの確率・危険の判定・区間・バッファ・模倣の損失・環境。
+  **マップのキャッシュを読まず、合成の碁盤の目で走らせる**）と `npm run verify:assist` / `npm run test:ui`
 
 ### モデルの入出力
 

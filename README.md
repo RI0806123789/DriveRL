@@ -29,6 +29,7 @@ DriveRL/
 │   ├── train_detector.py           画像認識器の学習 CLI（中身は app/percep/trainer.py）
 │   ├── warmstart_policy.py         「止まる」に固まった方策を経路追従で立て直す CLI
 │   ├── verify_log_std.py           方策分布（log_std）の健全性チェック
+│   ├── verify_online_assist.py     オンライン模倣（経路追従の割り込みと模倣の損失）
 │   ├── verify_signal_phases.py     信号の現示（交差する流れが同時に青にならないか）
 │   ├── verify_publish_routes.py    経路の配信（取りこぼしてもクライアントへ届くか）
 │   ├── verify_route_start.py       配車の経路の出だし（道なりに出るか・建物を突き抜けないか）
@@ -68,6 +69,7 @@ DriveRL/
 │   │   │   ├── buffer.py           ロールアウトバッファ（GAE）
 │   │   │   ├── ppo.py              PPO 更新・永続化
 │   │   │   ├── warmstart.py        経路追従を教師にした行動クローニング
+│   │   │   ├── online_assist.py    学習中の車へ経路追従を割り込ませる度合い（DAgger 風のオンライン模倣）
 │   │   │   ├── export.py           モデルの書き出し（.pt / TorchScript / .keras）
 │   │   │   └── importer.py         モデルの読み込みと安全な検証
 │   │   └── runtime/
@@ -1195,7 +1197,7 @@ Keras 3 は PyTorch をバックエンドにできるので、このプロジェ
 終了コードで合否を決めます（1 本ずつ単独で回す使い方もそのまま使えます）。
 
 ```powershell
-# フロントエンド: node --test（ライブラリを足していない）。verify:* の全本 + src/__tests__ の単体テスト
+# フロントエンド: node --test（ライブラリを足していない）。verify:* の全本 + src/**/__tests__ の単体・描画テスト
 cd frontend; npm test
 
 # バックエンド: pytest（初回だけ requirements-dev.txt を入れる）
@@ -1210,6 +1212,8 @@ cd backend; .venv\Scripts\python.exe -m pytest --lf                # 前回落�
   `main.py` の受け口でそろっているか、`protocolVersion` が全部の場所で同じか、`SimParams` の値域への丸めと拒否
 - **単体テスト**（`frontend/src/__tests__/`）: 日の出・日の入りの境界（白夜・極夜・切り替わりの前後）、
   ENU と three の座標変換・右ハンドル・周囲カメラの向き、角度の最短回りの補間
+- **描画テスト**（`frontend/src/panel/__tests__/`。`npm run test:ui` で単独でも回せる）: 学習タブのアシスト率のチップが
+  値どおりに描かれるか（`react-dom/server` で HTML にする。jsdom や Vitest は足していない）
 - 重いもの（マップを読む `verify_*.py`）は `--runslow` を付けたときだけ回ります。**マップのキャッシュが
   無いか版が古いプリセットはスキップします**（テストの途中で Overpass から取り直さないため）。
   先に `.venv\Scripts\python.exe -m app.map.prefetch` でキャッシュを作ってください
@@ -1243,9 +1247,14 @@ cd frontend; npm run verify:taximap     # スマホ画面の 2D 地図の座標�
 cd frontend; npm run verify:nav         # カーナビの描き直しにかかる時間（金沢の規模で）
 cd frontend; npm run verify:taxiauto    # 配車の自動操作（段階の順番・送り直しの間隔）
 cd frontend; npm run verify:conventions # コメント規約と CSS の遷移規約
+cd frontend; npm run verify:assist      # オンライン模倣のアシスト率（値の正規化・表示・契約ファイルとの突き合わせ）
+
+# 操作パネルの部品の描画テスト（node --test。.tsx は devDependencies の typescript で変換して読む）
+cd frontend; npm run test:ui
 
 # バックエンドの検証（キャッシュ済みのマップを読むだけ。ブラウザもサーバーも要らない）
 cd backend; .venv\Scripts\python.exe verify_log_std.py        # 方策分布（log_std）
+cd backend; .venv\Scripts\python.exe verify_online_assist.py  # オンライン模倣（割り込みの確率・危険の判定・模倣の損失。合成の碁盤の目で走らせる）
 cd backend; .venv\Scripts\python.exe verify_signal_phases.py  # 信号の現示（プリセット名を渡せば 1 つだけ）
 cd backend; .venv\Scripts\python.exe verify_publish_routes.py # 配車と frame の経路が配信で落ちないか
 cd backend; .venv\Scripts\python.exe verify_route_start.py    # 配車の経路が道なりに出て建物を突き抜けないか

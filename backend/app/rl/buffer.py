@@ -28,6 +28,8 @@ class RolloutBuffer:
         self.truncated_values = np.zeros(shape, dtype=np.float32)
         self.active = np.zeros(shape, dtype=bool)
         self.learn = np.zeros(shape, dtype=bool)
+        self.expert_actions = np.zeros((*shape, self.action_dim), dtype=np.float32)
+        self.assisted = np.zeros(shape, dtype=bool)
         self.advantages = np.zeros(shape, dtype=np.float32)
         self.returns = np.zeros(shape, dtype=np.float32)
 
@@ -58,6 +60,8 @@ class RolloutBuffer:
         truncated: np.ndarray | None = None,
         truncated_values: np.ndarray | None = None,
         learn: np.ndarray | None = None,
+        expert_actions: np.ndarray | None = None,
+        assisted: np.ndarray | None = None,
     ) -> None:
         """1 ステップ分を追加する。満杯なら何もしない（実行ループを止めないため）。"""
         if self.full:
@@ -87,6 +91,15 @@ class RolloutBuffer:
             if learn is None
             else self.active[i] & np.asarray(learn, dtype=bool).reshape(n)
         )
+        # エキスパートが運転したステップ。方策の勾配には入れず、価値と模倣の損失にだけ使う
+        if assisted is None or expert_actions is None:
+            self.assisted[i] = False
+            self.expert_actions[i] = 0.0
+        else:
+            self.assisted[i] = self.learn[i] & np.asarray(assisted, dtype=bool).reshape(n)
+            self.expert_actions[i] = np.asarray(expert_actions, dtype=np.float32).reshape(
+                n, self.action_dim
+            )
         self.ptr = i + 1
 
     def compute_returns_and_advantages(
@@ -150,8 +163,16 @@ class RolloutBuffer:
         values = self.values[:size].reshape(-1)[idx]
         returns = self.returns[:size].reshape(-1)[idx]
         advantages = self.advantages[:size].reshape(-1)[idx]
+        assisted = self.assisted[:size].reshape(-1)[idx]
+        expert_actions = self.expert_actions[:size].reshape(-1, self.action_dim)[idx]
 
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        # 正規化は方策の勾配に入れるサンプル（エキスパートが運転していない）だけで行う
+        policy = ~assisted
+        if policy.any():
+            ref = advantages[policy]
+            advantages = (advantages - ref.mean()) / (ref.std() + 1e-8)
+        else:
+            advantages = np.zeros_like(advantages)
 
         return {
             "obs": torch.from_numpy(np.ascontiguousarray(obs)),
@@ -162,6 +183,8 @@ class RolloutBuffer:
             "advantages": torch.from_numpy(
                 np.ascontiguousarray(advantages.astype(np.float32))
             ),
+            "assisted": torch.from_numpy(np.ascontiguousarray(assisted)),
+            "expert_actions": torch.from_numpy(np.ascontiguousarray(expert_actions)),
         }
 
     @staticmethod

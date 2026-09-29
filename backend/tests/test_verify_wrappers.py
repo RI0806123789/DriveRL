@@ -34,6 +34,7 @@ class Plan:
 
 PLANS: dict[str, Plan] = {
     "verify_log_std.py": Plan(),
+    "verify_online_assist.py": Plan(),
     "verify_publish_routes.py": Plan(maps=("ginza",)),
     "verify_signal_phases.py": Plan(maps=ALL_PRESETS, per_preset=True, fast_presets=SMALL_PRESETS),
     "verify_route_start.py": Plan(maps=ALL_PRESETS, per_preset=True),

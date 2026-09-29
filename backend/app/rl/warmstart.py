@@ -24,7 +24,7 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 #: 教師の行動は tanh の外側に置かない（±1 には決して届かないので学習が終わらない）
-TEACH_LIMIT = 0.98
+TEACH_LIMIT = config.PPO_BC_TEACH_LIMIT
 
 #: ウォームスタート直後の探索ノイズ。**広すぎても狭すぎても損をする。**
 #: 既定の 0.6 のままだとステアに乗って車線を外れ、衝突の罰（-100）で「止まる方が得」へ

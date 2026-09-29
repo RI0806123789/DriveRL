@@ -64,6 +64,8 @@ export interface SimParams {
   weatherAuto: boolean
   /** 学習中の車にも安全ギミックを掛けるか（実用モードの経路追従の車には常に掛かる）。 */
   safetyAssist: boolean
+  /** 学習中の車に経路追従（エキスパート）を割り込ませ、模倣の教師にするか。 */
+  onlineAssist: boolean
 }
 
 /** いま効いている天候（2.3 frame.weather） */
@@ -389,6 +391,10 @@ export interface MetricsMessage {
   speedViolations: number
   /** 車線中心からの横方向のずれの平均 [m]。 */
   laneDeviation: number
+  /** 直近 10 秒の学習中の車のステップのうち、エキスパートが運転した割合 0.0〜1.0（古いサーバーは送らない）。 */
+  assistRate?: number
+  /** 直前の PPO 更新での模倣の損失。 */
+  bcLoss?: number
 }
 
 /** 学習ジョブの段階 */
