@@ -47,6 +47,9 @@ CORS_ORIGINS = [
     "http://127.0.0.1:5173",
 ]
 
+#: IP アドレスと localhost のほかに、Host として受け付ける名前（カンマ区切り。例: mypc.local）。app/host_guard.py
+ALLOWED_HOSTS = [h.strip() for h in os.getenv("DRIVERL_ALLOWED_HOSTS", "").split(",") if h.strip()]
+
 SIM_HZ = 20.0
 DT = 1.0 / SIM_HZ
 

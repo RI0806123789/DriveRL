@@ -19,6 +19,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from app import config
 from app.contracts import InterventionEvent
 from app.contracts import coerce_bool, validate_hidden_sizes
+from app.host_guard import HostOriginGuard
 from app.runtime.engine import SimulationEngine
 
 logging.basicConfig(
@@ -570,6 +571,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# 最後に足したものが外側。Host と Origin を CORS より先に確かめる（WebSocket には CORS が効かないため）
+app.add_middleware(HostOriginGuard, allowed_origins=config.CORS_ORIGINS, extra_hosts=config.ALLOWED_HOSTS)
 
 
 @app.get("/api/health")

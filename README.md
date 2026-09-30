@@ -1373,6 +1373,11 @@ cd backend; .venv\Scripts\python.exe verify_safety_gimmicks.py  # 周囲カメ�
 
 ## つまずきやすい点
 
+**名前（`mypc.local` など）で開くと「このアドレスからの接続は許可されていません」（403）になる**
+DNS リバインディング対策で、`Host` が IP アドレス・`localhost` 以外の名前のときは断ります。
+`.env` の `DRIVERL_ALLOWED_HOSTS=mypc.local` に書いてから起動し直してください（IP アドレスで開くなら何もしなくてよい）。
+別のサイトからの `/ws` への接続と POST も断ります（`SECURITY.md` の 5）。
+
 **マップの読み込みが終わらない / 失敗する**
 Overpass API の混雑が原因のことが多いです。`backend/data/osmnx_cache/` にキャッシュが残るので、
 時間をおいて `python -m app.map.prefetch` を再実行してください。

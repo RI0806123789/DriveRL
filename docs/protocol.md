@@ -1001,6 +1001,12 @@ asyncio 側から触ると更新中の重みを壊す）。
 WebSocket に載せないものはここに置く。バイナリの受け渡しは、進捗・保存先の選択・中断を
 ブラウザ本来の仕組みに任せられる HTTP のほうが素直なため。
 
+★ **接続元の確認**（`backend/app/host_guard.py`。HTTP と `/ws` の両方）:
+
+- `Host` が IP アドレスそのもの・`localhost`・`DRIVERL_ALLOWED_HOSTS` の名前でなければ `403`（DNS リバインディング対策）
+- `/ws` と、状態を変える HTTP（POST / PUT / PATCH / DELETE）は、`Origin` が同じオリジン（`Origin` の `ホスト:ポート` が `Host` と同じ）か
+  `config.CORS_ORIGINS`（開発用の Vite）でなければ断る（WebSocket は接続を 1008 で閉じる、HTTP は `403`）。`Origin` が無い接続は通す
+
 ### `GET /api/health`
 
 ```jsonc

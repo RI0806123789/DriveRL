@@ -2470,6 +2470,26 @@ OSM キャッシュ・チェックポイント・認識器と教師データ・�
 `.env`（任意。`.env.example` を複製する）で `DRIVERL_HOST` / `DRIVERL_PORT` を変えられます。
 **ポートを変えたら `frontend/vite.config.ts` のプロキシ先も直すこと。**
 
+### 接続元の確認（`app/host_guard.py`）
+
+`HostOriginGuard`（ASGI ミドルウェア。`main.py` で CORS より外側に置く）が、HTTP と WebSocket の両方で
+`Host` を、WebSocket と状態を変える HTTP で `Origin` を確かめます。契約は `docs/protocol.md` 4 章の冒頭、利用者向けは `SECURITY.md` の 5。
+
+- ★ **CORS は WebSocket に効きません。** 以前は `/ws` が接続元を見ずに `accept()` していたので、利用者が開いた別のサイトが
+  `ws://127.0.0.1:8000/ws` へつないで `reset_policy`（学習成果の破棄）や `load_map` を送れました。
+  `Origin` は同じオリジン（`Origin` の `ホスト:ポート` が `Host` と同じ）か `config.CORS_ORIGINS` だけを通します
+- ★ **`Host` は IP アドレスそのもの・`localhost`・`DRIVERL_ALLOWED_HOSTS` の名前だけ。** DNS リバインディングは攻撃者の
+  ドメイン名を 127.0.0.1 へ向け直して同じオリジンに見せかけるので、`Origin` の確認だけでは止まりません（名前で来る）。
+  **IP アドレスは全部通す**のは、スマホから `http://192.168.x.x:8000` で開く使い方（`DRIVERL_HOST=0.0.0.0`）を壊さないため。
+  IP アドレスは向け直せないので、リバインディングには使えません。名前で開くなら `.env` の `DRIVERL_ALLOWED_HOSTS` に書く
+- **開発中の Vite（`-Dev`）は `changeOrigin: true` で `Host` を `127.0.0.1:8000` に書き換えて転送し、`Origin` は
+  `http://localhost:5173` のまま**なので、`CORS_ORIGINS` に 5173 番が入っている限り通ります。Vite の待ち受けを LAN へ開く・
+  ポートを変えるときは `CORS_ORIGINS` も直すこと（Vite 自身の `Host` の確認は Vite 8 の既定に任せている）
+- `Origin` の無い接続（curl・スクリプト）は通します。ブラウザは WebSocket と POST に必ず付けるので、ブラウザ越しの攻撃はこれで止まる。
+  **同じマシンのプログラムからの操作は止めません**（認証が無いという前提は `SECURITY.md` のとおり）
+- 検査は `backend/tests/test_host_guard.py`（名前・IP・IPv6 の `Host`、同じオリジン・開発用・別のサイトの `Origin`、
+  WebSocket を 1008 で閉じるか、GET と `Origin` の無い接続を通すか）
+
 ---
 
 ## プリセットの規模差に注意
