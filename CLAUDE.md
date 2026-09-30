@@ -820,7 +820,21 @@ HTTP 側の `finally` で消すと、504 を返した後にエンジンが
   返答は 1MB まで読み（`MAX_RESPONSE_BYTES`）、モデル名は `MODEL_NAME_PATTERN` の文字だけ（URL のパスに埋めるので、
   `/` や `?` で行き先を変えさせない）。HTTP エラーの本文にキーが入っていたら伏せてからログへ出します
 - **依存は足していない。** issue は `google-genai` を挙げていましたが、`generateContent` の REST を `urllib` で呼べば足ります
+- ★ **Gemini が 500 / 502 / 503 / 504 を返したら、1 秒・2 秒あけて最大 2 回試し直す**（`concierge.RETRY_DELAYS_SEC` /
+  `TRANSIENT_STATUS`。例外の `ConciergeError.transient` が真）。`gemini-3.1-flash-lite` は混雑時に
+  「This model is currently experiencing high demand」の 503 を返し、1 回で諦めていたころは画面に「応答できませんでした」と
+  出るだけでした。**429（枠の使い切り）・400 番台・接続できない・12 秒の時間切れは試し直さない**（429 は数十秒待たないと戻らず、
+  時間切れは試し直すと待ちが倍になる）。試し直しを含めた全体は `ASK_DEADLINE_SEC`（20 秒）で打ち切り、残りが
+  `MIN_ATTEMPT_SEC`（3 秒）未満なら試さない（後の試行の時間切れも残り時間に縮めるので、全体は 20 秒を超えない）
+  - `.env` の `GEMINI_FALLBACK_MODEL` を書くと、**最後の 1 回だけ**そのモデルへ送ります（混雑はモデルごとなので、
+    同じモデルを試し直すより通りやすい）。空なら同じモデルで試し直します
+  - 試し直しても駄目なら `502` で「混み合っていて応答できませんでした」（`CONCIERGE_BUSY_MESSAGE`）と返し、
+    ログは**トレースバック無しの警告 1 行**にします（混雑は想定内の失敗なので、`logger.exception` で毎回 20 行出さない）。
+    それ以外の失敗は従来どおり `logger.exception` と `CONCIERGE_FAILED_MESSAGE` です。
+    画面へ返す文は `transient` から選んだ定数で、**例外の文は載せません**（`test_error_responses.py` が ast で見る）
+  - 試し直しの間も `_concierge_lock` を握っているので、その間に来た問い合わせは `429`（前の質問に答えています）で断ります
 - 停車理由のチップ（`action: "explain"`）は Gemini に言い換えさせ、失敗したら `explain_text()` の決まった文で答えます。
+  ★ **このチップだけは試し直さない**（`retry_delays=()`。決まった文で正しく答えられるので、混雑中に試し直しで待たせる理由が無い）。
   走り方のチップは Gemini を通しません（待たせる理由が無い）
 - 画面: カメラのボタンの下に `taxi-ai-toggle`、地図の下側に `taxi-ai`（`transform` と `opacity` だけで出入りし、跳ねずに
   `--m3-ease-glide` で吸い付く）。配車が終わると閉じて会話も消します。会話は `store/concierge.ts`（`TaxiScreen` は段階で
