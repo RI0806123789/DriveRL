@@ -39,6 +39,8 @@ if GEMINI_API_KEY == GEMINI_API_KEY_PLACEHOLDER:
     # .env.example をそのまま複製しただけなら、キーは無いものとして扱う
     GEMINI_API_KEY = ""
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "").strip() or "gemini-3.1-flash-lite"
+#: GEMINI_MODEL が混み合っているとき、再試行の最後の 1 回だけ使うモデル。空なら GEMINI_MODEL のまま試し直す
+GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "").strip()
 
 PROTOCOL_VERSION = 2
 

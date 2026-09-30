@@ -5,10 +5,11 @@ from __future__ import annotations
 import json
 import math
 import re
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 from app import config
 from app.contracts import (
@@ -25,6 +26,7 @@ from app.contracts import (
 __all__ = [
     "API_URL",
     "QUICK_ACTIONS",
+    "RETRY_DELAYS_SEC",
     "ConciergeError",
     "ConciergeReply",
     "ToolCall",
@@ -38,6 +40,14 @@ __all__ = [
 
 API_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 REQUEST_TIMEOUT_SEC = 12.0
+#: 一時的な混雑・障害とみなす HTTP の状態。429（枠の使い切り）は数十秒待たないと戻らないので含めない
+TRANSIENT_STATUS = frozenset({500, 502, 503, 504})
+#: 一時的な失敗のあと、次を試すまでの間隔 [秒]。要素の数が試し直す回数
+RETRY_DELAYS_SEC = (1.0, 2.0)
+#: 試し直しを含めた問い合わせ全体の締め切り [秒]
+ASK_DEADLINE_SEC = 20.0
+#: 締め切りまでにこれより短い時間しか残らないなら、試し直さない [秒]
+MIN_ATTEMPT_SEC = 3.0
 #: Gemini の返答として読む上限 [バイト]。ふつうの返答は数 KB
 MAX_RESPONSE_BYTES = 1_000_000
 #: モデル名に使ってよい文字。URL のパスへ埋めるので、`/` や `?` で行き先を変えさせない
@@ -114,6 +124,10 @@ _REASON_TEXT = {
 class ConciergeError(RuntimeError):
     """Gemini から返答を得られなかった。**文面は応答に載せず、ログにだけ残すこと。**"""
 
+    def __init__(self, message: str, *, transient: bool = False) -> None:
+        super().__init__(message)
+        self.transient = transient
+
 
 @dataclass
 class ToolCall:
@@ -159,8 +173,10 @@ def _urlopen_transport(url: str, body: bytes, headers: dict[str, str], timeout: 
         with _OPENER.open(request, timeout=timeout) as response:
             raw = response.read(MAX_RESPONSE_BYTES + 1)
     except urllib.error.HTTPError as exc:
-        detail = _redact(exc.read(400).decode("utf-8", errors="replace"), headers)
-        raise ConciergeError(f"Gemini API が {exc.code} を返しました: {detail}") from None
+        detail = " ".join(_redact(exc.read(400).decode("utf-8", errors="replace"), headers).split())
+        raise ConciergeError(
+            f"Gemini API が {exc.code} を返しました: {detail}", transient=exc.code in TRANSIENT_STATUS
+        ) from None
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         raise ConciergeError(f"Gemini API に接続できませんでした（{type(exc).__name__}）") from None
     if len(raw) > MAX_RESPONSE_BYTES:
@@ -271,14 +287,54 @@ def _compose(text: str, calls: list[ToolCall], situation: dict[str, Any]) -> str
     return "".join(pieces) or "すみません、うまく聞き取れませんでした。もう一度お願いします。"
 
 
+def _post_with_retry(
+    urls: Sequence[str],
+    body: bytes,
+    headers: dict[str, str],
+    *,
+    transport: Transport,
+    timeout: float,
+    delays: Sequence[float],
+    deadline: float,
+    clock: Callable[[], float],
+    sleep: Callable[[float], None],
+) -> bytes:
+    """urls を順に試し、一時的な失敗（TRANSIENT_STATUS）のときだけ delays の間隔で次へ進む。"""
+    start = clock()
+    failure: ConciergeError | None = None
+    tried = 0
+    for attempt, url in enumerate(urls):
+        if attempt:
+            wait = delays[attempt - 1]
+            if clock() - start + wait + MIN_ATTEMPT_SEC > deadline:
+                break
+            sleep(wait)
+        tried += 1
+        try:
+            return transport(url, body, headers, min(timeout, deadline - (clock() - start)))
+        except ConciergeError as exc:
+            if not exc.transient:
+                raise
+            failure = exc
+    assert failure is not None
+    if tried == 1:
+        raise failure
+    raise ConciergeError(f"{tried} 回試しても返答を得られませんでした（最後: {failure}）", transient=True) from None
+
+
 def ask(
     message: str,
     situation: dict[str, Any],
     *,
     api_key: str | None = None,
     model: str | None = None,
+    fallback_model: str | None = None,
     transport: Transport = _urlopen_transport,
     timeout: float = REQUEST_TIMEOUT_SEC,
+    retry_delays: Sequence[float] = RETRY_DELAYS_SEC,
+    deadline: float = ASK_DEADLINE_SEC,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> ConciergeReply:
     """乗客の発話を Gemini に渡し、返答と実行するツールを返す。**ブロックするのでエンジンスレッドから呼ばないこと。**"""
     key = config.GEMINI_API_KEY if api_key is None else api_key
@@ -286,12 +342,25 @@ def ask(
         raise ConciergeError("GEMINI_API_KEY が設定されていません")
     text = " ".join(str(message).split())[:MAX_MESSAGE_CHARS]
     name = model or config.GEMINI_MODEL
-    if not MODEL_NAME_PATTERN.fullmatch(name):
-        raise ConciergeError("GEMINI_MODEL に使えない文字が入っています")
-    url = API_URL.format(model=name)
+    backup = config.GEMINI_FALLBACK_MODEL if fallback_model is None else fallback_model
+    if not MODEL_NAME_PATTERN.fullmatch(name) or (backup and not MODEL_NAME_PATTERN.fullmatch(backup)):
+        raise ConciergeError("GEMINI_MODEL か GEMINI_FALLBACK_MODEL に使えない文字が入っています")
+    models = [name] * (len(retry_delays) + 1)
+    if backup and retry_delays:
+        models[-1] = backup
     body = json.dumps(build_request(text, situation), ensure_ascii=False).encode("utf-8")
     headers = {"Content-Type": "application/json", "x-goog-api-key": key}
-    raw = transport(url, body, headers, timeout)
+    raw = _post_with_retry(
+        [API_URL.format(model=m) for m in models],
+        body,
+        headers,
+        transport=transport,
+        timeout=timeout,
+        delays=retry_delays,
+        deadline=deadline,
+        clock=clock,
+        sleep=sleep,
+    )
     try:
         payload = json.loads(raw)
     except (TypeError, ValueError) as exc:

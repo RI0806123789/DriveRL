@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import math
 import re
@@ -56,6 +57,7 @@ CONCIERGE_MAX_BODY_BYTES = 8 * 1024
 CONCIERGE_MIN_INTERVAL_SEC = 1.0
 
 CONCIERGE_FAILED_MESSAGE = "AI コンシェルジュが応答できませんでした。少し待ってからもう一度お試しください"
+CONCIERGE_BUSY_MESSAGE = "AI コンシェルジュが混み合っていて応答できませんでした。少し待ってからもう一度お試しください"
 
 #: Gemini への問い合わせは同時に 1 件だけ（配車も同時に 1 件だけなので、待たせても困らない）
 _concierge_lock = asyncio.Lock()
@@ -775,14 +777,21 @@ async def concierge_endpoint(request: Request) -> JSONResponse:
             return JSONResponse({"ok": False, "error": "前の質問に答えています。少しお待ちください"}, status_code=429)
         _concierge_last_call = time.monotonic()
         text = message if action is None else "いま停まっている理由と、走行の状況を教えてください"
+        retry_delays = () if action == "explain" else concierge.RETRY_DELAYS_SEC
         async with _concierge_lock:
             try:
                 loop = asyncio.get_running_loop()
-                reply = await loop.run_in_executor(None, concierge.ask, str(text), situation)
-            except concierge.ConciergeError:
-                logger.exception("AI コンシェルジュの問い合わせに失敗しました")
+                reply = await loop.run_in_executor(
+                    None, functools.partial(concierge.ask, str(text), situation, retry_delays=retry_delays)
+                )
+            except concierge.ConciergeError as exc:
+                if exc.transient:
+                    logger.warning("AI コンシェルジュ: Gemini が混み合っていて返答を得られませんでした: %s", exc)
+                else:
+                    logger.exception("AI コンシェルジュの問い合わせに失敗しました")
+                error_text = CONCIERGE_BUSY_MESSAGE if exc.transient else CONCIERGE_FAILED_MESSAGE
                 if action != "explain":
-                    return JSONResponse({"ok": False, "error": CONCIERGE_FAILED_MESSAGE}, status_code=502)
+                    return JSONResponse({"ok": False, "error": error_text}, status_code=502)
                 # 停車理由は状況から決まった文で答えられる
                 reply = concierge.ConciergeReply(concierge.explain_text(situation))
 

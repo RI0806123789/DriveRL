@@ -271,3 +271,120 @@ class TestTransportHardening:
     def test_redirects_are_not_followed(self) -> None:
         handler = concierge._NoRedirect()
         assert handler.redirect_request(None, None, 302, "Found", {}, "https://evil.invalid/") is None
+
+
+class ScriptedTransport:
+    """HTTP の状態の列を順に返す（None なら成功）。呼ばれるたびに時計を進める。"""
+
+    def __init__(self, script: list[int | None], clock: "FakeClock", took: float = 0.3) -> None:
+        self.script = list(script)
+        self.clock = clock
+        self.took = took
+        self.urls: list[str] = []
+        self.timeouts: list[float] = []
+
+    def __call__(self, url: str, body: bytes, headers: dict[str, str], timeout: float) -> bytes:
+        self.urls.append(url)
+        self.timeouts.append(timeout)
+        self.clock.now += self.took
+        status = self.script.pop(0)
+        if status is None:
+            return gemini_payload({"text": "はい"})
+        raise concierge.ConciergeError(f"{status}", transient=status in concierge.TRANSIENT_STATUS)
+
+
+class FakeClock:
+    def __init__(self) -> None:
+        self.now = 100.0
+        self.slept: list[float] = []
+
+    def __call__(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.slept.append(seconds)
+        self.now += seconds
+
+
+class TestRetry:
+    def _ask(self, transport: ScriptedTransport, clock: FakeClock, **kwargs):
+        kwargs.setdefault("fallback_model", "")
+        return concierge.ask(
+            "x", RIDING, api_key="k", model="m-1", transport=transport, clock=clock, sleep=clock.sleep, **kwargs
+        )
+
+    def test_busy_then_ok_is_retried(self) -> None:
+        clock = FakeClock()
+        fake = ScriptedTransport([503, None], clock)
+        assert self._ask(fake, clock).reply == "はい"
+        assert clock.slept == [1.0]
+        assert [u.split("/")[-1] for u in fake.urls] == ["m-1:generateContent"] * 2
+
+    def test_fallback_model_takes_the_last_attempt(self) -> None:
+        clock = FakeClock()
+        fake = ScriptedTransport([503, 503, None], clock)
+        assert self._ask(fake, clock, fallback_model="m-2").reply == "はい"
+        assert clock.slept == [1.0, 2.0]
+        assert [u.split("/")[-1] for u in fake.urls] == [
+            "m-1:generateContent",
+            "m-1:generateContent",
+            "m-2:generateContent",
+        ]
+
+    def test_gives_up_as_transient(self) -> None:
+        clock = FakeClock()
+        fake = ScriptedTransport([503, 500, 504], clock)
+        with pytest.raises(concierge.ConciergeError) as info:
+            self._ask(fake, clock)
+        assert info.value.transient
+        assert len(fake.urls) == 3
+        assert "3 回" in str(info.value)
+
+    def test_other_errors_are_not_retried(self) -> None:
+        for status in (400, 403, 429):
+            clock = FakeClock()
+            fake = ScriptedTransport([status, None], clock)
+            with pytest.raises(concierge.ConciergeError) as info:
+                self._ask(fake, clock, fallback_model="m-2")
+            assert not info.value.transient
+            assert len(fake.urls) == 1 and clock.slept == []
+
+    def test_no_delays_means_one_try_without_fallback(self) -> None:
+        clock = FakeClock()
+        fake = ScriptedTransport([503, None], clock)
+        with pytest.raises(concierge.ConciergeError) as info:
+            self._ask(fake, clock, retry_delays=(), fallback_model="m-2")
+        assert info.value.transient
+        assert [u.split("/")[-1] for u in fake.urls] == ["m-1:generateContent"]
+
+    def test_deadline_bounds_the_total_wait(self) -> None:
+        clock = FakeClock()
+        fake = ScriptedTransport([503, 503, None], clock, took=8.0)
+        with pytest.raises(concierge.ConciergeError):
+            self._ask(fake, clock)
+        assert len(fake.urls) == 2
+        assert fake.timeouts[0] == concierge.REQUEST_TIMEOUT_SEC
+        assert fake.timeouts[1] == pytest.approx(concierge.ASK_DEADLINE_SEC - 9.0)
+        assert clock.now - 100.0 <= concierge.ASK_DEADLINE_SEC
+
+    def test_fallback_model_name_is_checked(self) -> None:
+        clock = FakeClock()
+        fake = ScriptedTransport([None], clock)
+        with pytest.raises(concierge.ConciergeError):
+            self._ask(fake, clock, fallback_model="../v1/files")
+        assert fake.urls == []
+
+    def test_transport_marks_busy_statuses_transient(self, monkeypatch) -> None:
+        import io
+        import urllib.error
+
+        for status, transient in ((503, True), (500, True), (504, True), (429, False), (400, False)):
+
+            class Opener:
+                def open(self, request, timeout, status=status):
+                    raise urllib.error.HTTPError(request.full_url, status, "x", {}, io.BytesIO(b"{}"))
+
+            monkeypatch.setattr(concierge, "_OPENER", Opener())
+            with pytest.raises(concierge.ConciergeError) as info:
+                concierge._urlopen_transport("https://example.invalid", b"{}", {}, 1.0)
+            assert info.value.transient is transient, status
