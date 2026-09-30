@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -37,6 +38,10 @@ __all__ = [
 
 API_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 REQUEST_TIMEOUT_SEC = 12.0
+#: Gemini の返答として読む上限 [バイト]。ふつうの返答は数 KB
+MAX_RESPONSE_BYTES = 1_000_000
+#: モデル名に使ってよい文字。URL のパスへ埋めるので、`/` や `?` で行き先を変えさせない
+MODEL_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 MAX_MESSAGE_CHARS = 200
 MAX_REPLY_CHARS = 240
 
@@ -133,16 +138,34 @@ def available() -> bool:
     return bool(config.GEMINI_API_KEY)
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """転送先へ API キーのヘッダを持って行かないよう、リダイレクトに従わない。"""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
+def _redact(text: str, headers: dict[str, str]) -> str:
+    key = headers.get("x-goog-api-key", "")
+    return text.replace(key, "***") if key else text
+
+
 def _urlopen_transport(url: str, body: bytes, headers: dict[str, str], timeout: float) -> bytes:
     request = urllib.request.Request(url, data=body, headers=headers, method="POST")
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            return response.read()
+        with _OPENER.open(request, timeout=timeout) as response:
+            raw = response.read(MAX_RESPONSE_BYTES + 1)
     except urllib.error.HTTPError as exc:
-        detail = exc.read(400).decode("utf-8", errors="replace")
-        raise ConciergeError(f"Gemini API が {exc.code} を返しました: {detail}") from exc
+        detail = _redact(exc.read(400).decode("utf-8", errors="replace"), headers)
+        raise ConciergeError(f"Gemini API が {exc.code} を返しました: {detail}") from None
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        raise ConciergeError("Gemini API に接続できませんでした") from exc
+        raise ConciergeError(f"Gemini API に接続できませんでした（{type(exc).__name__}）") from None
+    if len(raw) > MAX_RESPONSE_BYTES:
+        raise ConciergeError("Gemini の返答が大きすぎます")
+    return raw
 
 
 def build_request(message: str, situation: dict[str, Any]) -> dict[str, Any]:
@@ -262,7 +285,10 @@ def ask(
     if not key:
         raise ConciergeError("GEMINI_API_KEY が設定されていません")
     text = " ".join(str(message).split())[:MAX_MESSAGE_CHARS]
-    url = API_URL.format(model=model or config.GEMINI_MODEL)
+    name = model or config.GEMINI_MODEL
+    if not MODEL_NAME_PATTERN.fullmatch(name):
+        raise ConciergeError("GEMINI_MODEL に使えない文字が入っています")
+    url = API_URL.format(model=name)
     body = json.dumps(build_request(text, situation), ensure_ascii=False).encode("utf-8")
     headers = {"Content-Type": "application/json", "x-goog-api-key": key}
     raw = transport(url, body, headers, timeout)

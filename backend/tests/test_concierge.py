@@ -216,3 +216,58 @@ class TestTaxiDriveMode:
         assert env.drive_style == TAXI_DRIVE_NORMAL
         assert taxi.status.drive_mode == TAXI_DRIVE_NORMAL
         assert taxi.describe(env)["stopReason"] == "idle"
+
+
+class TestTransportHardening:
+    class _Response:
+        def __init__(self, raw: bytes) -> None:
+            self.raw = raw
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc) -> None:
+            return None
+
+        def read(self, limit: int = -1) -> bytes:
+            return self.raw if limit < 0 else self.raw[:limit]
+
+    def _opener(self, monkeypatch, behaviour):
+        class Opener:
+            def open(self, request, timeout):
+                return behaviour(request)
+
+        monkeypatch.setattr(concierge, "_OPENER", Opener())
+
+    def test_model_name_cannot_change_the_url(self) -> None:
+        fake = FakeTransport(gemini_payload({"text": "はい"}))
+        for bad in ("../../v1/files", "m?key=x", "m#x", "a/b"):
+            with pytest.raises(concierge.ConciergeError):
+                concierge.ask("x", RIDING, api_key="k", model=bad, transport=fake)
+        assert fake.calls == []
+
+    def test_oversized_response_is_rejected(self, monkeypatch) -> None:
+        big = b"x" * (concierge.MAX_RESPONSE_BYTES + 10)
+        self._opener(monkeypatch, lambda request: self._Response(big))
+        with pytest.raises(concierge.ConciergeError):
+            concierge._urlopen_transport("https://example.invalid", b"{}", {}, 1.0)
+
+    def test_http_error_detail_never_contains_the_key(self, monkeypatch) -> None:
+        import io
+        import urllib.error
+
+        def fail(request):
+            body = io.BytesIO(b'{"error": "bad key secret-key-123"}')
+            raise urllib.error.HTTPError(request.full_url, 400, "Bad Request", {}, body)
+
+        self._opener(monkeypatch, fail)
+        with pytest.raises(concierge.ConciergeError) as info:
+            concierge._urlopen_transport(
+                "https://example.invalid", b"{}", {"x-goog-api-key": "secret-key-123"}, 1.0
+            )
+        assert "secret-key-123" not in str(info.value)
+        assert info.value.__cause__ is None
+
+    def test_redirects_are_not_followed(self) -> None:
+        handler = concierge._NoRedirect()
+        assert handler.redirect_request(None, None, 302, "Found", {}, "https://evil.invalid/") is None

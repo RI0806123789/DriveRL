@@ -49,10 +49,16 @@ IMPORT_TIMEOUT_SEC = 120.0
 #: AI コンシェルジュが配車の状況を待つ時間 [秒]。エンジンスレッドは 50ms ごとに inbox を見る
 CONCIERGE_SITUATION_TIMEOUT_SEC = 2.0
 
+#: 受け付ける本文の上限 [バイト]。発言は 200 文字で切るので、これを超えるのは正しい画面からの要求ではない
+CONCIERGE_MAX_BODY_BYTES = 8 * 1024
+#: Gemini へ問い合わせる最短の間隔 [秒]。連打や外からの繰り返しで API の枠を使い切らせない
+CONCIERGE_MIN_INTERVAL_SEC = 1.0
+
 CONCIERGE_FAILED_MESSAGE = "AI コンシェルジュが応答できませんでした。少し待ってからもう一度お試しください"
 
 #: Gemini への問い合わせは同時に 1 件だけ（配車も同時に 1 件だけなので、待たせても困らない）
 _concierge_lock = asyncio.Lock()
+_concierge_last_call = -math.inf
 
 _background_tasks: set[asyncio.Task[Any]] = set()
 
@@ -722,9 +728,20 @@ async def concierge_endpoint(request: Request) -> JSONResponse:
     """乗客の発話かチップの操作を受け、返答と実行した操作を返す。**Gemini の待ちはエンジンスレッドに乗せない。**"""
     from app.runtime import concierge
 
+    global _concierge_last_call
+    # 別のサイトからのフォーム送信（プリフライトの要らない text/plain など）を通さない。
+    #   application/json にするとブラウザがプリフライトを挟み、CORS で許した画面からしか送れなくなる
+    media_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if media_type != "application/json":
+        return JSONResponse({"ok": False, "error": "Content-Type は application/json にしてください"}, status_code=415)
+    raw = bytearray()
+    async for chunk in request.stream():
+        raw.extend(chunk)
+        if len(raw) > CONCIERGE_MAX_BODY_BYTES:
+            return JSONResponse({"ok": False, "error": "本文が大きすぎます"}, status_code=413)
     try:
-        body = await request.json()
-    except ValueError:
+        body = orjson.loads(bytes(raw))
+    except orjson.JSONDecodeError:
         body = None
     if not isinstance(body, dict):
         return JSONResponse({"ok": False, "error": "JSON のオブジェクトを送ってください"}, status_code=400)
@@ -751,8 +768,9 @@ async def concierge_endpoint(request: Request) -> JSONResponse:
     if action in (concierge.TAXI_DRIVE_HURRY, concierge.TAXI_DRIVE_COMFORT, concierge.TAXI_DRIVE_NORMAL):
         reply = concierge.quick_reply(str(action), situation)
     else:
-        if _concierge_lock.locked():
+        if _concierge_lock.locked() or time.monotonic() - _concierge_last_call < CONCIERGE_MIN_INTERVAL_SEC:
             return JSONResponse({"ok": False, "error": "前の質問に答えています。少しお待ちください"}, status_code=429)
+        _concierge_last_call = time.monotonic()
         text = message if action is None else "いま停まっている理由と、走行の状況を教えてください"
         async with _concierge_lock:
             try:

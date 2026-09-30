@@ -812,6 +812,13 @@ HTTP 側の `finally` で消すと、504 を返した後にエンジンが
 - ★ **HTTP の応答に Gemini の例外の文を載せないこと**（「コードの書き方」の CodeQL の約束）。HTTP エラーの本文はログにだけ残します。
   **API キーはヘッダ（`x-goog-api-key`）で送り、URL にも本文にも入れない**（`tests/test_concierge.py` が検査）。
   `GET /api/taxi/concierge` はキーの有無だけを返します。`.env.example` の雛形の値（`your_gemini_api_key_here`）はキー無しとして扱います
+- ★ **`POST /api/taxi/concierge` は `Content-Type: application/json` 以外を 415 で断ること。** `request.json()` は
+  Content-Type を見ずに読むので、断らないと別のサイトが `text/plain` のフォーム送信（プリフライトが要らない）で
+  Gemini の枠を使い、緊急停止まで起こせます（CORS は応答を読ませないだけで、要求そのものは通る）。
+  本文は 8KB まで読み（`CONCIERGE_MAX_BODY_BYTES`）、Gemini への問い合わせは 1 秒に 1 回まで（`CONCIERGE_MIN_INTERVAL_SEC`）
+- ★ **Gemini への HTTP はリダイレクトに従わない**（`concierge._NoRedirect`。urllib は転送先へ `x-goog-api-key` を持って行く）。
+  返答は 1MB まで読み（`MAX_RESPONSE_BYTES`）、モデル名は `MODEL_NAME_PATTERN` の文字だけ（URL のパスに埋めるので、
+  `/` や `?` で行き先を変えさせない）。HTTP エラーの本文にキーが入っていたら伏せてからログへ出します
 - **依存は足していない。** issue は `google-genai` を挙げていましたが、`generateContent` の REST を `urllib` で呼べば足ります
 - 停車理由のチップ（`action: "explain"`）は Gemini に言い換えさせ、失敗したら `explain_text()` の決まった文で答えます。
   走り方のチップは Gemini を通しません（待たせる理由が無い）
