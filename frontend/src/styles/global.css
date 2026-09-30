@@ -2890,6 +2890,339 @@ button.m3-chip:active:not(:disabled) {
     animation: none;
   }
 }
+
+/* ----------------------------------------------------------------
+ * AI コンシェルジュ（実用モード）
+ * 車載カメラと同じく地図の上へ重ねる。動かすのは transform と opacity（と色）だけで、
+ * 開閉でスマホ画面の高さもボタンの位置も変わらない。
+ * ---------------------------------------------------------------- */
+
+.taxi-ai {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  max-height: 100%;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 4;
+}
+
+.taxi-ai-inner {
+  margin: 8px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-radius: var(--m3-shape-lg);
+  border: 1px solid var(--m3-outline-variant);
+  background: var(--m3-surface-container-high);
+  color: var(--m3-on-surface);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.22);
+  pointer-events: none;
+  /* 閉じている間は地図の下端の外へ退避させる（幅・高さは動かさない） */
+  transform: translateY(calc(100% + 12px));
+  opacity: 0;
+  transition:
+    transform var(--m3-dur-long) var(--m3-ease-emphasized-accel),
+    opacity var(--m3-dur-medium) var(--m3-ease-standard);
+}
+
+/* 開くときは跳ねずに吸い付くように減速する */
+.taxi-ai[data-on='true'] .taxi-ai-inner {
+  pointer-events: auto;
+  transform: translateY(0);
+  opacity: 1;
+  transition:
+    transform var(--m3-dur-xlong) var(--m3-ease-glide),
+    opacity var(--m3-dur-medium) var(--m3-ease-glide);
+}
+
+.taxi-ai-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--m3-primary);
+}
+
+.taxi-ai-title {
+  flex: 1 1 auto;
+}
+
+.taxi-ai-mode {
+  padding: 1px 8px;
+  border-radius: var(--m3-shape-full);
+  background: var(--m3-surface-container-highest);
+  color: var(--m3-on-surface-variant);
+  font-size: 10px;
+  font-weight: 500;
+  transition:
+    background-color var(--m3-dur-medium) var(--m3-ease-standard),
+    color var(--m3-dur-medium) var(--m3-ease-standard);
+}
+
+.taxi-ai-mode[data-mode='hurry'] {
+  background: var(--m3-tertiary-container);
+  color: var(--m3-on-tertiary-container);
+}
+
+.taxi-ai-mode[data-mode='comfort'] {
+  background: var(--m3-secondary-container);
+  color: var(--m3-on-secondary-container);
+}
+
+.taxi-ai-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: var(--m3-shape-full);
+  background: transparent;
+  color: var(--m3-on-surface-variant);
+  cursor: pointer;
+  transition:
+    background-color var(--m3-dur-short) var(--m3-ease-standard),
+    transform var(--m3-dur-short) var(--m3-ease-standard);
+}
+
+.taxi-ai-close:hover {
+  background: var(--m3-surface-container-highest);
+}
+
+.taxi-ai-close:active {
+  transform: scale(0.92);
+}
+
+.taxi-ai-said {
+  align-self: flex-end;
+  max-width: 86%;
+  padding: 4px 10px;
+  border-radius: var(--m3-shape-md);
+  background: var(--m3-primary-container);
+  color: var(--m3-on-primary-container);
+  font-size: 11px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.taxi-ai-card {
+  padding: 8px 10px;
+  border-radius: var(--m3-shape-md);
+  background: var(--m3-surface-container-lowest);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  animation: taxi-ai-card-in var(--m3-dur-long) var(--m3-ease-glide) both;
+}
+
+.taxi-ai-card[data-role='error'] {
+  background: var(--m3-error-container);
+  color: var(--m3-on-error-container);
+}
+
+.taxi-ai-card[data-pending='true'] {
+  color: var(--m3-on-surface-variant);
+  animation:
+    taxi-ai-card-in var(--m3-dur-long) var(--m3-ease-glide) both,
+    taxi-ai-thinking 1.4s ease-in-out var(--m3-dur-long) infinite;
+}
+
+@keyframes taxi-ai-card-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes taxi-ai-thinking {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+.taxi-ai-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.taxi-ai-chip {
+  padding: 5px 10px;
+  border: 1px solid var(--m3-outline-variant);
+  border-radius: var(--m3-shape-full);
+  background: transparent;
+  color: var(--m3-on-surface);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  transition:
+    background-color var(--m3-dur-medium) var(--m3-ease-standard),
+    border-color var(--m3-dur-medium) var(--m3-ease-standard),
+    color var(--m3-dur-medium) var(--m3-ease-standard),
+    transform var(--m3-dur-short) var(--m3-ease-standard);
+}
+
+.taxi-ai-chip:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.taxi-ai-chip:not(:disabled):active {
+  transform: scale(0.96);
+}
+
+.taxi-ai-chip[data-active='true'] {
+  background: var(--m3-secondary-container);
+  border-color: transparent;
+  color: var(--m3-on-secondary-container);
+}
+
+.taxi-ai-form {
+  display: flex;
+  gap: 6px;
+}
+
+.taxi-ai-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 7px 10px;
+  border: 1px solid var(--m3-outline-variant);
+  border-radius: var(--m3-shape-full);
+  background: var(--m3-surface-container-lowest);
+  color: var(--m3-on-surface);
+  font: inherit;
+  font-size: 12px;
+  outline: none;
+  transition: border-color var(--m3-dur-short) var(--m3-ease-standard);
+}
+
+.taxi-ai-input:focus {
+  border-color: var(--m3-primary);
+}
+
+.taxi-ai-send {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: none;
+  border-radius: var(--m3-shape-full);
+  background: var(--m3-primary);
+  color: var(--m3-on-primary);
+  cursor: pointer;
+  transition:
+    background-color var(--m3-dur-medium) var(--m3-ease-standard),
+    transform var(--m3-dur-short) var(--m3-ease-standard);
+}
+
+.taxi-ai-send:disabled {
+  background: var(--m3-surface-container-highest);
+  color: var(--m3-on-surface-variant);
+  cursor: default;
+}
+
+.taxi-ai-send:not(:disabled):active {
+  transform: scale(0.92);
+}
+
+/* ---------- AI コンシェルジュの開閉ボタン（カメラのボタンと同じ見た目） ---------- */
+
+.taxi-ai-toggle {
+  width: 100%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 9px 14px;
+  border: 1px solid var(--m3-outline-variant);
+  border-radius: var(--m3-shape-lg);
+  background: transparent;
+  color: var(--m3-on-surface);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition:
+    background-color var(--m3-dur-medium) var(--m3-ease-emphasized),
+    border-color var(--m3-dur-medium) var(--m3-ease-emphasized),
+    color var(--m3-dur-medium) var(--m3-ease-emphasized),
+    transform var(--m3-dur-short) var(--m3-ease-standard);
+}
+
+.taxi-ai-toggle:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.taxi-ai-toggle:not(:disabled):active {
+  transform: scale(0.972);
+}
+
+.taxi-ai-toggle[data-on='true'] {
+  background: var(--m3-primary-container);
+  border-color: transparent;
+  color: var(--m3-on-primary-container);
+}
+
+.taxi-ai-toggle-icon {
+  display: inline-flex;
+  transition: transform var(--m3-dur-long) var(--m3-ease-glide);
+}
+
+.taxi-ai-toggle[data-on='true'] .taxi-ai-toggle-icon {
+  transform: rotate(18deg) scale(1.1);
+}
+
+.taxi-ai-toggle-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--m3-outline);
+  opacity: 0.45;
+  transform: scale(0.6);
+  transition:
+    transform var(--m3-dur-medium) var(--m3-ease-glide),
+    opacity var(--m3-dur-medium) var(--m3-ease-standard),
+    background-color var(--m3-dur-medium) var(--m3-ease-standard);
+}
+
+.taxi-ai-toggle-dot[data-on='true'] {
+  background: var(--m3-primary);
+  opacity: 1;
+  transform: scale(1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .taxi-ai-inner,
+  .taxi-ai[data-on='true'] .taxi-ai-inner,
+  .taxi-ai-toggle,
+  .taxi-ai-toggle-icon,
+  .taxi-ai-toggle-dot,
+  .taxi-ai-chip,
+  .taxi-ai-mode {
+    transition-duration: 1ms !important;
+    transition-delay: 0s !important;
+  }
+  .taxi-ai-card,
+  .taxi-ai-card[data-pending='true'] {
+    animation: none;
+  }
+}
 .taxi-map-recenter:hover {
   transform: scale(1.04);
 }

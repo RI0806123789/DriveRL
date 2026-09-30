@@ -32,12 +32,23 @@ CHECKPOINT_PATH = CHECKPOINT_DIR / "shared_policy.pt"
 HOST = os.getenv("DRIVERL_HOST", "127.0.0.1")
 PORT = int(os.getenv("DRIVERL_PORT", "8000"))
 
+#: 実用モードの AI コンシェルジュ（`runtime/concierge.py`）が使う Gemini の API キー。空なら使えない（画面のボタンも押せない）
+GEMINI_API_KEY_PLACEHOLDER = "your_gemini_api_key_here"
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+if GEMINI_API_KEY == GEMINI_API_KEY_PLACEHOLDER:
+    # .env.example をそのまま複製しただけなら、キーは無いものとして扱う
+    GEMINI_API_KEY = ""
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "").strip() or "gemini-3.1-flash-lite"
+
 PROTOCOL_VERSION = 2
 
 CORS_ORIGINS = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
 ]
+
+#: IP アドレスと localhost のほかに、Host として受け付ける名前（カンマ区切り。例: mypc.local）。app/host_guard.py
+ALLOWED_HOSTS = [h.strip() for h in os.getenv("DRIVERL_ALLOWED_HOSTS", "").split(",") if h.strip()]
 
 SIM_HZ = 20.0
 DT = 1.0 / SIM_HZ

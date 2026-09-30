@@ -212,3 +212,17 @@ export const GaugeIcon = (p: IconProps) => (
     <path d="M12 17l4.2-4.8" />
   </Svg>
 )
+
+export const SparkleIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M12 3.5l1.9 5.1 5.1 1.9-5.1 1.9L12 17.5l-1.9-5.1L5 10.5l5.1-1.9z" />
+    <path d="M18.5 15.5l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8z" />
+  </Svg>
+)
+
+export const SendIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M4 12l16-7-6.5 15-2.6-6.4z" />
+    <path d="M10.9 13.6L20 5" />
+  </Svg>
+)

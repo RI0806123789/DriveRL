@@ -561,6 +561,9 @@ export interface DetectorMessage {
 /** 実用モードの配車の段階（2.10 taxi）。 */
 export type TaxiPhase = 'idle' | 'approaching' | 'waiting' | 'riding' | 'arrived'
 
+/** 配車中の車の走り方（`contracts.TAXI_DRIVE_MODES`）。AI コンシェルジュが切り替える */
+export type TaxiDriveMode = 'normal' | 'hurry' | 'comfort'
+
 /** その段階で車に乗っているか。**`arrived` も乗ったまま**（降車は alight_taxi で確定する） */
 export function isRidingPhase(phase: TaxiPhase): boolean {
   return phase === 'riding' || phase === 'arrived'
@@ -593,6 +596,8 @@ export interface TaxiMessage {
   etaSeconds: number
   remainingDistanceM: number
   message: string
+  /** いまの走り方。配車が始まるたびに normal へ戻る */
+  driveMode: TaxiDriveMode
 }
 
 /** `docs/protocol.md` のエラーコード表が唯一の出典。 */

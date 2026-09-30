@@ -781,6 +781,53 @@ HTTP 側の `finally` で消すと、504 を返した後にエンジンが
   | **`frame` へ返さない** | クライアントは自分のキャラを自分で描いている。返すと二重に描く |
   | **街に立つのは 1 人だけ** | 接続ごとには持たない（配車が同時 1 件なのと同じ前提）。複数タブでは最後に届いた位置が勝つ |
   | **`request_taxi` の `pickup` と混ぜない** | `pickup` は配車 1 件のあいだ動かない目標地点（迎えに行く先）、`player_pose` は 1 秒で消える現在位置（止まる相手）。片方だけにすると「迎えには来るが目の前で止まらない」か「止まるが迎えに行く先が決まらない」になる |
+### AI コンシェルジュ（`runtime/concierge.py` / `panel/TaxiAiView.tsx`。#79）
+
+実用モードのスマホ画面から、乗客が Gemini（既定 `gemini-3.1-flash-lite`。`config.GEMINI_MODEL`）に話しかけて、
+配車中の車の走り方（`contracts.TAXI_DRIVE_MODES`）を変えたり停まっている理由を聞いたりします。
+契約は `docs/protocol.md` 4 章（`POST /api/taxi/concierge`）と 2.10 の `driveMode` です。
+
+| 流れ | どこで |
+|---|---|
+| 状況を作る | エンジンスレッドが inbox の `taxi_situation` で `TaxiService.describe()` を 1 回埋める（`SituationTicket`）|
+| Gemini に問い合わせる | HTTP 側の `run_in_executor`（`concierge.ask`）。同時に 1 件だけ（`_concierge_lock`）|
+| 決めた操作を反映する | `engine.taxi_command("drive_mode" / "halt")` → 次のステップ境界で `TaxiService.set_drive_mode` / `cancel(halt=True)` |
+
+- ★ **Gemini の待ち（数百 ms〜数秒）をエンジンスレッドに乗せないこと。** エンジンスレッドがするのは状況の辞書を
+  作ることだけ（`_lead_gap` / `_pedestrian_gap` / `next_signal` を 1 回ずつ）
+- ★ **Gemini に渡すツールは 3 つだけ**（`set_driving_mode` / `request_emergency_stop` / `explain_status`）。
+  信号・制限速度・車間を緩めるツールを足さないこと。返ってきた呼び出しは `sanitize_calls` が知らない名前・値域外・
+  配車していないときの操作を捨てます（モデルの言うことをそのまま実行しない）
+- ★ **走り方（`env.DRIVE_STYLES`）が変えてよいのは、経路追従自身のアクセル（目標速度の割合 ≤ 1・利き・踏み込みの速さ）と、
+  前走車・歩行者の手前に「足す」余裕だけ。** 速度の上限（`constrain_accel` に渡す `limit`）は下げることしかしません。
+  掛かるのは配車中の 1 台（`commandeered_slot`）だけで、`normal` は以前の経路追従と 1 ビットも同じです
+  （合成の碁盤の目の 4 通りで、全車の軌跡のハッシュが main と一致）
+- ★ **「曲がっている間は加速しない」を走り方で緩めないこと。** `hurry` で曲がりながら踏めるようにしたら所要は
+  62.2 → 53.0 秒に縮んだ代わりに、事故が 4 回中 1 → 2 回に増えました。いまの `hurry` は踏み込みを速くするだけなので、
+  もともと上限まで出している区間では差が出ません（62.2 → 61.8 秒。`comfort` は 92.0 秒）
+- ★ **停車理由（`env.hold_reason`）と配車の停滞判定（`env.traffic_hold`）は同じ関数から出す。** 止める余裕も
+  `_headway_margin` / `_pedestrian_margin` の 1 か所で、`step()` の上限と同じ値を見ます（`comfort` で余裕を足したのに
+  停滞判定だけ元の余裕を見ると、止まっているのに「止められていない」と数えて迎車を引き継いでしまう）
+- **走り方は配車 1 件ごと。** 新しい配車・取り消し・降車で `normal` へ戻し、迎車の引き継ぎでは持ち越します
+- ★ **HTTP の応答に Gemini の例外の文を載せないこと**（「コードの書き方」の CodeQL の約束）。HTTP エラーの本文はログにだけ残します。
+  **API キーはヘッダ（`x-goog-api-key`）で送り、URL にも本文にも入れない**（`tests/test_concierge.py` が検査）。
+  `GET /api/taxi/concierge` はキーの有無だけを返します。`.env.example` の雛形の値（`your_gemini_api_key_here`）はキー無しとして扱います
+- ★ **`POST /api/taxi/concierge` は `Content-Type: application/json` 以外を 415 で断ること。** `request.json()` は
+  Content-Type を見ずに読むので、断らないと別のサイトが `text/plain` のフォーム送信（プリフライトが要らない）で
+  Gemini の枠を使い、緊急停止まで起こせます（CORS は応答を読ませないだけで、要求そのものは通る）。
+  本文は 8KB まで読み（`CONCIERGE_MAX_BODY_BYTES`）、Gemini への問い合わせは 1 秒に 1 回まで（`CONCIERGE_MIN_INTERVAL_SEC`）
+- ★ **Gemini への HTTP はリダイレクトに従わない**（`concierge._NoRedirect`。urllib は転送先へ `x-goog-api-key` を持って行く）。
+  返答は 1MB まで読み（`MAX_RESPONSE_BYTES`）、モデル名は `MODEL_NAME_PATTERN` の文字だけ（URL のパスに埋めるので、
+  `/` や `?` で行き先を変えさせない）。HTTP エラーの本文にキーが入っていたら伏せてからログへ出します
+- **依存は足していない。** issue は `google-genai` を挙げていましたが、`generateContent` の REST を `urllib` で呼べば足ります
+- 停車理由のチップ（`action: "explain"`）は Gemini に言い換えさせ、失敗したら `explain_text()` の決まった文で答えます。
+  走り方のチップは Gemini を通しません（待たせる理由が無い）
+- 画面: カメラのボタンの下に `taxi-ai-toggle`、地図の下側に `taxi-ai`（`transform` と `opacity` だけで出入りし、跳ねずに
+  `--m3-ease-glide` で吸い付く）。配車が終わると閉じて会話も消します。会話は `store/concierge.ts`（`TaxiScreen` は段階で
+  作り直されるので、ローカル state に置かない）。描画テストは `panel/__tests__/TaxiAiView.test.ts`
+- `?mock=1` ではコンシェルジュを塞いであります（HTTP を使うため。書き出し・読み込みと同じ）
+- **開閉で 3D のフレームが落ちないかは、まだ実測していません**（ブラウザで測る必要がある）
+
 ### 配車の自動操作（`store/taxiAutopilot.ts`）
 
 スマホ画面の**時計を続けて 5 回叩く**と、配車を最初から最後まで自分で回します
@@ -1434,7 +1481,7 @@ pointerdown のときしか走らないので、1 回ぶんのリフローは無
 モックは frame / metrics / network と、認識器の学習の疑似ジョブ、
 実用モードの配車（迎車 → 乗車 → 到着 → 降車）まで返すので、
 **サーバーを起動せずに見た目と遷移を確かめられます。** 実物のモデルが無いので
-書き出し・読み込みだけは塞いであります。
+書き出し・読み込みは塞いであります（HTTP を使う AI コンシェルジュも同じ）。
 
 | ファイル | 受け持ち |
 |---|---|
@@ -2422,6 +2469,26 @@ OSM キャッシュ・チェックポイント・認識器と教師データ・�
 
 `.env`（任意。`.env.example` を複製する）で `DRIVERL_HOST` / `DRIVERL_PORT` を変えられます。
 **ポートを変えたら `frontend/vite.config.ts` のプロキシ先も直すこと。**
+
+### 接続元の確認（`app/host_guard.py`）
+
+`HostOriginGuard`（ASGI ミドルウェア。`main.py` で CORS より外側に置く）が、HTTP と WebSocket の両方で
+`Host` を、WebSocket と状態を変える HTTP で `Origin` を確かめます。契約は `docs/protocol.md` 4 章の冒頭、利用者向けは `SECURITY.md` の 5。
+
+- ★ **CORS は WebSocket に効きません。** 以前は `/ws` が接続元を見ずに `accept()` していたので、利用者が開いた別のサイトが
+  `ws://127.0.0.1:8000/ws` へつないで `reset_policy`（学習成果の破棄）や `load_map` を送れました。
+  `Origin` は同じオリジン（`Origin` の `ホスト:ポート` が `Host` と同じ）か `config.CORS_ORIGINS` だけを通します
+- ★ **`Host` は IP アドレスそのもの・`localhost`・`DRIVERL_ALLOWED_HOSTS` の名前だけ。** DNS リバインディングは攻撃者の
+  ドメイン名を 127.0.0.1 へ向け直して同じオリジンに見せかけるので、`Origin` の確認だけでは止まりません（名前で来る）。
+  **IP アドレスは全部通す**のは、スマホから `http://192.168.x.x:8000` で開く使い方（`DRIVERL_HOST=0.0.0.0`）を壊さないため。
+  IP アドレスは向け直せないので、リバインディングには使えません。名前で開くなら `.env` の `DRIVERL_ALLOWED_HOSTS` に書く
+- **開発中の Vite（`-Dev`）は `changeOrigin: true` で `Host` を `127.0.0.1:8000` に書き換えて転送し、`Origin` は
+  `http://localhost:5173` のまま**なので、`CORS_ORIGINS` に 5173 番が入っている限り通ります。Vite の待ち受けを LAN へ開く・
+  ポートを変えるときは `CORS_ORIGINS` も直すこと（Vite 自身の `Host` の確認は Vite 8 の既定に任せている）
+- `Origin` の無い接続（curl・スクリプト）は通します。ブラウザは WebSocket と POST に必ず付けるので、ブラウザ越しの攻撃はこれで止まる。
+  **同じマシンのプログラムからの操作は止めません**（認証が無いという前提は `SECURITY.md` のとおり）
+- 検査は `backend/tests/test_host_guard.py`（名前・IP・IPv6 の `Host`、同じオリジン・開発用・別のサイトの `Origin`、
+  WebSocket を 1008 で閉じるか、GET と `Origin` の無い接続を通すか）
 
 ---
 

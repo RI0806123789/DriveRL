@@ -15,8 +15,11 @@ from app.contracts import (
     TAXI_PHASE_IDLE,
     TAXI_PHASE_RIDING,
     TAXI_PHASE_WAITING,
+    TAXI_DRIVE_MODES,
+    TAXI_DRIVE_NORMAL,
     TaxiStatus,
 )
+from app.sim.signals import GREEN, YELLOW
 
 if TYPE_CHECKING:
     from app.sim.env import SimulationEnv
@@ -45,6 +48,9 @@ STALL_HELD_TIMEOUT_SEC = 90.0
 STALL_PROGRESS_M = 1.0
 #: これだけ出ていれば動いているとみなす [m/s]。詰まってはいない
 STALL_MOVING_MPS = 1.0
+
+#: これより遅ければ「止まっている」として停車理由を探す [m/s]
+STOPPED_MPS = 0.5
 
 ETA_MIN_SPEED_MPS = 3.5
 ETA_SPEED_SMOOTH = 0.08
@@ -101,6 +107,7 @@ class TaxiService:
             return "乗車地点まで来られる車両が見つかりませんでした"
 
         env.commandeer_vehicle(slot)
+        env.drive_style = TAXI_DRIVE_NORMAL
         if not world.install_route(slot, route, keep_pose=True):
             env.release_vehicle(slot)
             return "迎車の経路を設定できませんでした"
@@ -162,6 +169,7 @@ class TaxiService:
             return "いまは降車できません"
         arrived = self.status.phase == TAXI_PHASE_ARRIVED
         self._release(env)
+        env.drive_style = TAXI_DRIVE_NORMAL
         self.status = TaxiStatus(
             route_revision=self.status.route_revision + 1,
             message="降車しました" if arrived else "目的地の手前で降車しました",
@@ -181,12 +189,64 @@ class TaxiService:
             env.world.fleet.speed[slot] = np.float32(0.0)
             env.world.fleet.steer[slot] = np.float32(0.0)
         self._release(env)
+        if env is not None:
+            env.drive_style = TAXI_DRIVE_NORMAL
         self._handovers = 0
         self._tried.clear()
         self._reset_stall()
         self.status = TaxiStatus(
             route_revision=self.status.route_revision + 1, message=reason
         )
+
+    def set_drive_mode(self, env: "SimulationEnv", mode: str) -> str | None:
+        """配車中の車の走り方を変える。断る場合はその理由を返す。**速度の上限・信号・車間の判定は変えない。**"""
+        if mode not in TAXI_DRIVE_MODES:
+            return "未知の走り方です"
+        if not self.busy:
+            return "配車中ではないため走り方を変えられません"
+        self.status.drive_mode = mode
+        env.drive_style = mode
+        return None
+
+    def describe(self, env: "SimulationEnv") -> dict[str, object]:
+        """AI コンシェルジュへ渡す、いまの配車と車の状況（真値。数値は丸める）。"""
+        status = self.status
+        situation: dict[str, object] = {
+            "phase": status.phase,
+            "driveMode": status.drive_mode,
+            "stopReason": "idle",
+        }
+        slot = self.vehicle_id
+        world = env.world
+        if not self.busy or not (0 <= slot < config.MAX_VEHICLES) or not world.fleet.active[slot]:
+            return situation
+
+        speed = abs(float(world.fleet.speed[slot]))
+        signal_distance, signal_phase = world.next_signal(slot)
+        lead = env._lead_gap(slot)
+        people = env._pedestrian_gap(slot)
+        situation.update(
+            speedKmh=round(speed * 3.6, 1),
+            etaSeconds=round(float(status.eta_seconds), 0),
+            remainingDistanceM=round(float(status.remaining_distance_m), 0),
+            nextSignalDistanceM=_finite_or_none(signal_distance),
+            nextSignalColor=_signal_color(signal_phase) if math.isfinite(signal_distance) else None,
+            leadVehicleGapM=_finite_or_none(lead),
+            pedestrianAheadM=_finite_or_none(people),
+            stopReason=self._stop_reason(env, slot, speed),
+        )
+        return situation
+
+    def _stop_reason(self, env: "SimulationEnv", slot: int, speed: float) -> str:
+        """止まっている理由。"moving"（走っている）/ "boarding" / "arrived" / env.hold_reason の値 / "stopped"（その他）。"""
+        if self.status.phase == TAXI_PHASE_WAITING:
+            return "boarding"
+        if self.status.phase == TAXI_PHASE_ARRIVED:
+            return "arrived"
+        reason = env.hold_reason(slot)
+        if speed >= STOPPED_MPS:
+            return "moving"
+        return reason or "stopped"
 
     def update(self, env: "SimulationEnv") -> None:
         """毎ステップ呼ぶ。到着判定・ETA の再計算・迎車の引き継ぎ（決定 14）。"""
@@ -367,3 +427,15 @@ class TaxiService:
             self.status.eta_seconds = 0.0
             return
         self.status.eta_seconds = remaining / max(self._speed_avg, ETA_MIN_SPEED_MPS)
+
+
+def _finite_or_none(value: float) -> float | None:
+    return round(float(value), 1) if math.isfinite(float(value)) else None
+
+
+def _signal_color(phase: int) -> str:
+    if int(phase) == GREEN:
+        return "green"
+    if int(phase) == YELLOW:
+        return "yellow"
+    return "red"

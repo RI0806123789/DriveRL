@@ -67,6 +67,9 @@
   --m3-ease-spring-snappy: cubic-bezier(0.32, 1.7, 0.55, 1);
 
   --m3-ease-spring-soft: cubic-bezier(0.22, 1.12, 0.36, 1);
+
+  /* 跳ねずに吸い付くように減速する（AI コンシェルジュの出入り） */
+  --m3-ease-glide: cubic-bezier(0.16, 1, 0.3, 1);
   --m3-dur-xshort: 90ms;
   --m3-dur-short: 150ms;
   --m3-dur-medium: 250ms;

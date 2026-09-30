@@ -12,13 +12,14 @@ from pathlib import PurePath
 from typing import Any
 
 import orjson
-from fastapi import FastAPI, File, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
 from app import config
 from app.contracts import InterventionEvent
 from app.contracts import coerce_bool, validate_hidden_sizes
+from app.host_guard import HostOriginGuard
 from app.runtime.engine import SimulationEngine
 
 logging.basicConfig(
@@ -45,6 +46,20 @@ _TAXI_COMMANDS = {"board_taxi": "board", "alight_taxi": "alight"}
 EXPORT_TIMEOUT_SEC = 60.0
 
 IMPORT_TIMEOUT_SEC = 120.0
+
+#: AI コンシェルジュが配車の状況を待つ時間 [秒]。エンジンスレッドは 50ms ごとに inbox を見る
+CONCIERGE_SITUATION_TIMEOUT_SEC = 2.0
+
+#: 受け付ける本文の上限 [バイト]。発言は 200 文字で切るので、これを超えるのは正しい画面からの要求ではない
+CONCIERGE_MAX_BODY_BYTES = 8 * 1024
+#: Gemini へ問い合わせる最短の間隔 [秒]。連打や外からの繰り返しで API の枠を使い切らせない
+CONCIERGE_MIN_INTERVAL_SEC = 1.0
+
+CONCIERGE_FAILED_MESSAGE = "AI コンシェルジュが応答できませんでした。少し待ってからもう一度お試しください"
+
+#: Gemini への問い合わせは同時に 1 件だけ（配車も同時に 1 件だけなので、待たせても困らない）
+_concierge_lock = asyncio.Lock()
+_concierge_last_call = -math.inf
 
 _background_tasks: set[asyncio.Task[Any]] = set()
 
@@ -556,6 +571,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# 最後に足したものが外側。Host と Origin を CORS より先に確かめる（WebSocket には CORS が効かないため）
+app.add_middleware(HostOriginGuard, allowed_origins=config.CORS_ORIGINS, extra_hosts=config.ALLOWED_HOSTS)
 
 
 @app.get("/api/health")
@@ -699,6 +716,92 @@ async def import_model_endpoint(file: UploadFile = File(...)):
                 logger.warning(
                     "アップロードファイルを削除できませんでした: %s（%s）", dest.name, exc
                 )
+
+
+@app.get("/api/taxi/concierge")
+async def concierge_status_endpoint() -> JSONResponse:
+    """AI コンシェルジュが使えるか（API キーの有無）。キーそのものは返さない。"""
+    from app.runtime import concierge
+
+    return JSONResponse({"available": concierge.available(), "model": config.GEMINI_MODEL})
+
+
+@app.post("/api/taxi/concierge")
+async def concierge_endpoint(request: Request) -> JSONResponse:
+    """乗客の発話かチップの操作を受け、返答と実行した操作を返す。**Gemini の待ちはエンジンスレッドに乗せない。**"""
+    from app.runtime import concierge
+
+    global _concierge_last_call
+    # 別のサイトからのフォーム送信（プリフライトの要らない text/plain など）を通さない。
+    #   application/json にするとブラウザがプリフライトを挟み、CORS で許した画面からしか送れなくなる
+    media_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if media_type != "application/json":
+        return JSONResponse({"ok": False, "error": "Content-Type は application/json にしてください"}, status_code=415)
+    raw = bytearray()
+    async for chunk in request.stream():
+        raw.extend(chunk)
+        if len(raw) > CONCIERGE_MAX_BODY_BYTES:
+            return JSONResponse({"ok": False, "error": "本文が大きすぎます"}, status_code=413)
+    try:
+        body = orjson.loads(bytes(raw))
+    except orjson.JSONDecodeError:
+        body = None
+    if not isinstance(body, dict):
+        return JSONResponse({"ok": False, "error": "JSON のオブジェクトを送ってください"}, status_code=400)
+    action = body.get("action")
+    message = body.get("message")
+    if action is not None and action not in concierge.QUICK_ACTIONS:
+        return JSONResponse({"ok": False, "error": "未知の操作です"}, status_code=400)
+    if action is None and (not isinstance(message, str) or not message.strip()):
+        return JSONResponse({"ok": False, "error": "message か action を指定してください"}, status_code=400)
+    if not concierge.available():
+        return JSONResponse(
+            {"ok": False, "error": "GEMINI_API_KEY が設定されていないため、AI コンシェルジュは使えません"},
+            status_code=503,
+        )
+    if not engine.practical_mode():
+        return JSONResponse({"ok": False, "error": "実用モードでないため使えません"}, status_code=409)
+
+    ticket = engine.request_taxi_situation()
+    finished = await asyncio.to_thread(ticket.done.wait, CONCIERGE_SITUATION_TIMEOUT_SEC)
+    if not finished or ticket.situation is None:
+        return JSONResponse({"ok": False, "error": "車の状況を取得できませんでした"}, status_code=504)
+    situation = ticket.situation
+
+    if action in (concierge.TAXI_DRIVE_HURRY, concierge.TAXI_DRIVE_COMFORT, concierge.TAXI_DRIVE_NORMAL):
+        reply = concierge.quick_reply(str(action), situation)
+    else:
+        if _concierge_lock.locked() or time.monotonic() - _concierge_last_call < CONCIERGE_MIN_INTERVAL_SEC:
+            return JSONResponse({"ok": False, "error": "前の質問に答えています。少しお待ちください"}, status_code=429)
+        _concierge_last_call = time.monotonic()
+        text = message if action is None else "いま停まっている理由と、走行の状況を教えてください"
+        async with _concierge_lock:
+            try:
+                loop = asyncio.get_running_loop()
+                reply = await loop.run_in_executor(None, concierge.ask, str(text), situation)
+            except concierge.ConciergeError:
+                logger.exception("AI コンシェルジュの問い合わせに失敗しました")
+                if action != "explain":
+                    return JSONResponse({"ok": False, "error": CONCIERGE_FAILED_MESSAGE}, status_code=502)
+                # 停車理由は状況から決まった文で答えられる
+                reply = concierge.ConciergeReply(concierge.explain_text(situation))
+
+    drive_mode = str(situation.get("driveMode", concierge.TAXI_DRIVE_NORMAL))
+    for call in reply.calls:
+        if call.name == concierge.TOOL_SET_DRIVING_MODE:
+            drive_mode = str(call.args["mode"])
+            engine.taxi_command("drive_mode", {"mode": drive_mode})
+        elif call.name == concierge.TOOL_EMERGENCY_STOP:
+            engine.taxi_command("halt")
+    return JSONResponse(
+        {
+            "ok": True,
+            "reply": reply.reply,
+            "actions": [call.to_wire() for call in reply.calls],
+            "driveMode": drive_mode,
+            "situation": situation,
+        }
+    )
 
 
 def _weather_presets_wire() -> list[dict[str, Any]]:

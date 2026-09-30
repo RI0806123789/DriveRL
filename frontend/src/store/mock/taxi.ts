@@ -17,6 +17,7 @@ const MOCK_IDLE_TAXI: TaxiMessage = {
   etaSeconds: 0,
   remainingDistanceM: 0,
   message: '',
+  driveMode: 'normal',
 }
 
 /** 乗降地点に「着いた」とみなす距離 [m] と、配車を受け付ける最短距離 [m] */
