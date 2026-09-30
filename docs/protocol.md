@@ -785,7 +785,8 @@ true のときの学習中の車だけ。判断は検出枠と推定距離から
   "route": [[x, y], ...],   // いま向かっている経路。**routeRevision が変わった通だけ入る**
   "etaSeconds": 42.5,       // 到着まで [秒]。毎ステップ引き直す
   "remainingDistanceM": 310.2,
-  "message": "車両 #2 が迎えに向かっています"
+  "message": "車両 #2 が迎えに向かっています",
+  "driveMode": "normal"     // 走り方。normal|hurry|comfort。配車が始まるたびに normal へ戻る（4 章の AI コンシェルジュ）
 }
 ```
 
@@ -1120,6 +1121,49 @@ TorchScript や Keras 形式を渡した場合は、その旨を説明する `40
 **復元される内容**: 方策と価値関数の重み、`log_std`、Adam のモーメント、更新回数。
 ロールアウトバッファは現在の環境と結び付いているためクリアされる。
 エピソード統計（到達率・衝突率など）は前のポリシーのものなので破棄される。
+
+### `GET /api/taxi/concierge` — AI コンシェルジュが使えるか
+
+```jsonc
+{ "available": true, "model": "gemini-3.1-flash-lite" }
+```
+
+`available` は `.env` の `GEMINI_API_KEY` が設定されているか（`.env.example` の雛形のままなら偽）。**キーそのものは返さない。**
+
+### `POST /api/taxi/concierge` — 実用モードの車載 AI コンシェルジュ
+
+乗客の発話（`message`）か、チップの操作（`action`）のどちらかを送る。
+
+```jsonc
+{ "message": "少し急いでもらえますか" }
+{ "action": "hurry" }     // hurry|comfort|normal は Gemini を通さずに走り方を切り替える
+{ "action": "explain" }   // 停車理由。Gemini が言い換え、失敗したら決まった文で答える
+```
+
+成功時:
+
+```jsonc
+{
+  "ok": true,
+  "reply": "走り方を「少し急いで」にしました。制限速度の近くまで早めに加速します（信号と制限速度は守ります）。",
+  "actions": [{ "name": "set_driving_mode", "args": { "mode": "hurry" } }],
+  "driveMode": "hurry",     // この応答の後の走り方（反映は次のステップ。taxi.driveMode でも届く）
+  "situation": {            // Gemini に渡した状況（真値。配車していなければ phase と stopReason だけ）
+    "phase": "riding", "driveMode": "normal", "stopReason": "signal",
+    "speedKmh": 0.0, "etaSeconds": 95, "remainingDistanceM": 480,
+    "nextSignalDistanceM": 3.2, "nextSignalColor": "red",
+    "leadVehicleGapM": null, "pedestrianAheadM": null, "practicalMode": true
+  }
+}
+```
+
+- **Gemini が呼べるツールは 3 つだけ**: `set_driving_mode(mode)`・`request_emergency_stop()`（`cancel_taxi` の `halt` と同じ）・
+  `explain_status()`。信号・制限速度・車間を緩めるツールは無いので、「赤信号でも進んで」と頼まれても安全の判定
+  （`constrain_accel`）は変わらない。走り方が変えるのは経路追従自身のアクセルと、前走車・歩行者の手前に**足す**余裕だけ
+- `stopReason`: `moving` / `signal` / `pedestrian` / `lead_vehicle` / `safety` / `boarding` / `arrived` / `stopped` / `idle`
+- Gemini への問い合わせは HTTP 側のスレッドで行い、エンジンスレッドは状況を 1 回埋めるだけ（待たせない）。同時に 1 件だけ
+- 失敗時は `{"ok": false, "error": "<日本語の理由>"}`。不正な本文は `400`、キーが無いと `503`、実用モードでないと `409`、
+  前の問い合わせの途中なら `429`、Gemini から返答を得られなければ `502`、状況が取れなければ `504`。**例外の文は載せない**
 
 ---
 

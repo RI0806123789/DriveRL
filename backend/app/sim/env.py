@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import math
 import time
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Any, Callable
 
 import numpy as np
@@ -20,6 +20,9 @@ from app.contracts import (
     MapIndex,
     SimParams,
     StepResult,
+    TAXI_DRIVE_COMFORT,
+    TAXI_DRIVE_HURRY,
+    TAXI_DRIVE_NORMAL,
 )
 from app.percep.encoder import encode_observations
 from app.percep.types import (
@@ -86,6 +89,25 @@ AUTOPILOT_PEDESTRIAN_MARGIN_M = (
     config.VEHICLE_LENGTH / 2.0 + config.PEDESTRIAN_RADIUS + AUTOPILOT_PEDESTRIAN_CLEARANCE_M
 )
 
+
+@dataclass(frozen=True)
+class DriveStyle:
+    """配車中の車の経路追従の走り方。目標速度の割合・アクセルの利き・踏み込みの速さ・車間と歩行者の手前に足す余裕 [m]。"""
+
+    speed_ratio: float
+    speed_gain: float
+    press_rate: float
+    extra_headway_m: float
+    extra_pedestrian_m: float
+
+
+#: 走り方（`contracts.TAXI_DRIVE_MODES`）ごとの設定。どれも上限（constrain_accel）より速くは走らず、余裕は足すだけ
+DRIVE_STYLES: dict[str, DriveStyle] = {
+    TAXI_DRIVE_NORMAL: DriveStyle(1.0, AUTOPILOT_SPEED_GAIN, AUTOPILOT_PRESS_RATE, 0.0, 0.0),
+    TAXI_DRIVE_HURRY: DriveStyle(1.0, 1.2, 3.0, 0.0, 0.0),
+    TAXI_DRIVE_COMFORT: DriveStyle(0.8, 0.3, 1.0, 2.5, 1.0),
+}
+
 #: 速度上限がこれ以下まで抑えられていたら「交通に止められている」とみなす [m/s]
 TRAFFIC_HOLD_MPS = 1.0
 
@@ -141,6 +163,8 @@ class SimulationEnv:
         # 実用モードの間は全車を経路追従で走らせる。**学習中は必ず False**
         # （PPO から見た環境が変わってしまう）
         self.autopilot_all: bool = False
+        # 配車中の車（`commandeered_slot`）の走り方。ほかの車には掛けない
+        self.drive_style: str = TAXI_DRIVE_NORMAL
         # 直前のステップで経路追従が出した操作（上限で抑える前）。行動クローニングの教師に使う
         self.autopilot_actions = np.zeros((n, config.ACTION_DIM), dtype=np.float32)
 
@@ -269,15 +293,31 @@ class SimulationEnv:
         # ただし止まっているときは必ず出すこと。切ったまま停まると、
         #   角度が変わらないので二度と発進できなくなる（銀座で 361 秒動かなくなった）
         straight = abs(alpha) < AUTOPILOT_STRAIGHT_RAD
+        style = self._style(slot)
         want = 0.0
         if straight or speed < AUTOPILOT_CREEP_MPS:
-            want = min(1.0, max(0.0, AUTOPILOT_SPEED_GAIN * (float(target_speed) - speed)))
+            cruise = float(target_speed) * style.speed_ratio
+            want = min(1.0, max(0.0, style.speed_gain * (cruise - speed)))
         # 踏み込みと戻しの速さを抑える。安全のための減速は constrain_accel が即座に掛ける
         prev = max(0.0, float(world.throttle[slot]))
-        press = AUTOPILOT_PRESS_RATE * config.DT
+        press = style.press_rate * config.DT
         release = AUTOPILOT_RELEASE_RATE * config.DT
         accel = prev + min(press, max(-release, want - prev))
         return accel, float(np.clip(steer / config.MAX_STEER, -1.0, 1.0))
+
+    def _style(self, slot: int) -> DriveStyle:
+        """そのスロットの経路追従の走り方。配車中の車だけが `drive_style` に従う。"""
+        if int(slot) == int(self.commandeered_slot):
+            return DRIVE_STYLES.get(self.drive_style, DRIVE_STYLES[TAXI_DRIVE_NORMAL])
+        return DRIVE_STYLES[TAXI_DRIVE_NORMAL]
+
+    def _headway_margin(self, slot: int) -> float:
+        """前走車の手前で止める余裕 [m]（車体の中心から）。"""
+        return config.VEHICLE_LENGTH + AUTOPILOT_HEADWAY_M + self._style(slot).extra_headway_m
+
+    def _pedestrian_margin(self, slot: int) -> float:
+        """歩行者の手前で止める余裕 [m]（車体の中心から歩行者の中心まで）。"""
+        return AUTOPILOT_PEDESTRIAN_MARGIN_M + self._style(slot).extra_pedestrian_m
 
     def _autopilot_slots(self, active: np.ndarray) -> np.ndarray:
         """経路追従で走らせるスロット。実用モードでは全車、それ以外は徴用した 1 台だけ。"""
@@ -429,9 +469,13 @@ class SimulationEnv:
 
     def traffic_hold(self, slot: int) -> bool:
         """いま赤信号・前走車・歩行者に止められているか（`runtime/taxi.py` の停滞判定）。"""
+        return self.hold_reason(slot) != ""
+
+    def hold_reason(self, slot: int) -> str:
+        """止められている理由（"safety" / "signal" / "lead_vehicle" / "pedestrian"）。止められていなければ空文字。"""
         slot = int(slot)
         if not (0 <= slot < config.MAX_VEHICLES):
-            return False
+            return ""
         decel = abs(config.MAX_DECEL)
 
         def held(gap: float, margin: float) -> bool:
@@ -440,13 +484,15 @@ class SimulationEnv:
 
         # 安全ギミックが止めている・切り返している間も、待たされているのと同じに扱う
         if self.safety.holding(slot):
-            return True
+            return "safety"
         distance, phase = self.world.next_signal(slot)
         if int(phase) != GREEN and held(distance, STOP_MARGIN_M):
-            return True
-        if held(self._lead_gap(slot), config.VEHICLE_LENGTH + AUTOPILOT_HEADWAY_M):
-            return True
-        return held(self._pedestrian_gap(slot), AUTOPILOT_PEDESTRIAN_MARGIN_M)
+            return "signal"
+        if held(self._pedestrian_gap(slot), self._pedestrian_margin(slot)):
+            return "pedestrian"
+        if held(self._lead_gap(slot), self._headway_margin(slot)):
+            return "lead_vehicle"
+        return ""
 
     def set_player_pose(self, at: tuple[float, float] | None) -> None:
         """実用モードの徒歩キャラの位置を反映する（None で消す）。"""
@@ -612,7 +658,7 @@ class SimulationEnv:
                         np.float64(self._lead_gap(int(slot))),
                         abs(config.MAX_DECEL),
                         config.DT,
-                        margin_m=config.VEHICLE_LENGTH + AUTOPILOT_HEADWAY_M,
+                        margin_m=self._headway_margin(int(slot)),
                     )
                 ),
                 float(
@@ -620,7 +666,7 @@ class SimulationEnv:
                         np.float64(self._pedestrian_gap(int(slot))),
                         abs(config.MAX_DECEL),
                         config.DT,
-                        margin_m=AUTOPILOT_PEDESTRIAN_MARGIN_M,
+                        margin_m=self._pedestrian_margin(int(slot)),
                     )
                 ),
             )

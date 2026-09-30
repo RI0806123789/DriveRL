@@ -73,6 +73,14 @@ class ImportTicket:
     error: str | None = None
 
 
+@dataclass
+class SituationTicket:
+    """AI コンシェルジュへ渡す配車の状況の依頼票。エンジンスレッドがステップの境目で埋める。"""
+
+    done: threading.Event = field(default_factory=threading.Event)
+    situation: dict[str, Any] | None = None
+
+
 class SimulationEngine:
     """物理 + オンライン学習のループを所有するオブジェクト。"""
 
@@ -230,8 +238,14 @@ class SimulationEngine:
         self._inbox.put(("app_mode", bool(enabled)))
 
     def taxi_command(self, action: str, payload: dict[str, Any] | None = None) -> None:
-        """配車の操作を積む（request / board / alight / cancel / halt）。"""
+        """配車の操作を積む（request / board / alight / cancel / halt / drive_mode）。"""
         self._inbox.put(("taxi", (str(action), payload or {})))
+
+    def request_taxi_situation(self) -> SituationTicket:
+        """配車の状況（`TaxiService.describe`）を頼む。呼び出し側は `ticket.done` を待つこと。"""
+        ticket = SituationTicket()
+        self._inbox.put(("taxi_situation", ticket))
+        return ticket
 
     def submit_player_pose(self, at: tuple[float, float] | None) -> None:
         """実用モードの徒歩キャラの位置を積む（None で街から消す）。"""
@@ -536,6 +550,18 @@ class SimulationEngine:
         elif kind == "player_pose":
             self._apply_player_pose(payload)
 
+        elif kind == "taxi_situation":
+            with self._lock:
+                practical = self._practical_mode
+            try:
+                situation: dict[str, Any] = {"phase": "idle", "stopReason": "idle"}
+                if self._env is not None:
+                    situation = self._taxi.describe(self._env)
+                situation["practicalMode"] = practical
+                payload.situation = situation
+            finally:
+                payload.done.set()
+
         elif kind == "watch_surround":
             self._surround_watch[int(payload)] = time.perf_counter()
 
@@ -661,6 +687,8 @@ class SimulationEngine:
             self._taxi.cancel(env, "配車を取り消しました")
         elif action == "halt":
             self._taxi.cancel(env, "緊急停止しました。自動運転を終了します", halt=True)
+        elif action == "drive_mode":
+            problem = self._taxi.set_drive_mode(env, str(args.get("mode", "")))
         else:
             logger.warning("未知の配車操作: %s", action)
             return

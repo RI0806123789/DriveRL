@@ -823,6 +823,12 @@ TAXI_PHASE_WAITING = "waiting"
 TAXI_PHASE_RIDING = "riding"
 TAXI_PHASE_ARRIVED = "arrived"
 
+#: 配車中の車の走り方（AI コンシェルジュが切り替える）。経路追従自身のアクセルと車間の余裕だけを変える（`sim/env.py`）
+TAXI_DRIVE_NORMAL = "normal"
+TAXI_DRIVE_HURRY = "hurry"
+TAXI_DRIVE_COMFORT = "comfort"
+TAXI_DRIVE_MODES = (TAXI_DRIVE_NORMAL, TAXI_DRIVE_HURRY, TAXI_DRIVE_COMFORT)
+
 
 def _point_wire(point: tuple[float, float] | None) -> list[float] | None:
     return None if point is None else [round(point[0], 3), round(point[1], 3)]
@@ -841,6 +847,7 @@ class TaxiStatus:
     eta_seconds: float = 0.0
     remaining_distance_m: float = 0.0
     message: str = ""
+    drive_mode: str = TAXI_DRIVE_NORMAL
 
     def to_wire(self, *, include_route: bool = False) -> dict[str, Any]:
         """`route` は数百点になるので、版が変わったときだけ載せる（frame と同じ約束）。"""
@@ -853,6 +860,7 @@ class TaxiStatus:
             "etaSeconds": round(self.eta_seconds, 1),
             "remainingDistanceM": round(self.remaining_distance_m, 1),
             "message": self.message,
+            "driveMode": self.drive_mode,
         }
         if include_route:
             payload["route"] = [[round(px, 2), round(py, 2)] for px, py in self.route]

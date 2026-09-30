@@ -168,6 +168,7 @@ const IDLE_TAXI: TaxiMessage = {
   etaSeconds: 0,
   remainingDistanceM: 0,
   message: '',
+  driveMode: 'normal',
 }
 
 export interface SimStore {
@@ -209,6 +210,8 @@ export interface SimStore {
   mode: AppMode
   /** スマホ画面にタクシーの車載カメラを出しているか（実用モードのみ） */
   taxiCameraOn: boolean
+  /** スマホ画面に AI コンシェルジュを出しているか（実用モードのみ） */
+  taxiAiOn: boolean
   /** 配車を自分で回しているか（`store/taxiAutopilot.ts`）。実用モードのみ */
   taxiAutoOn: boolean
   tab: PanelTab
@@ -224,6 +227,7 @@ export interface SimStore {
   togglePanel(): void
   setMode(mode: AppMode): void
   setTaxiCameraOn(on: boolean): void
+  setTaxiAiOn(on: boolean): void
   setTaxiAutoOn(on: boolean): void
   setTab(tab: PanelTab): void
   setCameraMode(mode: CameraMode): void
@@ -248,7 +252,7 @@ function modeChange(s: Pick<SimStore, 'mode'>, mode: AppMode): Partial<SimStore>
   // 開発モードへ戻ったら車載カメラも自動操作も畳む（どちらも相手がいなくなる）。
   // 実用モードへ入ったら 3D 画面のクリックでの介入をやめる（障害物を置いたままにしない）
   return mode === 'dev'
-    ? { mode, taxiCameraOn: false, taxiAutoOn: false }
+    ? { mode, taxiCameraOn: false, taxiAiOn: false, taxiAutoOn: false }
     : { mode, interaction: 'none' }
 }
 
@@ -290,6 +294,7 @@ export const useSimStore = create<SimStore>((set, get) => ({
   theme: INITIAL_THEME,
   mode: 'dev',
   taxiCameraOn: false,
+  taxiAiOn: false,
   taxiAutoOn: false,
   tab: 'simulation',
   cameraMode: 'orbit',
@@ -314,6 +319,7 @@ export const useSimStore = create<SimStore>((set, get) => ({
   togglePanel: () => set((s) => ({ panelOpen: !s.panelOpen })),
   setMode: (mode) => set((s) => modeChange(s, mode)),
   setTaxiCameraOn: (taxiCameraOn) => set({ taxiCameraOn }),
+  setTaxiAiOn: (taxiAiOn) => set({ taxiAiOn }),
   setTaxiAutoOn: (taxiAutoOn) => set({ taxiAutoOn }),
   setTab: (tab) => set({ tab }),
   setCameraMode: (cameraMode) => set({ cameraMode }),
@@ -352,6 +358,7 @@ export const useSimStore = create<SimStore>((set, get) => ({
           // リロードしてもサーバーのモードへ戻す（配車の途中で開発モードに落とさない）
           ...modeChange(s, status.practicalMode ? 'taxi' : 'dev'),
           taxiCameraOn: false,
+          taxiAiOn: false,
           taxiAutoOn: false,
           pendingPresetId: null,
           // 再起動したサーバーはマップを持っていない（map を送ってこない）。前のマップを残さない
