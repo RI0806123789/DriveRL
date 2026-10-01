@@ -611,7 +611,7 @@ true のときの学習中の車だけ。判断は検出枠と推定距離から
     {
       "name": "policy_trunk.0",   // パラメータ名から `.weight` を除いたもの
       "role": "policy",           // "policy" | "value"
-      "inDim": 66,
+      "inDim": 79,
       "outDim": 128,
       "weightAbsMean": 0.0421,    // |w| の平均。学習が進むと動く
       "weightStd": 0.0688,
@@ -660,7 +660,7 @@ true のときの学習中の車だけ。判断は検出枠と推定距離から
 | コード | いつ返るか |
 |---|---|
 | `MAP_LOAD_FAILED` | 未知のプリセット ID、Overpass API への接続失敗 |
-| `INVALID_MESSAGE` | JSON として読めない、オブジェクトでない、未知の `type`、必須項目の欠落、`set_params` の値が非有限または型違い |
+| `INVALID_MESSAGE` | JSON として読めない、オブジェクトでない、未知の `type`、必須項目の欠落、`set_params` の値が非有限または型違い、または許容範囲外（範囲内に丸めて反映したうえで通知する）|
 | `DETECTOR_TRAINING` | 認識器の学習中に `load_map`・`set_app_mode`（`taxi` へ）・`request_taxi`・`board_taxi` が来た（`load_map` はジョブが握っているマップと画面がずれるため、残りは物理が止まっていて車が動かないため断る） |
 
 **介入（車両追加・障害物設置）の失敗は `error` ではなく `status` メッセージの
@@ -836,7 +836,7 @@ true のときの学習中の車だけ。判断は検出枠と推定距離から
 
 ```jsonc
 { "type": "load_map",     "presetId": "ginza" }
-{ "type": "set_params",   "params": { "vehicleCount": 5 } }   // 部分更新。渡したキーのみ反映
+{ "type": "set_params",   "params": { "vehicleCount": 5 } }   // 部分更新。渡したキーのみ反映。範囲外は丸めて反映し、INVALID_MESSAGE も返す
 { "type": "spawn_vehicle","x": 10.0, "y": -20.0 }             // 最寄りの道路上にスナップされる。出せなければ断り、別の場所には出さない
 { "type": "despawn_vehicle", "id": 2 }
 { "type": "add_obstacle", "x": 10.0, "y": -20.0, "radius": 0.5 }
@@ -1059,7 +1059,7 @@ forward(obs: float32[B, 79]) -> (action: float32[B, 2], value: float32[B])
 Keras 版の入出力：
 
 ```
-model(obs: float32[B, 66]) -> [action: float32[B, 2], value: float32[B]]
+model(obs: float32[B, 79]) -> [action: float32[B, 2], value: float32[B]]
 ```
 
 `value` の Dense(1) 出力は素のままだと `[B, 1]` になるが、TorchScript 版
@@ -1109,7 +1109,8 @@ TorchScript や Keras 形式を渡した場合は、その旨を説明する `40
 
 失敗時は `{"ok": false, "error": "<日本語の理由>"}`。
 利用者が直せる失敗（形式違い・次元不一致など）は `400`、
-大きすぎるファイルは `413`、時間切れは `504`、サーバー内部の失敗は `500`。
+大きすぎるファイルは `413`、時間切れは `504`、アップロードの保存に失敗したときは `500`
+（エンジン側の読み込み失敗は `400`）。
 
 **安全上の扱い**: 受け取るのは外部から来たファイルなので、
 `torch.load(weights_only=True)` で解析し、テンソルと素の Python 値以外が
