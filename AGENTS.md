@@ -24,6 +24,7 @@ Three.js で 3D 描画・介入できるシミュレーターです。
 | `docs/protocol.md` | **フロント ↔ バックの唯一の契約**（WebSocket メッセージ・座標系）|
 | `backend/app/contracts.py` | **バックエンド内部の契約**。`map` / `sim` / `rl` / `runtime` / `percep` はここ経由でのみやり取りする |
 | `SECURITY.md` | モデルの読み込み・外部通信・ディスク書き込みの方針と「やってはいけないこと」 |
+| `CONTRIBUTING.md` | 外部の貢献者向けの手順と PR の確認項目（`.github/pull_request_template.md` と対応）|
 | `docs/system-flow.drawio` | システム全体のフロー図（draw.io・9 ページ）。起動・マップ読込・メインループ・観測・配信・介入・歩行者・実用モード |
 
 `docs/protocol.md` / `frontend/src/types/protocol.ts` / `backend/app/contracts.py` の 3 つは
