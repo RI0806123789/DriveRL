@@ -1,7 +1,3 @@
-# ライセンス
-
-## 本ソフトウェアについて
-
 MIT License
 
 Copyright (c) 2026 伊藤涼真 (Ryoma Ito)
@@ -26,7 +22,9 @@ SOFTWARE.
 
 ---
 
-## 地図データについて
+## 第三者データおよび関連ライセンス (Third-Party Data & Licenses)
+
+### 地図データ (OpenStreetMap)
 
 本ソフトウェアが取得・表示する道路網および建物のデータは
 [OpenStreetMap](https://www.openstreetmap.org/) の提供によるもので、
