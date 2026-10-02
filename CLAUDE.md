@@ -118,8 +118,8 @@ npm run dev             # Vite だけ立てる。?mock=1 でバックエンド�
 （実際に灯火の並びが左右逆になっていたバグをこれが検出しました）。
 Node 22.18 以降が要るのは `node scripts/verify-*.ts` と `node --test` で TS を直接実行するためです。
 
-★ **本数は `frontend/package.json` の `scripts` が唯一の出典です。** 増やしたら
-ここと `README.md`「検証」節の両方を直すこと。過去に **CLAUDE.md が 7 本 /
+★ **本数は `frontend/package.json` の `scripts` が唯一の出典です。** `README.md`「検証」節は
+一覧を持たず、`package.json` を指すだけにしてあります（一覧を書き足さないこと）。過去に **CLAUDE.md が 7 本 /
 README.md が 4 本 / 実際が 8 本**という三つ巴のずれを起こしました
 （手で書いた数字は必ず古くなる、という典型的な形です）。
 
