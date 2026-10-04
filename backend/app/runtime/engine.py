@@ -28,6 +28,7 @@ from app.rl.online_assist import OnlineAssistController
 from app.runtime.autotune import TUNED_WIRE_KEYS, LiveAutoTune
 from app.runtime.detector_job import DetectorTrainingJob
 from app.runtime.learning_step import learning_step
+from app.runtime.param_store import PERSISTED_WIRE_KEYS, ParamStore
 from app.runtime.taxi import TaxiService
 
 if TYPE_CHECKING:
@@ -109,7 +110,7 @@ class _TuneHost:
 class SimulationEngine:
     """物理 + オンライン学習のループを所有するオブジェクト。"""
 
-    def __init__(self) -> None:
+    def __init__(self, param_store: ParamStore | None = None) -> None:
         self._lock = threading.Lock()
         self._inbox: queue.Queue[tuple[str, Any]] = queue.Queue()
         self._notices: queue.Queue[dict[str, Any]] = queue.Queue()
@@ -144,6 +145,12 @@ class SimulationEngine:
         self._network: dict[str, Any] = {}
         self._params = SimParams()
         self._params_dirty: bool = False
+        # 学習タブの設定値の控え。None なら保存も復元もしない（テストや検査スクリプトが本番の控えに触らないため）
+        self._param_store = param_store
+        if param_store is not None:
+            restored = param_store.restore_into(self._params)
+            if restored:
+                logger.info("学習タブの設定値 %d 件を前回の控えから戻しました", len(restored))
 
         # 実用モード（自動運転タクシー）。**この間は全車の学習を止めて推論だけで走る**（決定 5）
         self._practical_mode: bool = False
@@ -258,8 +265,17 @@ class SimulationEngine:
                 max_pedestrians=config.MAX_PEDESTRIANS,
             )
             snapshot = SimParams(**vars(self._params))
+        # 探索中に通るのは探索の対象でないキーだけなので、試行の途中の値は控えに入らない
+        self._persist_params(patch, snapshot)
         self._inbox.put(("params", snapshot))
         return snapshot, result
+
+    def _persist_params(self, patch: dict[str, Any], params: SimParams) -> None:
+        """`patch` に含まれる保存対象のキーの、適用後の値を控えへ書く（丸めた値が残る）。"""
+        if self._param_store is None:
+            return
+        wire = params.to_wire()
+        self._param_store.save({key: wire[key] for key in PERSISTED_WIRE_KEYS if key in patch})
 
     def set_render_paused(self, paused: bool) -> None:
         """描画（フレーム配信）だけを止める。学習は継続する（memo 5章）。"""
@@ -737,6 +753,9 @@ class SimulationEngine:
     def _finish_autotune(self) -> None:
         with self._lock:
             self._autotune_running = False
+        # 探索の結果（最良の試行の値、または探索前に戻した値）が確定したので、ここで初めて控える
+        snapshot = self.snapshot_params()
+        self._persist_params({key: None for key in PERSISTED_WIRE_KEYS}, snapshot)
         if self._trainer is not None:
             self._last_autosave_updates = self._trainer.updates
         self._publish_autotune()

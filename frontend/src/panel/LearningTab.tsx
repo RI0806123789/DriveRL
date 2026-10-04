@@ -319,6 +319,12 @@ export function LearningTab() {
       </Card>
 
       <Card title="学習ハイパーパラメータ" icon={<TuneIcon size={16} />}>
+        <div className="m3-note">
+          {usingMock
+            ? 'モック接続中は、ここの設定値を保存しません。'
+            : 'ここと「報酬の重み」の設定値は、変えるたびにサーバーへ自動で保存され、再起動しても戻ります。' +
+              '学習の自動化の間は、探索が選んだ値は OFF にして最良の試行が確定したときに保存します。'}
+        </div>
         <Slider
           label="学習率"
           value={params.learningRate}
