@@ -20,6 +20,7 @@ DriveRL/
 │   ├── run.py                      起動（--dev で Vite も子プロセスとして面倒を見る）
 │   ├── train_detector.py           画像認識器の学習 CLI（中身は app/percep/trainer.py）
 │   ├── warmstart_policy.py         「止まる」に固まった方策を経路追従で立て直す CLI
+│   ├── tune_hyperparams.py         ハイパーパラメータの自動探索 CLI（Optuna。中身は app/runtime/autotune.py）
 │   ├── verify_log_std.py           方策分布（log_std）の健全性チェック
 │   ├── verify_online_assist.py     オンライン模倣（経路追従の割り込みと模倣の損失）
 │   ├── verify_curriculum.py        ヒヤリハットのオートカリキュラム（飛び出し・前走車の急制動）
@@ -72,6 +73,8 @@ DriveRL/
 │   │   ├── warn.py                 失敗を握りつぶすときの初回だけのログ（warn_once）
 │   │   └── runtime/
 │   │       ├── engine.py           物理と学習を回す専用スレッド
+│   │       ├── learning_step.py    学習の 1 ステップ（エンジンと tune_hyperparams.py が同じものを通る）
+│   │       ├── autotune.py         ハイパーパラメータの自動探索。**CLI と「学習の自動化」が共有する唯一の実装**
 │   │       ├── detector_job.py     認識器の学習ジョブ（「モデル作成」タブから回す）
 │   │       ├── concierge.py        実用モードの AI コンシェルジュ（Gemini への問い合わせ）
 │   │       └── taxi.py             実用モードの配車（最寄り車両の徴用・ETA・乗降）
@@ -129,6 +132,7 @@ DriveRL/
 | **認識の可視化** | 運転席カメラで、認識したものに枠と名称（「信号機：青」「速度標識：40km/h」など）を重ねる。前後左右の 4 分割にもできる |
 | **オンライン学習** | 全車両が 1 つの重みを共有する PPO（PyTorch・CPU）。意図を選ぶ上位と、操作を出す下位に分けた階層型の方策 |
 | **学習の補助** | 経路追従のお手本の割り込み（オンライン模倣）・ヒヤリハットのオートカリキュラム・車車間通信（V2X）。「学習」タブで切り替える |
+| **学習の自動化** | 学習率・割引率・報酬の重みなどを Optuna が試行を繰り返して探す。探索中はスライダーが試行に合わせて動き、OFF にすると最良の設定と重みで学習を続ける |
 | **交通ルール** | 左側通行・車線走行・右左折時の寄せ・赤信号での停止・最高速度（日本の道路交通法に準拠）|
 | **安全ギミック** | カメラの検出枠に連動して、障害物の手前で止まる・切り返す（後退中は自動ブレーキ）・巻き込みを防ぐ・信号の無い交差点で徐行する |
 | **街の様子** | 最大 64 人の歩行者（歩行者用信号に従う）、雨と霧（擬似カメラにも 3D にも効く）、街の日の出・日の入りで切り替わる昼夜 |
@@ -221,7 +225,7 @@ cd backend; .venv\Scripts\python.exe -m app.map.prefetch; cd ..
 |---|---|
 | シミュレーション | 再生／一時停止・車両数・歩行者数・倍速・交通ルール・天候・介入（障害物を置く・車両を足す）・車両の追跡 |
 | マップ | プリセットの選択と読み込み状況 |
-| 学習 | ネットワークのノード図・学習指標のグラフ・ハイパーパラメータ・報酬の重み・隠れ層の構成・学習の補助・モデルの書き出し／読み込み |
+| 学習 | ネットワークのノード図・学習指標のグラフ・ハイパーパラメータ・報酬の重み・隠れ層の構成・学習の補助・モデルの書き出し／読み込み・学習の自動化 |
 | モデル作成 | 認識器（CNN）の学習 |
 | 表示 | カメラ（俯瞰・追従・運転席）と、建物・標示・信号機・経路・認識結果の枠などの表示切替 |
 
@@ -378,6 +382,42 @@ action, value = policy(obs)                     # action: (B, 2) = 加減速・�
 
 ---
 
+## ハイパーパラメータを自動で探す（学習の自動化）
+
+「学習」タブの一番下の **学習の自動化（Optuna）** を ON にすると、学習率・割引率・クリップ範囲・エントロピー係数と
+報酬の重み（目的地到達・衝突・経路進捗・道路外・信号無視・速度超過・時間）の 11 個を、Optuna（TPE）が試行を繰り返して探します。
+
+- 1 試行ごとに、重みを **ON にしたときの状態へ巻き戻し、街を作り直してから** 76.8 秒ぶん（1,536 ステップ）学習させ、
+  後半の走り（到達・衝突・逸脱・打ち切り・信号無視・止まったままでないか）で採点します。報酬の重みも探すので、
+  **採点に報酬の合計は使いません**。見込みの薄い試行は途中で打ち切ります
+- 探索中は、試行が替わるたびに上のスライダーがその値へ動きます（「自動」の印が付き、手では動かせません）。
+  保存・読み込み・初期化・エリアの切り替え・実用モード・認識器の学習も、OFF にするまでできません
+- **OFF にした瞬間**に、元の重みを `backend/data/checkpoints/shared_policy.pt.before-autotune` へ退避してから、
+  この探索で最も成績の良かった試行の設定と重みを適用して `shared_policy.pt` に保存し、そのまま学習を続けます。
+  完了した試行が無ければ、ON にする前の設定と重みに戻ります
+- 気に入らなければ、「モデルの読み込み」で `shared_policy.pt.before-autotune` を選べば戻せます
+- 設定（スライダーの値）はサーバーを再起動すると既定に戻ります。最良の値は `backend/data/tuning/best_params.json` に残ります
+- 1 試行は実時間で約 77 秒（倍速を上げれば短くなる）。TPE が当たりを付け始めるまでに 10 試行ほどかかります
+
+| 保存先（`backend/data/` の下）| 中身 |
+|---|---|
+| `tuning/driverl_optuna.db` | 探索の履歴（SQLite・WAL）。同じ study 名で続きから探す（画面からはエリアごとに `live-<エリア>`）|
+| `tuning/best_params.json` | 最良の試行の値（`set_params` と同じキー）|
+| `tuning/trial_summary.csv` | 試行ごとの値と成績の一覧 |
+| `checkpoints/best_tuned_policy.pt` | 最良の試行の重み（本番の `shared_policy.pt` とは別）|
+
+同じ探索はサーバーを使わず CLI でも回せます（中身は同じ実装。本番の `shared_policy.pt` は読むだけで書き換えません）。
+
+```powershell
+cd backend
+.venv\Scripts\python.exe tune_hyperparams.py --preset ginza --trials 20
+# 1 試行の長さ: --trial-steps 3072 / 続きから: 同じ --study-name（既定 cli-<preset>）/ 初期値から: --init fresh
+# 地図のキャッシュを読まない短い動作確認: --preset grid --trials 2 --trial-steps 128
+.venv\Scripts\optuna-dashboard.exe sqlite:///data/tuning/driverl_optuna.db   # 履歴をブラウザで見る（要 requirements-dev.txt）
+```
+
+---
+
 ## 設計上の要点
 
 | 項目 | 方針 |
@@ -399,7 +439,7 @@ action, value = policy(obs)                     # action: (B, 2) = 加減速・�
 # どれもリポジトリ直下から
 cd frontend; npm test                                     # node --test。verify:* の全本 + 単体・描画テスト（約 10 秒）
 cd frontend; npm run typecheck; npm run build
-cd backend; .venv\Scripts\python.exe -m pytest            # 契約テストと、数秒で終わる検証（要 requirements-dev.txt）
+cd backend; .venv\Scripts\python.exe -m pytest            # 契約テストと、すぐ終わる検証（要 requirements-dev.txt。約 20 秒、うち学習の自動化の検査が約 13 秒）
 cd backend; .venv\Scripts\python.exe -m pytest --runslow  # verify_*.py もすべて（安全ギミックだけで 20 分ほど）
 cd backend; .venv\Scripts\python.exe -m pytest --runslow -k ginza  # 1 つのプリセットだけ
 ```
@@ -428,6 +468,8 @@ cd backend; .venv\Scripts\python.exe -m pytest --runslow -k ginza  # 1 つのプ
 | フレームレートが出ない | 「表示」タブでまず影を切ってください。道路標示・信号機も切れます |
 | 道路や路面がちらつく | 深度の精度不足（Z ファイティング）です。`RoadNetwork.tsx` / `RoadMarkings.tsx` の `polygonOffset` の順を確かめてください |
 | 隠れ層の構成を変えたい | 「学習」タブで層の数（1〜4）と幅を選べます。重みは引き継げないので、先に書き出しておいてください |
+| 学習の自動化のトグルが押せない | カードの下に理由が出ます。Optuna が無ければ `pip install -r requirements.txt` の後にサーバーを起動し直してください。マップを読み込む前・実用モード・認識器の学習中も始められません |
+| 学習の自動化の後の走りが気に入らない | 「モデルの読み込み」で `backend/data/checkpoints/shared_policy.pt.before-autotune` を選ぶと、ON にする前の重みに戻ります |
 | 学習をやり直したい | 「学習」タブの「ポリシーを初期化」を使ってください |
 | 以前のモデルが読み込めない | 観測の次元が変わったためです（50 → 54 → 56 → 57 → 66 → 75 → 79）。66・75 次元の重みだけは、入力を 0 で足して読み込めます |
 | 認識結果の枠が出ない | カメラが「運転席」か、「表示」タブのスイッチ、追跡している車があるかを確かめてください |

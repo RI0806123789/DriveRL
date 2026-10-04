@@ -58,6 +58,9 @@ npm run dev             # Vite だけ立てる。?mock=1 でバックエンド�
 .venv\Scripts\python.exe verify_route_signals.py   # 経路上の信号と規制速度（通る辺のものか・始点より後ろの停止線を 0m 先の赤と数えないか）
 .venv\Scripts\python.exe verify_safety_gimmicks.py # 周囲カメラと安全ギミック（切り返し・後退 AEB・巻き込み防止）。--kanazawa で金沢の予算も測る
 .venv\Scripts\python.exe warmstart_policy.py --preset ginza  # 「止まる」に固まった方策を立て直す
+.venv\Scripts\python.exe tune_hyperparams.py --preset ginza --trials 20  # ハイパーパラメータの自動探索（Optuna。本番の重みは書き換えない）
+.venv\Scripts\python.exe tune_hyperparams.py --preset grid --trials 2 --trial-steps 128  # 地図のキャッシュを読まない短い動作確認
+# ↑ 学習タブの「学習の自動化」と同じ実装（runtime/autotune.py）。履歴は .venv\Scripts\optuna-dashboard.exe sqlite:///data/tuning/driverl_optuna.db で見る
 ```
 
 **`-Dev` でリロードするのは Vite だけです。** バックエンドを直したら Ctrl+C で止めて
@@ -68,10 +71,10 @@ npm run dev             # Vite だけ立てる。?mock=1 でバックエンド�
 自動テストの入口は 2 つです（#67）。**どちらも既存の検証スクリプトを書き直さず、子プロセスで回して
 終了コードで合否を決めます**（`python verify_*.py` / `npm run verify` を単独で回す使い方はそのまま）。
 
-| 入口 | ランナー | 中身 | 既定の所要（2026-09-29 の実測）|
+| 入口 | ランナー | 中身 | 既定の所要（2026-10-04 の実測）|
 |---|---|---|---|
 | `cd frontend; npm test` | `node --test`（**ライブラリを足していない**）| `verify:*` の全本 + `src/__tests__/` の単体テスト | 約 10 秒 |
-| `cd backend; .venv\Scripts\python.exe -m pytest` | pytest（`requirements-dev.txt`。本体の `requirements.txt` には入れない）| `tests/` の契約テスト + 数秒で終わる `verify_*.py` | 約 3 秒 |
+| `cd backend; .venv\Scripts\python.exe -m pytest` | pytest（`requirements-dev.txt`。本体の `requirements.txt` には入れない）| `tests/` の契約テスト + 数秒で終わる `verify_*.py` | 約 20 秒（うち `test_tuning.py` が約 13 秒。2026-09-29 は約 3 秒）|
 
 確認手段はこれに加えて型チェック・ビルド、そして実測です。バックエンドの変更を検証するときは、
 スクラッチにベンチ／比較スクリプトを書いて**新旧の結果が一致することと速度**を数値で確かめるのが、
@@ -109,6 +112,9 @@ npm run dev             # Vite だけ立てる。?mock=1 でバックエンド�
   `config.py`・`protocol.ts` の定数と冒頭・文書の題と本文と例のすべてで揃っているか。`protocol.ts` は
   `export interface` 直下の 2 字下げの欄を正規表現で読むので、**欄を 1 行 1 つで書く今の書き方を変えないこと**
 - `main.py` は import しないこと（最上位で `SimulationEngine()` を作る）
+- ★ **ソースを正規表現で読む検査は、改行を `\r?\n` で書くこと。** Windows で `core.autocrlf` のまま取り出すと
+  ファイルは CRLF になり、`\n  currentOption\?: DriveOption\n` のような `\n` 決め打ちは何も変えていないのに落ちます
+  （`verify:options` と `verify:curriculum` がこれで落ちていた。#82 のときに直した）
 - 実測（`--runslow` で銀座・梅田・栄）: `verify_route_signals` 1 本 15〜20 秒・`verify_route_start` 4〜9 秒・
   `verify_publish_routes` 13〜17 秒・`verify_log_std` 13〜23 秒・`verify_safety_gimmicks` 約 20 分。
   金沢は測っていません（キャッシュを作り直す必要があるため）
@@ -2403,6 +2409,90 @@ UV の v をずらして「その車の段」だけを貼ります（`vehicleMat
   上位と下位の勾配・意図の模倣・整形・平らな重みの移し替え・書き出し・env の教師と `currentOption`・`act` の時間。
   合成の碁盤の目で走らせる）と `npm run verify:options` / `npm run test:ui`
 
+### 学習の自動化（`runtime/autotune.py`。#82）
+
+Optuna（TPE）で PPO と報酬の重みのハイパーパラメータを探します。学習タブの「学習の自動化」（`LiveAutoTune`。エンジンスレッドから
+毎ステップ `tick` する）と CLI（`backend/tune_hyperparams.py` の `HeadlessTuner`。`study.optimize`）が同じ部品を使います。
+契約は `docs/protocol.md` 2.11（`autotune`）と 3 章（`start_auto_tune` / `stop_auto_tune_and_save`）。
+
+| 部品 | どこ |
+|---|---|
+| 探索空間（11 個・値域・刻み）| `autotune.SEARCH_SPACE`（唯一の出典。モックの `store/mock/autotune.ts` は写し）|
+| 1 試行の見届けと採点 | `TrialMonitor` / `score_trial` |
+| 学習の 1 ステップ | `runtime/learning_step.py` の `learning_step`（エンジンの `_step_once` と CLI が同じものを通る）|
+| 履歴の DB（SQLite）| `open_study`（WAL・`busy_timeout` 30 秒）|
+| Optuna を回すスレッド | `OptunaWorker`（ask / report / tell・CSV・最良の書き出し）|
+
+- ★ **探索のアルゴリズムは `autotune.py` と `learning_step.py` へ書くこと**（認識器の `percep/trainer.py` と同じ約束）。
+  CLI と画面で手順がずれると「CLI で見つけた値が画面では再現しない」という切り分けられない食い違いになります
+- ★ **試行ごとに、重みを探索を始めたときの複製（`PPOTrainer.snapshot_state`）へ巻き戻し、街を作り直してから学習させる**
+  （`_tune_begin_trial` = `restore_state` + 試行の params + `env.reset_all()`）。巻き戻さないと後の試行ほど前の試行の学習を
+  引き継いで有利になり、比べられません。ヒヤリハットの難易度も探索中は据え置きます（`record_episode_end` を呼ばない）
+- ★ **`restore_state` は Adam の統計を `deepcopy` してから読み込むこと。** `Optimizer.load_state_dict` は同じ dtype・device の
+  テンソルを複製せずに使うので、そのまま渡すと学習で手元の複製（探索開始時の状態）までその場で書き換わります
+  （`test_tuning.py` が検査）
+- ★ **採点に報酬の合計（`EpisodeResult.total_reward`）を使わないこと。** 報酬の重みも探索の対象なので、重みを大きくした試行ほど
+  高く出ます。スコアは最後の半分（`EVAL_FRACTION`）のステップで終わったエピソードの 到達 +1 / 衝突 -1 / 逸脱 -0.5 / 打ち切り -0.25 /
+  信号無視 -0.1 × 回（3 回で頭打ち）と、走っていた割合（速さ / `maxSpeed`）× 0.3 の和です（取りうる範囲 -1.3〜+1.3）。
+  重みが NaN / Inf になった試行は -2.0（`SCORE_DIVERGED`）を付けて TPE にその辺りを避けさせます（FAIL にすると無視される）
+- **見込みの薄い試行は `MedianPruner` で打ち切る**（256 ステップごとに途中のスコアを報告。ロールアウト長に依らない刻みにする
+  のは、枝刈りが同じ刻みどうしで比べるため。5 試行・2 報告までは掛けない）
+- ★ **探索の値域と刻みは `_PARAM_SPECS` と学習タブのスライダーの両方に合わせる**（`test_tuning.py` が LearningTab.tsx を読んで
+  検査）。刻みをスライダーと揃えるのは、最良の値を利用者がスライダーで再現できるようにするためです。揃える前は報酬の重みの
+  スライダーに `29.606942189857364` のような値がそのまま出ていました。Optuna の刻みは `low + k * step` で作るので
+  `0.9000000000000001` になり、`validated_patch` が刻みの桁で丸めます
+- ★ **探索中は本番の重み（`shared_policy.pt`）を自動保存しないこと**（`_step_once` の `tuning`）。保存すると試行の途中の重み
+  （NaN もありうる）で本番を上書きします。代わりに**始めた瞬間の重みを 1 度だけ保存**し、OFF で `.before-autotune` へ控える
+  ファイルがちょうど探索前の重みになるようにしてあります
+- ★ **OFF（`LiveAutoTune.stop`）は「控える → 適用 → 健全か見る → 保存」の順**。控えられない（OSError）・最良の重みに NaN / Inf が
+  ある・完了した試行が無い、のどれかなら適用せず、探索前の params と重みへ戻します（読み込み前の `before-import` と同じ約束）。
+  最良は**この探索の中だけで比べる**（前の探索の試行とは出発点の重みが違うので比べられない）。TPE は study に残った前の試行も
+  使うので、同じエリアなら続きから当たりを付けます（study 名は `live-<エリア>`・CLI は `cli-<プリセット>`）
+- ★ **Optuna（import・SQLite・TPE）と最良の書き出しはエンジンスレッドに乗せないこと**（`OptunaWorker`）。最良の重みは
+  複製（`snapshot_state`）を `PPOTrainer.save_state` で書くので、専用スレッドから書いてよい。エンジンで書いていたころは、
+  `torch.save` と JSON の `fsync` で試行の終わりの 1 ステップが銀座で 56〜67ms 延びていました（いまは 24〜31ms。最良を
+  更新しない試行は 0.1ms）。止めた後も頼んだ書き出しが終わるまでスレッドは動くので、ファイルを読む検査は `shutdown()` で待つこと
+- **DB は WAL**。Optuna が最初に開く接続より先に標準の `sqlite3` で `journal_mode=WAL` を書いておき（ファイルに残る）、
+  `storage.engine` の `connect` に `synchronous=NORMAL` と `busy_timeout` を掛け、登録より前に作られた接続は `engine.dispose()`
+  で捨てます（issue のコメントの提案。電源断で失うのは直前の試行 1 件まで）
+- ★ **探索中に断る操作は、画面とサーバーの両方で断る**（判断の出どころを 2 か所に置く、`player_pose` と同じ形）。
+
+  | 操作 | サーバー | 画面 |
+  |---|---|---|
+  | 探索している値の `set_params` | `engine.update_params` がロックの中で捨てる（`main.py` は知らせを返す）| スライダーに `auto`（動かせない・「自動」の印）|
+  | 保存・読み込み・初期化・隠れ層の構成 | `AUTOTUNE_BLOCKED_COMMANDS` | ボタンを押せない |
+  | `POST /api/import` | `ticket.error` | ボタンを押せない |
+  | `load_map` | `main.py`（受け付けた後に始まった場合は差し込む直前に見直す）。差し込まれたら `_abort_autotune` | — |
+  | 実用モードへ | `main.py` と `_apply_app_mode` | — |
+  | 認識器の学習 | `DetectorTrainingJob.start` が `autotune_running()` を見る（逆向きも `_start_autotune` が断る）| — |
+
+- **設定はサーバーを再起動すると既定に戻る**（スライダーで変えたときと同じ。`SimParams` は保存していない）。最良の値は
+  `best_params.json`（`set_params` と同じキー・探索の対象の分だけ）に残ります
+- 画面のトグルは楽観的に切り替えない（`autotune.running` だけを見る）。**`localStorage` の `driverl_auto_tune_active` は
+  前回の様子の控えで、正はサーバー**です。接続し直した最初の `autotune` が止まっているのに控えが動いていたら、
+  「サーバーの再起動などで止まった」と知らせます（`store/autotune.ts` の `lostSessionNotice`）。自動で再開はしません
+  （探索前の重みの複製はサーバーと一緒に消えているため）
+- `.m3-bar` / `.m3-bar-fill` は `display: block` にしてあります。`span` で組むと inline のまま幅も高さも 0 になり、
+  ヒヤリハットのゲージ・モデル作成タブのバーも中身が描かれていませんでした
+- 依存は `optuna`（`requirements.txt`。SQLAlchemy・alembic も入る）と `optuna-dashboard`（`requirements-dev.txt`。見るだけ）。
+  **Optuna が無くてもサーバーは起動します**（`importlib.util.find_spec` で探すだけで import しない。トグルは理由を出して押せない）
+- 実測（真値で走行・8 台・歩行者 16 人・合成でない地図。`--trial-steps` を 512 に縮めて 3 試行）:
+
+  | | 銀座 | 金沢 |
+  |---|---|---|
+  | 1 ステップ（探索なし → 探索中）| 中央値 29.8 → 29.0ms | 中央値 30.8 → 33.4ms |
+  | 試行の頭（巻き戻し + params + 街の作り直し）| 37〜55ms | 54〜95ms |
+  | 試行の終わり（最良を更新 / しない）| 31ms / 0.1ms | 24〜29ms / 0.1ms |
+  | 境目のステップの最大 | 146ms | 121〜197ms |
+  | 開始 / 停止 | 15ms / 45ms | 21ms / 20〜35ms |
+
+  境目は約 77 秒に 1 回で、`reset_episode` の介入と同じ処理が乗るためです（`env.reset_all()` が銀座で約 28ms）。準備中
+  （専用スレッドが Optuna を import している間）は GIL の取り合いで 1 ステップが 100ms 前後に延びることがあります。
+  金沢では第 2 世代の GC（260ms）が 1 回出ましたが、探索なしの区間でも 140ms のステップが出ており、探索に固有ではありません。
+  **CNN で走らせたときは測っていません**
+- 検査は `backend/tests/test_tuning.py`（探索空間とスライダー・モックの突き合わせ・採点・アトミックな書き出し・WAL・健全性・
+  巻き戻し・CLI の結果と再開・エンジンでの開始 → 試行 → 停止・試行の発散・断る操作）と `panel/__tests__/AutoTuneCard.test.ts`
+
 ### モデルの入出力
 
 - **チェックポイントは必ず `weights_only=True` で読む。フォールバックしない。**
@@ -2478,8 +2568,9 @@ osmnx は道をまとめるときに値を集合からリストへ戻すので�
 ### 生成物と環境変数
 
 `backend/data/` 配下は**すべて生成物**です（`.gitignore` 済み。`config.py` が起動時に作る）。
-OSM キャッシュ・チェックポイント・認識器と教師データ・書き出し・アップロードが入ります。
-**消してよい**ですが、マップの再取得（Overpass。初回 10〜60 秒）と学習のやり直しが要ります。
+OSM キャッシュ・チェックポイント・認識器と教師データ・書き出し・アップロード・自動探索の履歴（`tuning/`）が入ります。
+**消してよい**ですが、マップの再取得（Overpass。初回 10〜60 秒）と学習のやり直しが要ります
+（`tuning/driverl_optuna.db` を消すと、自動探索は前の試行を知らないところから探し直します）。
 
 `.env`（任意。`.env.example` を複製する）で `DRIVERL_HOST` / `DRIVERL_PORT` を変えられます。
 **ポートを変えたら `frontend/vite.config.ts` のプロキシ先も直すこと。**

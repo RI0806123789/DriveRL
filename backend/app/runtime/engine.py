@@ -25,7 +25,9 @@ from app.contracts import (
     validate_hidden_sizes,
 )
 from app.rl.online_assist import OnlineAssistController
+from app.runtime.autotune import TUNED_WIRE_KEYS, LiveAutoTune
 from app.runtime.detector_job import DetectorTrainingJob
+from app.runtime.learning_step import learning_step
 from app.runtime.taxi import TaxiService
 
 if TYPE_CHECKING:
@@ -79,6 +81,29 @@ class SituationTicket:
 
     done: threading.Event = field(default_factory=threading.Event)
     situation: dict[str, Any] | None = None
+
+
+#: 自動探索の間は断る操作と、その理由（試行ごとに巻き戻す重みを外から変えさせない）
+AUTOTUNE_BLOCKED_COMMANDS = {
+    "save_checkpoint": "学習の自動化の間は保存できません。OFF にすると最良の試行の重みを保存します",
+    "load_checkpoint": "学習の自動化の間は読み込めません。OFF にしてから読み込んでください",
+    "reset_policy": "学習の自動化の間はポリシーを初期化できません。OFF にしてから初期化してください",
+    "set_network": "学習の自動化の間は隠れ層の構成を変えられません。OFF にしてから変えてください",
+}
+AUTOTUNE_IMPORT_BLOCKED = "学習の自動化の間はモデルを読み込めません。OFF にしてから読み込んでください"
+
+
+class _TuneHost:
+    """自動探索のセッション（`LiveAutoTune`）がエンジンへ頼む操作。エンジンスレッドからだけ呼ばれる。"""
+
+    def __init__(self, engine: "SimulationEngine") -> None:
+        self._engine = engine
+
+    def begin_trial(self, patch: dict[str, float], state: dict[str, Any]) -> None:
+        self._engine._tune_begin_trial(patch, state)
+
+    def restore(self, patch: dict[str, float], state: dict[str, Any]) -> None:
+        self._engine._tune_restore(patch, state)
 
 
 class SimulationEngine:
@@ -157,6 +182,14 @@ class SimulationEngine:
         # 周囲カメラの検出を見たい車と、最後に頼まれた時刻（複数タブなら和集合）
         self._surround_watch: dict[int, float] = {}
 
+        # 学習の自動化（Optuna）。セッションはエンジンスレッドだけが触り、asyncio 側へは配る形にして渡す
+        self._autotune = LiveAutoTune()
+        self._autotune_host = _TuneHost(self)
+        self._autotune_running: bool = False
+        self._autotune_wire: dict[str, Any] = self._autotune.snapshot().to_wire()
+        self._autotune_seq: int = 0
+        self._autotune_revision: int = self._autotune.revision
+
     def start(self) -> None:
         if self._thread is not None:
             return
@@ -172,6 +205,8 @@ class SimulationEngine:
         if thread is not None:
             thread.join(timeout=timeout)
         self._thread = None
+        # 走っている試行を中断として閉じ、履歴の DB を手放す（本番の重みは探索の前に保存してある）
+        self._autotune.shutdown()
         logger.info("シミュレーションスレッドを停止しました")
 
     def set_map(self, map_index: MapIndex, preset_id: str, preset_name: str) -> None:
@@ -214,6 +249,9 @@ class SimulationEngine:
     def update_params(self, patch: dict[str, Any]) -> tuple[SimParams, ParamPatchResult]:
         """camelCase の部分更新を検証して適用し、(更新後のパラメータ, 検証結果) を返す。"""
         with self._lock:
+            if self._autotune_running:
+                # 探索中の値は試行が決める。途中で変えると、その試行の成績が別の設定のものになる
+                patch = {k: v for k, v in patch.items() if k not in TUNED_WIRE_KEYS}
             result = self._params.apply_wire(
                 patch,
                 max_vehicles=config.MAX_VEHICLES,
@@ -285,6 +323,31 @@ class SimulationEngine:
     def command(self, name: str) -> None:
         """"save_checkpoint" / "load_checkpoint" / "reset_policy" を送る。"""
         self._inbox.put((name, None))
+
+    def start_autotune(self) -> None:
+        """学習の自動化（Optuna の探索）を始める（ステップ境界で行う）。"""
+        self._inbox.put(("autotune", True))
+
+    def stop_autotune(self) -> None:
+        """学習の自動化をやめ、最良の試行のパラメータと重みを適用して保存する。"""
+        self._inbox.put(("autotune", False))
+
+    def autotune_running(self) -> bool:
+        """いま学習の自動化が動いているか。"""
+        with self._lock:
+            return self._autotune_running
+
+    def autotune_payload(self) -> dict[str, Any]:
+        """`autotune` メッセージの中身（接続直後に送る）。"""
+        with self._lock:
+            return dict(self._autotune_wire)
+
+    def take_autotune(self, last_seq: int) -> tuple[int, dict[str, Any] | None]:
+        """前回配信した番号より新しい自動探索の状態があれば返す。"""
+        with self._lock:
+            if self._autotune_seq == last_seq:
+                return last_seq, None
+            return self._autotune_seq, dict(self._autotune_wire)
 
     def set_hidden_sizes(self, sizes: list[int]) -> None:
         """隠れ層の構成を変える。**重みは引き継げないので学習は 0 からになる。**"""
@@ -479,7 +542,17 @@ class SimulationEngine:
                         self._map_pending = False
 
     def _handle_inbox_item(self, kind: str, payload: Any) -> None:
-        if kind == "set_map":
+        if kind in AUTOTUNE_BLOCKED_COMMANDS and self._autotune.active:
+            self._notify(AUTOTUNE_BLOCKED_COMMANDS[kind])
+            return
+
+        if kind == "autotune":
+            if payload:
+                self._start_autotune()
+            else:
+                self._stop_autotune()
+
+        elif kind == "set_map":
             map_index, preset_id, preset_name = payload
             self._install_map(map_index, preset_id, preset_name)
 
@@ -611,11 +684,100 @@ class SimulationEngine:
         else:
             logger.warning("未知のコマンド: %s", kind)
 
+    def _start_autotune(self) -> None:
+        """学習の自動化を始める。始められなければ理由を知らせる。"""
+        if self._autotune.active:
+            self._notify("すでに学習の自動化を実行中です")
+            return
+        if self._env is None or self._trainer is None:
+            self._notify("マップを読み込んでから学習の自動化を始めてください")
+            return
+        with self._lock:
+            practical = self._practical_mode
+        if practical:
+            self._notify("実用モードの間は学習しないため、学習の自動化を始められません。開発モードに戻してから始めてください")
+            return
+        if self.detector_job.running:
+            self._notify("認識器の学習中は物理が止まるため、学習の自動化を始められません。終わってから始めてください")
+            return
+        problem = self._autotune.start(self._trainer, self.snapshot_params(), self._loaded_preset_id)
+        if problem:
+            self._notify(problem)
+            self._publish_autotune()
+            return
+        with self._lock:
+            self._autotune_running = True
+        self._publish_autotune()
+        steps = self._autotune.trial_steps
+        self._notify(
+            "学習の自動化を始めました。"
+            f"1 試行 {steps / config.SIM_HZ:.0f} 秒ぶん（{steps:,} ステップ）ずつ、"
+            "学習率・割引率・報酬の重みなどを Optuna が選び直します。OFF にすると最良の試行の設定と重みで学習を続けます"
+        )
+
+    def _stop_autotune(self) -> None:
+        """学習の自動化をやめ、最良の試行のパラメータと重みを適用して保存する。"""
+        if not self._autotune.active or self._trainer is None:
+            self._notify("学習の自動化は実行していません")
+            self._publish_autotune()
+            return
+        message = self._autotune.stop(self._autotune_host, self._trainer)
+        self._finish_autotune()
+        self._notify(message)
+
+    def _abort_autotune(self, reason: str) -> None:
+        """探索を捨てて、探索の前のパラメータと重みに戻す（地図の差し替えなど）。"""
+        if not self._autotune.active:
+            return
+        host = self._autotune_host if self._trainer is not None else None
+        message = self._autotune.abort(host, reason)
+        self._finish_autotune()
+        self._notify(message)
+
+    def _finish_autotune(self) -> None:
+        with self._lock:
+            self._autotune_running = False
+        if self._trainer is not None:
+            self._last_autosave_updates = self._trainer.updates
+        self._publish_autotune()
+
+    def _publish_autotune(self) -> None:
+        """自動探索の状態を asyncio 側へ渡す（試行が替わったとき・開始と停止・1Hz）。"""
+        wire = self._autotune.snapshot().to_wire()
+        with self._lock:
+            self._autotune_wire = wire
+            self._autotune_seq += 1
+        self._autotune_revision = self._autotune.revision
+
+    def _tune_restore(self, patch: dict[str, float], state: dict[str, Any]) -> None:
+        """重みを巻き戻し、探索の対象のパラメータを `patch` にする。スライダーへも配る。"""
+        trainer = self._trainer
+        assert trainer is not None
+        trainer.restore_state(state)
+        with self._lock:
+            self._params.apply_wire(patch)
+            snapshot = SimParams(**vars(self._params))
+            self._params_dirty = True
+        if self._env is not None:
+            self._env.apply_params(snapshot)
+        trainer.apply_params(snapshot)
+
+    def _tune_begin_trial(self, patch: dict[str, float], state: dict[str, Any]) -> None:
+        """試行の頭。重みとパラメータを揃え、街を作り直して同じ条件から走らせる。"""
+        self._tune_restore(patch, state)
+        if self._env is not None:
+            self._env.reset_all()
+            self._sync_vehicle_count()
+        self._assist.reset()
+
     def _apply_app_mode(self, practical: bool) -> None:
         """開発モードと実用モードを切り替える。**配車は必ずここで畳む。**"""
         if practical and self.detector_job.running:
             # 切り替えの要求が学習の開始より先に積まれていた場合（main.py の判定をすり抜ける）
             self._notify("認識器の学習中は実用モードに切り替えられません。中止するか、終わるまで待ってください")
+            return
+        if practical and self._autotune.active:
+            self._notify("学習の自動化の間は実用モードに切り替えられません。OFF にしてから切り替えてください")
             return
         with self._lock:
             if self._practical_mode == practical:
@@ -760,6 +922,9 @@ class SimulationEngine:
         try:
             if self._trainer is None:
                 ticket.error = "学習器がまだ初期化されていません。数秒おいて再試行してください"
+                return
+            if self._autotune.active:
+                ticket.error = AUTOTUNE_IMPORT_BLOCKED
                 return
 
             trainer = self._trainer
@@ -925,6 +1090,8 @@ class SimulationEngine:
         from app.percep.groundtruth import clear_static_cache
         from app.sim.env import SimulationEnv
 
+        # 試行の成績は地図ごとに違うので、探索は続けない（main.py が断るのをすり抜けた場合）
+        self._abort_autotune("エリアを切り替えたため学習の自動化を中止し、探索の前のパラメータと重みに戻しました")
         # 配車は古い env の車両を指しているので、地図ごと入れ替える前に畳む
         self._taxi.cancel(self._env, "エリアを切り替えたため配車を終了しました")
         self._publish_taxi()
@@ -1008,38 +1175,10 @@ class SimulationEngine:
             if time.perf_counter() - self._player_pose_at >= PLAYER_POSE_TTL_SEC:
                 self._apply_player_pose(None)
 
-        obs = env.observations
-        active = env.active_mask
-
-        actions, log_probs, values = trainer.act(obs, active)
-        env.current_options = None if practical else trainer.current_options
-        expert = None
-        if not practical and env.params.online_assist:
-            expert = self._assist.decide(
-                trainer.experience_steps, active, env.assist_danger(active)
-            )
-        result = env.step(actions, expert=expert)
-
         # 実用モードでは推論だけ回す。重みは触らない（決定 5）
+        result, stats = learning_step(env, trainer, self._assist, learn=not practical)
+
         if not practical:
-            trainer.store(
-                obs=obs,
-                actions=actions,
-                log_probs=log_probs,
-                values=values,
-                rewards=result.rewards,
-                dones=result.dones,
-                active=result.active,
-                truncated=result.truncated,
-                final_obs=result.final_obs,
-                # 安全ギミックが操作を丸ごと引き受けた車は、方策の経験として積まない
-                learn=result.learn,
-                # エキスパートが運転した車は、方策の勾配に入れず模倣の損失に使う
-                expert_actions=result.expert_actions,
-                assisted=result.assisted,
-                expert_options=result.expert_options,
-                drive=result.drive,
-            )
             learnable = result.active if result.learn is None else result.learn
             assisted_count = 0 if result.assisted is None else int(result.assisted.sum())
             self._assist_log.append((assisted_count, int(np.count_nonzero(learnable))))
@@ -1056,17 +1195,19 @@ class SimulationEngine:
                 )
             )
 
-            stats = trainer.maybe_update(result.obs, result.active)
+            tuning = self._autotune.active
             if stats is not None:
                 self._last_update_stats = stats
-                if trainer.updates - self._last_autosave_updates >= self._autosave_every:
+                # 探索中は試行の途中の重みを本番へ書かない（OFF にしたときに最良の試行を保存する）
+                if not tuning and trainer.updates - self._last_autosave_updates >= self._autosave_every:
                     self._last_autosave_updates = trainer.updates
                     try:
                         trainer.save(config.CHECKPOINT_PATH)
                     except Exception:
                         logger.exception("チェックポイントの自動保存に失敗しました")
 
-            track = env.params.incident_curriculum
+            # 探索中は難易度を据え置く（試行どうしを同じ難しさで比べる）
+            track = env.params.incident_curriculum and not tuning
             for episode in result.episodes:
                 self._episode_log.append(episode)
                 self._total_episodes += 1
@@ -1074,9 +1215,16 @@ class SimulationEngine:
                     env.curriculum.record_episode_end(
                         episode.reason == "goal", episode.reason == "collision"
                     )
-        else:
-            # 学習しない間も、エピソードが終わった車は次のステップで意図を選び直す
-            trainer.end_options(result.dones)
+
+            if tuning:
+                for notice in self._autotune.tick(
+                    self._autotune_host, trainer, result, env.world.fleet.speed
+                ):
+                    self._notify(notice)
+                if not self._autotune.active:
+                    self._finish_autotune()
+                elif self._autotune.revision != self._autotune_revision:
+                    self._publish_autotune()
 
         self._tick += 1
         self._sim_time = env.sim_time
@@ -1105,6 +1253,9 @@ class SimulationEngine:
             # 映さないと、次に別のパラメータを変えた瞬間に車が起き上がる
             self._sync_vehicle_count()
             metrics = self._build_metrics(trainer.updates)
+            if self._autotune.active:
+                # 試行の進み具合を 1Hz で配る
+                self._publish_autotune()
             # 推論が落ちて真値へ落ちたことがあるので、載せ替えのときだけでなく
             # ここでも取り直す（`model.inUse` は「いま実際に使っているか」）
             detector_active = env.detector_active

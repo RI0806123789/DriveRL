@@ -5,7 +5,9 @@ import { send } from '../store/connection'
 import { formatBytes, startExport, startImport, useModelTransfer } from '../store/exportModel'
 import type { ExportKind } from '../store/exportModel'
 import { useSimStore } from '../store/simStore'
+import { isAutotuned } from '../store/autotune'
 import { AssistRateChip } from './AssistRateChip'
+import { AutoTuneCard } from './AutoTuneCard'
 import { CurriculumGauge } from './CurriculumGauge'
 import { MetricsChart } from './MetricsChart'
 import { NetworkGraph } from './NetworkGraph'
@@ -41,6 +43,11 @@ export function LearningTab() {
 
   const usingMock = useSimStore((s) => s.usingMock)
   const connection = useSimStore((s) => s.connection)
+  const tune = useSimStore((s) => s.autotune)
+  const practical = useSimStore((s) => s.status.practicalMode ?? false)
+  const mapLoaded = useSimStore((s) => s.status.mapLoaded)
+  const tuning = tune?.running ?? false
+  const auto = (key: Parameters<typeof isAutotuned>[1]) => isAutotuned(tune, key)
 
   const [confirmReset, setConfirmReset] = useState(false)
   // 実行中かどうかと結果はタブの外に置く（タブを替えても消えず、二重に送れない）
@@ -315,6 +322,7 @@ export function LearningTab() {
         <Slider
           label="学習率"
           value={params.learningRate}
+          auto={auto('learningRate')}
           min={1e-5}
           max={1e-3}
           step={1e-5}
@@ -325,6 +333,7 @@ export function LearningTab() {
         <Slider
           label="割引率 γ"
           value={params.gamma}
+          auto={auto('gamma')}
           min={0.8}
           max={0.999}
           step={0.001}
@@ -335,6 +344,7 @@ export function LearningTab() {
         <Slider
           label="クリップ範囲 ε"
           value={params.clipRange}
+          auto={auto('clipRange')}
           min={0.05}
           max={0.5}
           step={0.01}
@@ -346,6 +356,7 @@ export function LearningTab() {
           label="エントロピー係数"
           hint="大きいほど探索的"
           value={params.entropyCoef}
+          auto={auto('entropyCoef')}
           min={0}
           max={0.1}
           step={0.001}
@@ -390,6 +401,8 @@ export function LearningTab() {
         <Slider
           label="目的地到達"
           value={params.rewardGoal}
+          auto={auto('rewardGoal')}
+          format={(v) => v.toFixed(0)}
           min={0}
           max={300}
           step={5}
@@ -399,6 +412,8 @@ export function LearningTab() {
         <Slider
           label="衝突"
           value={params.rewardCollision}
+          auto={auto('rewardCollision')}
+          format={(v) => v.toFixed(0)}
           min={-300}
           max={0}
           step={5}
@@ -409,6 +424,7 @@ export function LearningTab() {
           label="経路進捗"
           hint="1m 進むごと"
           value={params.rewardProgress}
+          auto={auto('rewardProgress')}
           min={0}
           max={5}
           step={0.1}
@@ -420,6 +436,7 @@ export function LearningTab() {
           label="道路外"
           hint="1 ステップごと"
           value={params.rewardOffroad}
+          auto={auto('rewardOffroad')}
           min={-10}
           max={0}
           step={0.1}
@@ -431,6 +448,8 @@ export function LearningTab() {
           label="信号無視"
           hint="赤信号で停止線を越えたとき"
           value={params.rewardSignal}
+          auto={auto('rewardSignal')}
+          format={(v) => v.toFixed(0)}
           min={-200}
           max={0}
           step={5}
@@ -441,6 +460,8 @@ export function LearningTab() {
           label="速度超過"
           hint="規制速度を超え始めたとき"
           value={params.rewardOverspeed}
+          auto={auto('rewardOverspeed')}
+          format={(v) => v.toFixed(0)}
           min={-100}
           max={0}
           step={1}
@@ -451,6 +472,7 @@ export function LearningTab() {
           label="時間ペナルティ"
           hint="1 ステップごと"
           value={params.rewardTime}
+          auto={auto('rewardTime')}
           min={-1}
           max={0}
           step={0.01}
@@ -469,6 +491,7 @@ export function LearningTab() {
           <Button
             variant="tonal"
             icon={<SaveIcon size={16} />}
+            disabled={tuning}
             onClick={() => send({ type: 'save_checkpoint' })}
           >
             今すぐ保存
@@ -476,6 +499,7 @@ export function LearningTab() {
           <Button
             variant="outlined"
             icon={<DownloadIcon size={16} />}
+            disabled={tuning}
             onClick={() => send({ type: 'load_checkpoint' })}
           >
             読み込む
@@ -512,6 +536,7 @@ export function LearningTab() {
             variant="outlined"
             block
             icon={<RefreshIcon size={16} />}
+            disabled={tuning}
             onClick={() => setConfirmReset(true)}
           >
             ポリシーを初期化
@@ -625,7 +650,7 @@ export function LearningTab() {
         <input
           ref={fileInputRef}
           type="file"
-          accept=".pt,application/octet-stream"
+          accept=".pt,.before-autotune,application/octet-stream"
           style={{ display: 'none' }}
           onChange={(e) => {
             const file = e.target.files?.[0]
@@ -638,7 +663,7 @@ export function LearningTab() {
           variant="filled"
           block
           icon={<SaveIcon size={16} />}
-          disabled={exportDisabled || importing}
+          disabled={exportDisabled || importing || tuning}
           onClick={() => fileInputRef.current?.click()}
         >
           {importing ? '読み込み中…' : 'ファイルを選んで学習を再開'}
@@ -699,6 +724,15 @@ export function LearningTab() {
           </div>
         )}
       </Card>
+
+      <AutoTuneCard
+        tune={tune}
+        connected={connection === 'open'}
+        practical={practical}
+        suspended={suspended}
+        mapLoaded={mapLoaded}
+        onToggle={(on) => send({ type: on ? 'start_auto_tune' : 'stop_auto_tune_and_save' })}
+      />
     </>
   )
 }

@@ -1,6 +1,7 @@
 /** Material 3 Expressive のスライダー。 */
 
 import { useCallback, useEffect, useId, useRef, useState } from 'react'
+import { ValueFlash } from './ValueFlash'
 
 export interface SliderProps {
   label: string
@@ -9,6 +10,8 @@ export interface SliderProps {
   max: number
   step?: number
   disabled?: boolean
+  /** 学習の自動化が値を決めている間。動かせなくし、値が変わるたびに数字を入れ替えて見せる */
+  auto?: boolean
   /** 値の表示形式。省略時はそのまま */
   format?: (v: number) => string
   /** つまみを動かしている間、毎回呼ばれる */
@@ -26,6 +29,7 @@ export function Slider({
   max,
   step = 1,
   disabled = false,
+  auto = false,
   format,
   onChange,
   onCommit,
@@ -68,13 +72,22 @@ export function Slider({
   )
 
   return (
-    <div className="m3-slider" data-dragging={dragging ? 'true' : 'false'}>
+    <div
+      className="m3-slider"
+      data-dragging={dragging ? 'true' : 'false'}
+      data-auto={auto ? 'true' : undefined}
+    >
       <div className="m3-slider-head">
         <label className="m3-slider-label" htmlFor={id}>
           {label}
           {hint && <span style={{ opacity: 0.7 }}>　{hint}</span>}
         </label>
-        <span className="m3-slider-value">{shown}</span>
+        {auto && <span className="m3-slider-auto">自動</span>}
+        {auto ? (
+          <ValueFlash className="m3-slider-value">{shown}</ValueFlash>
+        ) : (
+          <span className="m3-slider-value">{shown}</span>
+        )}
       </div>
       <input
         id={id}
@@ -84,7 +97,7 @@ export function Slider({
         max={max}
         step={step}
         value={value}
-        disabled={disabled}
+        disabled={disabled || auto}
         style={{ ['--m3-slider-pct' as string]: `${pct}%` }}
         onPointerDown={() => setDragging(true)}
         onChange={(e) => onChange(Number(e.target.value))}

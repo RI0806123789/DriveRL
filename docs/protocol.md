@@ -830,6 +830,46 @@ true のときの学習中の車だけ。判断は検出枠と推定距離から
 - 乗降地点の手前で止めるのに、赤信号と同じ速度上限（`u^2/(2a) + u·dt <= 距離`）を掛けている。
   実測の停車精度は**乗車地点 0.05m / 降車地点 0.12m**（銀座）。
 
+### 2.11 `autotune` — 学習の自動化（Optuna によるハイパーパラメータの探索）
+
+学習タブの「学習の自動化」向け。**接続直後に 1 通**送られ、以後は**試行が替わったとき・開始と停止・1Hz**（試行の進み具合）で送られる。
+実装は `backend/app/runtime/autotune.py`（CLI の `backend/tune_hyperparams.py` と同じ部品を使う）。
+
+```jsonc
+{
+  "type": "autotune",
+  "available": true,          // Optuna が入っているか。false なら start_auto_tune は理由つきで断られる
+  "running": true,
+  "phase": "running",         // idle | preparing（履歴の DB を開いている）| running | waiting（次の試行を選んでいる）
+  "studyName": "live-ginza",  // 履歴の DB（backend/data/tuning/driverl_optuna.db）の study 名。地図ごとに分ける
+  "trial": 12,                // いま走らせている試行の番号（study の通し番号）。試行の合間は null
+  "trialProgress": 0.42,      // いまの試行の進み具合 0〜1
+  "trialSteps": 1536,         // 1 試行のステップ数（20Hz で 76.8 秒ぶん）
+  "finishedTrials": 4,        // この探索で終えた試行の数（打ち切りも含む）
+  "priorTrials": 8,           // 同じ study に前から入っていた完了済みの試行（再開したとき）
+  "tunedKeys": ["learningRate", "gamma", "clipRange", "entropyCoef", "rewardGoal", "rewardCollision",
+                "rewardProgress", "rewardOffroad", "rewardSignal", "rewardOverspeed", "rewardTime"],
+  "current": { "learningRate": 0.00021, "gamma": 0.982 },  // いまの試行のパラメータ（tunedKeys のすべて）。合間は null
+  "best": { "trial": 9, "score": 0.3125, "params": { "learningRate": 0.00018 } },  // この探索の最良。まだ無ければ null
+  "history": [ { "trial": 11, "score": -0.42, "outcome": "pruned" } ],  // 直近の試行（古い順・最大 20 件）。outcome は complete | pruned | diverged
+  "message": "試行 #12 を走らせています"
+}
+```
+
+- ★ **`running` の間、`tunedKeys` の値は試行が決める。** 試行が替わるたびにサーバーがその値を `params`（2.5）で配るので、
+  スライダーはそれに追従して動く。クライアントはこの間スライダーを動かせないようにし、サーバーも `set_params` の
+  `tunedKeys` のキーを捨てる（それ以外のキーは反映する）。捨てたときは理由を `status`（`notice: true`）で返す。
+- **試行ごとに、重みを探索を始めたときの状態へ巻き戻し、街を作り直してから** `trialSteps` だけ学習させる（試行どうしを
+  同じ出発点で比べるため）。スコアは最後の半分のステップで終わったエピソードの到達・衝突・逸脱・打ち切りの割合と信号無視、
+  走っていた割合から出す。**報酬の合計は使わない**（報酬の重みも探索の対象なので、比べられない）。
+- 見込みの薄い試行は途中で打ち切る（`MedianPruner`。256 ステップごとに途中のスコアを報告する）。重みに NaN / Inf が出た試行は
+  その場で打ち切って最低点を付ける（`diverged`）。
+- 探索の間は**本番の重み（`shared_policy.pt`）を自動保存しない**。始めた瞬間の重みを 1 度だけ保存し、それ以降は
+  最良の試行の重みだけを `best_tuned_policy.pt` に、パラメータを `best_params.json`（`params` と同じキー・`tunedKeys` の分だけ）に、
+  どちらもアトミックに書く。ヒヤリハットの難易度（`curriculumLevel`）も探索の間は据え置く。
+- 探索の間は `save_checkpoint` / `load_checkpoint` / `reset_policy` / `set_network` / `POST /api/import` / `load_map` /
+  `set_app_mode`（`taxi` へ）/ `start_detector_training` を断り、理由を `status.message` で返す（`POST /api/import` は応答の `error`）。
+
 ---
 
 ## 3. クライアント → サーバー
@@ -854,6 +894,8 @@ true のときの学習中の車だけ。判断は検出枠と推定距離から
                "width": 1.0, "seed": 0,
                "weatherMix": true, "focusWeak": true } }
 { "type": "cancel_detector_training" }                        // 中断（すぐには止まらない）
+{ "type": "start_auto_tune" }                                 // 学習の自動化（Optuna の探索）を始める（2.11）
+{ "type": "stop_auto_tune_and_save" }                         // やめて、最良の試行のパラメータと重みを適用・保存する
 { "type": "set_app_mode", "mode": "taxi" }                    // "dev" | "taxi"。実用モードの出入り
 { "type": "request_taxi",                                     // 乗降地点は道路へスナップされる
   "pickup": [12.5, -30.2], "dropoff": [220.0, 88.4] }
@@ -913,6 +955,20 @@ asyncio 側から触ると更新中の重みを壊す）。
 - `cancel_detector_training` を送っても**すぐには止まらない**。いま処理中の
   バッチ（またはステップ）の切れ目まで進んでから終わる。
   **中断したモデルは保存しない**ので、それまでの認識器はそのまま残る。
+
+`start_auto_tune` は学習の自動化（2.11）を始める。マップを読み込んでいない・実用モード・認識器の学習中・すでに実行中・
+Optuna が入っていない・いまの重みに NaN / Inf がある、のどれかなら始めず、理由を `status.message`（`notice: true`）で返す。
+始められたかは `autotune.running` で見ること（クライアントはトグルを楽観的に切り替えない）。
+
+`stop_auto_tune_and_save` は探索をやめ、**この探索で最も成績の良かった試行のパラメータと重みを適用し、本番の重み
+（`shared_policy.pt`）へアトミックに保存してから、そのまま学習を続ける。** 保存の前に、元の `shared_policy.pt` を
+`shared_policy.pt.before-autotune` へ控える（1 世代。次の探索で上書きされる）。
+
+- 控えられなかったとき・最良の試行の重みに NaN / Inf があったときは適用せず、**探索を始める前のパラメータと重みに戻す**。
+- 完了した試行が 1 つも無いときも、探索を始める前のパラメータと重みに戻す。
+- 走らせていた試行は中断（Optuna では `FAIL`）として履歴に残る。
+- **パラメータはサーバーを再起動すると既定に戻る**（スライダーで変えたときと同じ）。最良のパラメータは
+  `backend/data/tuning/best_params.json` に残るので、`set_params` の `params` にそのまま渡せる。
 
 ### 実用モードの操作（`set_app_mode` 以下）
 
@@ -991,6 +1047,8 @@ asyncio 側から触ると更新中の重みを壊す）。
 階層型の方策（`frame.vehicles[].currentOption` / `metrics.optionShares` / `jerkRms`）を足したときも 2 のまま据え置いた。
 どれも古いクライアントが無視できるキーで、観測の次元は変わらない。階層型にする前の重みは、下位の入力に足した
 意図の one-hot の重みと意図ごとの偏りを 0 にして読み込む（上位方策は初期値。`rl/ppo.py` の `upgrade_flat_state`）。
+学習の自動化（`autotune` / `start_auto_tune` / `stop_auto_tune_and_save`）を足したときも 2 のまま据え置いた。
+新しいメッセージ型だけで、古いクライアントは `autotune` を無視し、送らない限り探索は始まらない。
 
 不正なメッセージには `error` (`INVALID_MESSAGE`) を返し、接続は維持する。
 

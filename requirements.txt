@@ -28,6 +28,11 @@ networkx==3.6.1                # 経路探索
 numpy==2.5.2
 torch==2.14.0+cpu              # 自作 PPO（CPU 学習）
 
+# --- ハイパーパラメータの自動探索（学習タブの「学習の自動化」と backend/tune_hyperparams.py）---
+# 履歴は backend/data/tuning/driverl_optuna.db（SQLite・WAL）。SQLAlchemy と alembic も一緒に入る。
+# 入っていなくてもサーバーは起動する（自動探索だけが理由を出して始まらない）。
+optuna==5.0.0
+
 # --- モデルの書き出し（.keras 形式）---
 # Keras 3 は torch をバックエンドにできるので TensorFlow は入れない。
 # バックエンドの指定は app/rl/export.py が import 前に環境変数で行う。
