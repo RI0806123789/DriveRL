@@ -126,7 +126,7 @@ console.log('6. 契約ファイル')
     check(`docs/protocol.md に ${key} の説明がある`, doc.includes(key))
   }
   const ts = read('src/types/protocol.ts')
-  check('protocol.ts の FrameVehicle に currentOption?: DriveOption', /\n  currentOption\?: DriveOption\n/.test(ts))
+  check('protocol.ts の FrameVehicle に currentOption?: DriveOption', /\r?\n  currentOption\?: DriveOption\r?\n/.test(ts))
 }
 
 if (failures > 0) {

@@ -95,8 +95,8 @@ function interfaceBody(name: string): string {
   return new RegExp(`export interface ${name} \\{([\\s\\S]*?)\\n\\}`).exec(protocolTs)?.[1] ?? ''
 }
 const metrics = interfaceBody('MetricsMessage')
-check('MetricsMessage に curriculumLevel?: number がある', /\n  curriculumLevel\?: number\n/.test(metrics))
-check('MetricsMessage に incidentsTriggered?: number がある', /\n  incidentsTriggered\?: number\n/.test(metrics))
+check('MetricsMessage に curriculumLevel?: number がある', /\r?\n  curriculumLevel\?: number\r?\n/.test(metrics))
+check('MetricsMessage に incidentsTriggered?: number がある', /\r?\n  incidentsTriggered\?: number\r?\n/.test(metrics))
 check('MetricsMessage に incidentsAvoidedRate?: number | null がある', /\n  incidentsAvoidedRate\?: number \| null/.test(metrics))
 check('SimParams に incidentCurriculum: boolean がある', /\n  incidentCurriculum: boolean/.test(interfaceBody('SimParams')))
 for (const key of ['curriculumLevel', 'incidentsTriggered', 'incidentsAvoidedRate', 'incidentCurriculum']) {
