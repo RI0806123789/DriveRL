@@ -2466,8 +2466,19 @@ Optuna（TPE）で PPO と報酬の重みのハイパーパラメータを探し
   | 実用モードへ | `main.py` と `_apply_app_mode` | — |
   | 認識器の学習 | `DetectorTrainingJob.start` が `autotune_running()` を見る（逆向きも `_start_autotune` が断る）| — |
 
-- **設定はサーバーを再起動すると既定に戻る**（スライダーで変えたときと同じ。`SimParams` は保存していない）。最良の値は
-  `best_params.json`（`set_params` と同じキー・探索の対象の分だけ）に残ります
+- **学習タブの設定値は `backend/data/learning_params.json` に控え、起動時に戻す**（`runtime/param_store.py`）。
+  対象は `PERSISTED_WIRE_KEYS`（学習率・γ・ε・エントロピー係数・報酬の重み 7 つ・スイッチ 3 つ）だけで、台数・天候・倍速は
+  控えません。最良の値は `best_params.json`（`set_params` と同じキー・探索の対象の分だけ）にも残ります
+  - ★ **控えるのは「利用者が通した値」と「探索が確定した値」だけ。試行の途中の値は控えないこと。** 試行ごとの値は
+    `_tune_restore` が `_params` を直接書き換えるので、`_params` を丸ごと保存すると、探索中にサーバーが落ちたとき
+    試行 N の途中の値で次回が始まります。控えるのは `update_params`（探索中は探索の対象のキーを先に捨てるので、
+    通るのはスイッチなど対象外のキーだけ）と、`_finish_autotune`（OFF で最良を適用した後・中断で探索前へ戻した後）の 2 か所です
+  - **控えは `patch` に含まれるキーだけを混ぜて書く**（`ParamStore.save`）。スライダーを 1 つ動かすたびに他の値を
+    既定で上書きしないため。書き込みはアトミック（一時ファイル → `os.replace`）で、壊れたファイルは握りつぶさず初回だけログに
+    残して既定から始めます（`warn_once`）。読み戻す値は `apply_wire` を通すので、範囲外は丸め、読めない値は既定のままです
+  - **エンジンの `param_store` は既定で None**（保存も復元もしない）。`main.py` だけが本番の控えを渡します。
+    テストや `verify_*.py` が `SimulationEngine()` を作っても、利用者の控えを読まず書きません
+  - 控えを無効にしたい・既定へ戻したいときは、サーバーを止めて `learning_params.json` を消します（画面に戻すボタンは無い）
 - 画面のトグルは楽観的に切り替えない（`autotune.running` だけを見る）。**`localStorage` の `driverl_auto_tune_active` は
   前回の様子の控えで、正はサーバー**です。接続し直した最初の `autotune` が止まっているのに控えが動いていたら、
   「サーバーの再起動などで止まった」と知らせます（`store/autotune.ts` の `lostSessionNotice`）。自動で再開はしません
@@ -2568,7 +2579,8 @@ osmnx は道をまとめるときに値を集合からリストへ戻すので�
 ### 生成物と環境変数
 
 `backend/data/` 配下は**すべて生成物**です（`.gitignore` 済み。`config.py` が起動時に作る）。
-OSM キャッシュ・チェックポイント・認識器と教師データ・書き出し・アップロード・自動探索の履歴（`tuning/`）が入ります。
+OSM キャッシュ・チェックポイント・認識器と教師データ・書き出し・アップロード・自動探索の履歴（`tuning/`）・
+学習タブの設定値の控え（`learning_params.json`）が入ります。
 **消してよい**ですが、マップの再取得（Overpass。初回 10〜60 秒）と学習のやり直しが要ります
 （`tuning/driverl_optuna.db` を消すと、自動探索は前の試行を知らないところから探し直します）。
 

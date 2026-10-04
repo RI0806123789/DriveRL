@@ -23,6 +23,7 @@ from app.contracts import coerce_bool, validate_hidden_sizes
 from app.host_guard import HostOriginGuard
 from app.runtime.autotune import TUNED_WIRE_KEYS
 from app.runtime.engine import SimulationEngine
+from app.runtime.param_store import ParamStore
 
 logging.basicConfig(
     level=logging.INFO,
@@ -30,7 +31,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("autoware_sim")
 
-engine = SimulationEngine()
+engine = SimulationEngine(param_store=ParamStore(config.LEARNING_PARAMS_PATH))
 
 _EVENT_KINDS = {
     "spawn_vehicle",

@@ -396,11 +396,14 @@ action, value = policy(obs)                     # action: (B, 2) = 加減速・�
   この探索で最も成績の良かった試行の設定と重みを適用して `shared_policy.pt` に保存し、そのまま学習を続けます。
   完了した試行が無ければ、ON にする前の設定と重みに戻ります
 - 気に入らなければ、「モデルの読み込み」で `shared_policy.pt.before-autotune` を選べば戻せます
-- 設定（スライダーの値）はサーバーを再起動すると既定に戻ります。最良の値は `backend/data/tuning/best_params.json` に残ります
+- 学習タブの設定値（学習率・報酬の重み・スイッチ）は変えるたびに `backend/data/learning_params.json` へ自動で保存され、
+  再起動しても戻ります。探索中の試行の値は保存せず、OFF にして最良の試行が確定したときに保存します。
+  最良の値は `backend/data/tuning/best_params.json` にも残ります
 - 1 試行は実時間で約 77 秒（倍速を上げれば短くなる）。TPE が当たりを付け始めるまでに 10 試行ほどかかります
 
 | 保存先（`backend/data/` の下）| 中身 |
 |---|---|
+| `learning_params.json` | 学習タブの設定値の控え（起動時に戻す。消すと既定から始まる）|
 | `tuning/driverl_optuna.db` | 探索の履歴（SQLite・WAL）。同じ study 名で続きから探す（画面からはエリアごとに `live-<エリア>`）|
 | `tuning/best_params.json` | 最良の試行の値（`set_params` と同じキー）|
 | `tuning/trial_summary.csv` | 試行ごとの値と成績の一覧 |

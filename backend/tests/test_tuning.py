@@ -17,6 +17,7 @@ from app import config
 from app.contracts import _PARAM_SPECS, EpisodeResult, SimParams, StepResult
 from app.rl.ppo import PPOTrainer
 from app.runtime import autotune
+from app.runtime.param_store import PERSISTED_WIRE_KEYS, ParamStore
 
 optuna = pytest.importorskip("optuna")
 
@@ -320,6 +321,8 @@ def test_engine_autotune_applies_best_and_backs_up(engine, tmp_path: Path) -> No
     trainer = eng._trainer
     baseline = {k: v.clone() for k, v in trainer.policy.state_dict().items()}
     baseline_lr = eng._params.learning_rate
+    store = ParamStore(tmp_path / "learning_params.json")
+    eng._param_store = store
 
     eng.start_autotune()
     assert any("始めました" in m for m in _drain(eng))
@@ -339,6 +342,8 @@ def test_engine_autotune_applies_best_and_backs_up(engine, tmp_path: Path) -> No
     # 探索している値は外から変えられない（それ以外は通る）
     params, _ = eng.update_params({"learningRate": 9e-4, "simSpeed": 2.0})
     assert params.learning_rate != 9e-4 and params.sim_speed == 2.0
+    # 試行の途中の値は控えない（控えに入るのは利用者が通した値だけ）
+    assert "learningRate" not in store.load()
     for kind in ("save_checkpoint", "load_checkpoint", "reset_policy"):
         eng.command(kind)
         assert any("学習の自動化の間" in m for m in _drain(eng)), kind
@@ -362,6 +367,8 @@ def test_engine_autotune_applies_best_and_backs_up(engine, tmp_path: Path) -> No
     assert _state_equal(trainer.policy.state_dict(), best.state["policy"])
     for key, value in best.patch.items():
         assert eng._params.to_wire()[key] == pytest.approx(value)
+    # 止めた時点で、適用した最良の値が控えに入る（再起動してもそこから始まる）
+    assert store.load() == pytest.approx({k: eng._params.to_wire()[k] for k in PERSISTED_WIRE_KEYS})
     # 最良の書き出しは Optuna の専用スレッドが行うので、済むのを待ってから読む
     eng._autotune.shutdown()
     on_disk = json.loads((tmp_path / "best_params.json").read_text(encoding="utf-8"))

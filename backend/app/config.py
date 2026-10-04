@@ -24,6 +24,8 @@ EXPORT_DIR = DATA_DIR / "exports"
 UPLOAD_DIR = DATA_DIR / "uploads"
 #: ハイパーパラメータの自動探索（`runtime/autotune.py`）の履歴（SQLite）・最良のパラメータ・試行の一覧
 TUNING_DIR = DATA_DIR / "tuning"
+#: 学習タブの設定値（学習率・報酬の重み・スイッチ）の控え。起動時に戻す（`runtime/param_store.py`）
+LEARNING_PARAMS_PATH = DATA_DIR / "learning_params.json"
 
 for _d in (DATA_DIR, MAP_CACHE_DIR, OSMNX_CACHE_DIR, CHECKPOINT_DIR, EXPORT_DIR, UPLOAD_DIR, TUNING_DIR):
     _d.mkdir(parents=True, exist_ok=True)
