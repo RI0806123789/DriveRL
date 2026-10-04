@@ -22,12 +22,16 @@ OSMNX_CACHE_DIR = DATA_DIR / "osmnx_cache"
 CHECKPOINT_DIR = DATA_DIR / "checkpoints"
 EXPORT_DIR = DATA_DIR / "exports"
 UPLOAD_DIR = DATA_DIR / "uploads"
+#: ハイパーパラメータの自動探索（`runtime/autotune.py`）の履歴（SQLite）・最良のパラメータ・試行の一覧
+TUNING_DIR = DATA_DIR / "tuning"
 
-for _d in (DATA_DIR, MAP_CACHE_DIR, OSMNX_CACHE_DIR, CHECKPOINT_DIR, EXPORT_DIR, UPLOAD_DIR):
+for _d in (DATA_DIR, MAP_CACHE_DIR, OSMNX_CACHE_DIR, CHECKPOINT_DIR, EXPORT_DIR, UPLOAD_DIR, TUNING_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
 
 CHECKPOINT_PATH = CHECKPOINT_DIR / "shared_policy.pt"
+#: 自動探索の最良の試行の重み。本番の `CHECKPOINT_PATH` とは分けて置く（探索中に本番を上書きしない）
+BEST_TUNED_POLICY_PATH = CHECKPOINT_DIR / "best_tuned_policy.pt"
 
 HOST = os.getenv("DRIVERL_HOST", "127.0.0.1")
 PORT = int(os.getenv("DRIVERL_PORT", "8000"))

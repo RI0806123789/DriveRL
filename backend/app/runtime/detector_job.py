@@ -181,6 +181,9 @@ class EngineHooks(Protocol):
     def map_loading(self) -> bool:
         """地図を読み込んでいる最中か（差し込み終わるまで真）。"""
 
+    def autotune_running(self) -> bool:
+        """学習の自動化（Optuna の探索）が動いているか。"""
+
 
 @dataclass
 class _Progress:
@@ -236,6 +239,9 @@ class DetectorTrainingJob:
         if self._hooks.map_loading():
             # 読み込みが終わるとエンジンの地図が差し替わり、収集と画面のエリアが食い違う
             return "エリアを読み込んでいる間は認識器の学習を始められません。読み込みが終わってから始めてください"
+        if self._hooks.autotune_running():
+            # 学習中は物理が止まるので、試行が進まないまま時間だけが過ぎる
+            return "学習の自動化の間は認識器の学習を始められません。OFF にしてから始めてください"
 
         if request.trains and not request.collects:
             if not self._dataset_path().exists():

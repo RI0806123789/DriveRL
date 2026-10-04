@@ -652,18 +652,59 @@ class PPOTrainer:
         self.reset_policy()
         return True
 
+    def snapshot_state(self) -> dict[str, Any]:
+        """重み・オプティマイザの状態・更新回数を手元に複製する（自動探索で試行ごとに巻き戻すため）。"""
+        return {
+            "hidden_sizes": tuple(self.policy.hidden_sizes),
+            "policy": copy.deepcopy(self.policy.state_dict()),
+            "optimizer": copy.deepcopy(self.optimizer.state_dict()),
+            "updates": int(self._updates),
+        }
+
+    def restore_state(self, state: dict[str, Any]) -> None:
+        """`snapshot_state` の複製へ戻す。溜めかけのロールアウトと進行中の更新は捨てる。"""
+        if tuple(state["hidden_sizes"]) != tuple(self.policy.hidden_sizes):
+            raise ValueError("隠れ層の構成が複製したときと違うため巻き戻せません")
+        self.policy.load_state_dict(state["policy"])
+        # Adam の統計は load_state_dict で複製されず、手元の複製と共有されてその場で書き換わる
+        self.optimizer.load_state_dict(copy.deepcopy(state["optimizer"]))
+        for group in self.optimizer.param_groups:
+            group["lr"] = self.learning_rate
+        self._updates = int(state["updates"])
+        self.reset_rollout()
+
     def save(self, path: Path) -> None:
         """チェックポイントをアトミックに書き出す（.tmp -> os.replace）。"""
+        self._write_checkpoint(
+            path,
+            self.policy.hidden_sizes,
+            self._updates,
+            self.policy.state_dict(),
+            self.optimizer.state_dict(),
+        )
+
+    def save_state(self, state: dict[str, Any], path: Path) -> None:
+        """`snapshot_state` の複製を `save` と同じ形で書き出す。複製なので学習を回しているスレッドの外から呼んでよい。"""
+        self._write_checkpoint(path, state["hidden_sizes"], state["updates"], state["policy"], state["optimizer"])
+
+    def _write_checkpoint(
+        self,
+        path: Path,
+        hidden_sizes: Sequence[int],
+        updates: int,
+        policy: dict[str, Any],
+        optimizer: dict[str, Any],
+    ) -> None:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "format": CHECKPOINT_FORMAT,
             "obs_dim": self.obs_dim,
             "action_dim": self.action_dim,
-            "hidden_sizes": list(self.policy.hidden_sizes),
-            "updates": self._updates,
-            "policy": self.policy.state_dict(),
-            "optimizer": self.optimizer.state_dict(),
+            "hidden_sizes": [int(h) for h in hidden_sizes],
+            "updates": int(updates),
+            "policy": policy,
+            "optimizer": optimizer,
         }
         tmp_path = path.with_suffix(path.suffix + ".tmp")
         torch.save(payload, tmp_path)

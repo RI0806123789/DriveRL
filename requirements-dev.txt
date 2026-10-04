@@ -7,3 +7,7 @@
 -r requirements.txt
 
 pytest==9.1.1
+
+# 自動探索の履歴をブラウザで見る（サーバーの動作には要らない）。backend から:
+#   .venv\Scripts\optuna-dashboard.exe sqlite:///data/tuning/driverl_optuna.db
+optuna-dashboard==0.21.0

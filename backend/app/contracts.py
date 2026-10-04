@@ -865,3 +865,76 @@ class TaxiStatus:
         if include_route:
             payload["route"] = [[round(px, 2), round(py, 2)] for px, py in self.route]
         return payload
+
+
+@dataclass
+class AutotuneTrial:
+    """自動探索の試行 1 つの結果（画面の一覧）。"""
+
+    trial: int
+    #: 打ち切った（pruned）試行は途中のスコア。重みが壊れた試行（diverged）は最低点
+    score: float | None
+    #: complete | pruned | diverged
+    outcome: str
+
+    def to_wire(self) -> dict[str, Any]:
+        return {
+            "trial": self.trial,
+            "score": None if self.score is None else round(self.score, 4),
+            "outcome": self.outcome,
+        }
+
+
+@dataclass
+class AutotuneBest:
+    """自動探索のいまの最良の試行。"""
+
+    trial: int
+    score: float
+    params: dict[str, float] = field(default_factory=dict)
+
+    def to_wire(self) -> dict[str, Any]:
+        return {
+            "trial": self.trial,
+            "score": round(self.score, 4),
+            "params": {k: float(v) for k, v in self.params.items()},
+        }
+
+
+@dataclass
+class AutotuneSnapshot:
+    """docs/protocol.md 2.11 の autotune に対応。学習タブの「学習の自動化」の状態。"""
+
+    available: bool = False
+    running: bool = False
+    #: idle | preparing | running | waiting
+    phase: str = "idle"
+    study_name: str | None = None
+    trial: int | None = None
+    trial_progress: float = 0.0
+    trial_steps: int = 0
+    finished_trials: int = 0
+    prior_trials: int = 0
+    tuned_keys: list[str] = field(default_factory=list)
+    current: dict[str, float] | None = None
+    best: AutotuneBest | None = None
+    history: list[AutotuneTrial] = field(default_factory=list)
+    message: str = ""
+
+    def to_wire(self) -> dict[str, Any]:
+        return {
+            "available": self.available,
+            "running": self.running,
+            "phase": self.phase,
+            "studyName": self.study_name,
+            "trial": self.trial,
+            "trialProgress": round(self.trial_progress, 3),
+            "trialSteps": self.trial_steps,
+            "finishedTrials": self.finished_trials,
+            "priorTrials": self.prior_trials,
+            "tunedKeys": list(self.tuned_keys),
+            "current": None if self.current is None else {k: float(v) for k, v in self.current.items()},
+            "best": None if self.best is None else self.best.to_wire(),
+            "history": [t.to_wire() for t in self.history],
+            "message": self.message,
+        }

@@ -600,6 +600,55 @@ export interface TaxiMessage {
   driveMode: TaxiDriveMode
 }
 
+/** 学習の自動化の段階。preparing は履歴の DB を開いている間、waiting は次の試行のパラメータを選んでいる間 */
+export type AutotunePhase = 'idle' | 'preparing' | 'running' | 'waiting'
+
+/** 試行の終わり方。pruned は見込みが薄く途中で打ち切った試行、diverged は重みが NaN / Inf になった試行 */
+export type AutotuneOutcome = 'complete' | 'pruned' | 'diverged'
+
+/** 自動探索の試行 1 つの結果 */
+export interface AutotuneTrial {
+  trial: number
+  /** pruned は途中のスコア、diverged は最低点 */
+  score: number | null
+  outcome: AutotuneOutcome
+}
+
+/** この探索（ON にしてから）の最良の試行 */
+export interface AutotuneBest {
+  trial: number
+  score: number
+  params: Partial<SimParams>
+}
+
+/** 2.11 autotune — 学習の自動化（Optuna）の状態（接続直後と、変わったとき・1Hz）。 */
+export interface AutotuneMessage {
+  type: 'autotune'
+  /** Optuna が入っているか。false ならトグルを押しても始まらない */
+  available: boolean
+  running: boolean
+  phase: AutotunePhase
+  studyName: string | null
+  /** いま走らせている試行の番号（study の通し番号）。試行の合間は null */
+  trial: number | null
+  /** いまの試行の進み具合 0〜1 */
+  trialProgress: number
+  /** 1 試行のステップ数（20Hz） */
+  trialSteps: number
+  /** この探索で終えた試行の数（打ち切りも含む） */
+  finishedTrials: number
+  /** 同じ study に前から入っていた完了済みの試行の数（再開したとき） */
+  priorTrials: number
+  /** 探索している params のキー。**この間はスライダーを動かせない** */
+  tunedKeys: Array<keyof SimParams>
+  /** いまの試行のパラメータ。試行の合間は null */
+  current: Partial<SimParams> | null
+  best: AutotuneBest | null
+  /** 直近の試行（古い順・最大 20 件） */
+  history: AutotuneTrial[]
+  message: string
+}
+
 /** `docs/protocol.md` のエラーコード表が唯一の出典。 */
 export type ErrorCode =
   | 'MAP_LOAD_FAILED'
@@ -671,6 +720,7 @@ export type ServerMessage =
   | NetworkMessage
   | DetectorMessage
   | TaxiMessage
+  | AutotuneMessage
   | ErrorMessage
   | PongMessage
 
@@ -757,6 +807,16 @@ export interface SetNetworkMessage {
   hiddenSizes: number[]
 }
 
+/** 学習の自動化（Optuna の探索）を始める。断るときは理由が status で返る */
+export interface StartAutoTuneMessage {
+  type: 'start_auto_tune'
+}
+
+/** 学習の自動化をやめ、最良の試行のパラメータと重みを適用して保存する（元の重みは .before-autotune へ退避） */
+export interface StopAutoTuneAndSaveMessage {
+  type: 'stop_auto_tune_and_save'
+}
+
 /** 開発モードと実用モードを切り替える。**学習の可否だけが変わる**（物理は止まらない） */
 export interface SetAppModeMessage {
   type: 'set_app_mode'
@@ -815,6 +875,8 @@ export type ClientMessage =
   | SetNetworkMessage
   | StartDetectorTrainingMessage
   | CancelDetectorTrainingMessage
+  | StartAutoTuneMessage
+  | StopAutoTuneAndSaveMessage
   | SetAppModeMessage
   | RequestTaxiMessage
   | BoardTaxiMessage

@@ -21,6 +21,7 @@ from app import config
 from app.contracts import InterventionEvent
 from app.contracts import coerce_bool, validate_hidden_sizes
 from app.host_guard import HostOriginGuard
+from app.runtime.autotune import TUNED_WIRE_KEYS
 from app.runtime.engine import SimulationEngine
 
 logging.basicConfig(
@@ -152,10 +153,16 @@ async def send_json(websocket: WebSocket, payload: dict[str, Any]) -> None:
     await websocket.send_text(orjson.dumps(payload).decode("utf-8"))
 
 
+async def send_notice(websocket: WebSocket, message: str) -> None:
+    """断った理由を `status`（`notice: true`）で返す。状態も載るので、楽観的に切り替えた画面はこれで戻る。"""
+    await send_json(websocket, {"type": "status", **engine.status_payload(), "message": message, "notice": True})
+
+
 async def broadcast_loop() -> None:
     """フレーム・指標・通知を全接続へ配信する常駐タスク。"""
     last_seq = -1
     last_taxi_seq = -1
+    last_autotune_seq = -1
     last_metrics_at = 0.0
     poll_interval = 1.0 / 60.0
     metrics_interval = 1.0 / config.METRICS_HZ
@@ -174,6 +181,10 @@ async def broadcast_loop() -> None:
             last_taxi_seq, taxi = engine.take_taxi(last_taxi_seq)
             if taxi is not None:
                 await manager.broadcast({"type": "taxi", **taxi})
+
+            last_autotune_seq, autotune = engine.take_autotune(last_autotune_seq)
+            if autotune is not None:
+                await manager.broadcast({"type": "autotune", **autotune})
 
             now = time.perf_counter()
             if now - last_metrics_at >= metrics_interval:
@@ -295,13 +306,18 @@ async def handle_load_map(preset_id: str) -> None:
         wire = await asyncio.to_thread(data.to_wire)
 
         # 受け付けた後に学習が始まっていたら差し込まない（収集は元のエリアの地図で進んでいる）
-        if engine.detector_job.running:
+        busy = (
+            "認識器の学習中"
+            if engine.detector_job.running
+            else "学習の自動化の間" if engine.autotune_running() else ""
+        )
+        if busy:
             engine.abort_loading()
             await manager.broadcast(
                 {
                     "type": "status",
                     **engine.status_payload(),
-                    "message": f"認識器の学習中のため {preset.name} へは切り替えませんでした",
+                    "message": f"{busy}のため {preset.name} へは切り替えませんでした",
                     "notice": True,
                 }
             )
@@ -351,6 +367,10 @@ async def handle_client_message(websocket: WebSocket, message: dict[str, Any]) -
                 _detector_training_error("認識器の学習中はエリアを変えられません"),
             )
             return
+        if engine.autotune_running():
+            # 試行の成績は地図ごとに違うので、探索の途中で地図を替えると比べられなくなる
+            await send_notice(websocket, "学習の自動化の間はエリアを変えられません。OFF にしてから変えてください")
+            return
         _spawn_background(handle_load_map(preset_id), name=f"load-map-{preset_id}")
         return
 
@@ -362,6 +382,14 @@ async def handle_client_message(websocket: WebSocket, message: dict[str, Any]) -
                 {"type": "error", "code": "INVALID_MESSAGE", "message": "params が不正です"},
             )
             return
+        if engine.autotune_running():
+            blocked = [k for k in patch if k in TUNED_WIRE_KEYS]
+            if blocked:
+                await send_notice(
+                    websocket,
+                    "学習の自動化の間は、探索している値（学習率・割引率・報酬の重みなど）を変えられません。"
+                    "OFF にしてから変えてください",
+                )
         params, patch_result = engine.update_params(patch)
         if patch_result.has_problem:
             details: list[str] = []
@@ -417,6 +445,9 @@ async def handle_client_message(websocket: WebSocket, message: dict[str, Any]) -
             )
             # 画面はボタンを押した時点で切り替えている。status を送らないと戻らない
             await send_json(websocket, {"type": "status", **engine.status_payload()})
+            return
+        if mode == "taxi" and engine.autotune_running():
+            await send_notice(websocket, "学習の自動化の間は実用モードに切り替えられません。OFF にしてから切り替えてください")
             return
         if mode not in ("dev", "taxi"):
             await send_json(
@@ -523,6 +554,15 @@ async def handle_client_message(websocket: WebSocket, message: dict[str, Any]) -
 
     if kind in _COMMAND_KINDS:
         engine.command(kind)
+        return
+
+    if kind == "start_auto_tune":
+        # 断る理由（実用モード・認識器の学習中・Optuna が無いなど）はエンジンが status で返す
+        engine.start_autotune()
+        return
+
+    if kind == "stop_auto_tune_and_save":
+        engine.stop_autotune()
         return
 
     await send_json(
@@ -860,6 +900,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
         await send_json(
             websocket, {"type": "detector", **engine.detector_job.snapshot()}
         )
+        await send_json(websocket, {"type": "autotune", **engine.autotune_payload()})
 
         # 配車は 1 件しか無い（決定 8）ので、経路つきの 1 通を全接続へ配り直す
         engine.request_full_taxi()

@@ -64,7 +64,7 @@ npm run verify      # 幾何検証と規約の検査（ブラウザ不要。一�
 
 cd backend
 .venv\Scripts\python.exe -m pip install -r ..\requirements-dev.txt   # 初回だけ（pytest）
-.venv\Scripts\python.exe -m pytest              # 契約テストと、数秒で終わる検証
+.venv\Scripts\python.exe -m pytest              # 契約テストと、すぐ終わる検証（約 20 秒）
 .venv\Scripts\python.exe -m pytest --runslow    # verify_*.py もすべて（重い。-k ginza で絞れる）
 ```
 
@@ -261,3 +261,8 @@ cd backend
 - **介入（`env.apply_event`）は観測を作り直さない**。印を付けて、読むとき・`step()` の頭で 1 回だけ作る
   （件数ぶん擬似カメラと推論を回すと、CNN で 10 件 0.8 秒エンジンが止まる）
 - **マップの規模の数字は README「プリセットの規模」の表が唯一の出典**（ほかは概数か、実測のときの値と分かる書き方）
+- **学習の自動化（`runtime/autotune.py`。Optuna）は試行ごとに重みを探索開始時へ巻き戻し、街を作り直してから学習させる。**
+  採点に報酬の合計は使わない（報酬の重みも探索の対象）。探索中は本番の重みを自動保存せず、OFF で `.before-autotune` へ
+  退避してから最良の試行を適用・保存する。Optuna（SQLite・TPE）と最良の書き出しは専用スレッドで回し、エンジンスレッドに
+  乗せない。CLI（`tune_hyperparams.py`）と画面は同じ実装（`autotune.py` と `runtime/learning_step.py`）を通る。検査は
+  `backend/tests/test_tuning.py`

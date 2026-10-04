@@ -24,6 +24,7 @@ import {
 } from '../types/protocol.ts'
 import type { Transport } from './connection.ts'
 import { MockDetectorJob } from './mock/detectorJob.ts'
+import { MockAutotune } from './mock/autotune.ts'
 import { FRAME_MS, SIM_HZ, makeRng } from './mock/grid.ts'
 import { MOCK_PRESETS, MockSignals, buildMockMap } from './mock/map.ts'
 import { mockSurround } from './mock/surround.ts'
@@ -118,6 +119,7 @@ class MockServer {
   private readonly traffic: MockTraffic
   private readonly taxi: MockTaxi
   private readonly detector: MockDetectorJob
+  private readonly autotune: MockAutotune
   private tick = 0
   private simTime = 0
   private readonly startedAt = performance.now()
@@ -143,10 +145,19 @@ class MockServer {
       sendDetector: (msg) => this.send(msg),
       sendStatus: (patch) => this.sendStatus(patch),
     })
+    this.autotune = new MockAutotune({
+      sendAutotune: (msg) => this.send(msg),
+      sendStatus: (patch) => this.sendStatus(patch),
+      applyParams: (patch) => {
+        this.params = { ...this.params, ...patch }
+        this.sendParams()
+      },
+    })
 
     setTimeout(() => {
       this.sendInit()
       this.detector.send()
+      this.autotune.send()
     }, 60)
 
     this.frameTimer = setInterval(() => this.step(), FRAME_MS)
@@ -215,6 +226,8 @@ class MockServer {
       ...mockOptionMetrics(p),
     }
     this.send(metrics)
+    // 試行の進み具合は実機と同じく 1Hz で配る
+    if (this.autotune.running) this.autotune.send()
   }
 
   /** 実用モード（全車が経路追従）では意図を載せない（実機と同じ） */
@@ -233,6 +246,7 @@ class MockServer {
     this.tick += 1
     this.simTime += dt
     this.progress = Math.min(1, this.progress + dt * 0.004)
+    this.autotune.step(dt)
 
     // 灯色はこのステップの simTime だけで決まる。車・frame・認識結果のダミーが同じものを見る
     const phases = this.signals.phases(this.simTime)
@@ -345,6 +359,10 @@ class MockServer {
 
     switch (msg.type) {
       case 'load_map': {
+        if (this.autotune.running) {
+          this.sendStatus({ message: '（モック）学習の自動化の間はエリアを変えられません' })
+          return
+        }
         if (this.detector.running) {
           this.send({
             type: 'error',
@@ -389,7 +407,11 @@ class MockServer {
       }
 
       case 'set_params': {
-        this.params = { ...this.params, ...msg.params }
+        const { patch, blocked } = this.autotune.strip(msg.params)
+        if (blocked) {
+          this.sendStatus({ message: '（モック）学習の自動化の間は、探索している値を変えられません' })
+        }
+        this.params = { ...this.params, ...patch }
         this.params.vehicleCount = Math.max(
           1,
           Math.min(MOCK_CONFIG.maxVehicles, Math.round(this.params.vehicleCount)),
@@ -467,14 +489,26 @@ class MockServer {
       }
 
       case 'save_checkpoint':
-        this.sendStatus({ message: '（モック）チェックポイントを保存しました' })
+        this.sendStatus({
+          message: this.autotune.running
+            ? '（モック）学習の自動化の間は保存できません'
+            : '（モック）チェックポイントを保存しました',
+        })
         break
 
       case 'load_checkpoint':
-        this.sendStatus({ message: '（モック）チェックポイントを読み込みました' })
+        this.sendStatus({
+          message: this.autotune.running
+            ? '（モック）学習の自動化の間は読み込めません'
+            : '（モック）チェックポイントを読み込みました',
+        })
         break
 
       case 'reset_policy':
+        if (this.autotune.running) {
+          this.sendStatus({ message: '（モック）学習の自動化の間はポリシーを初期化できません' })
+          return
+        }
         this.progress = 0
         this.updates = 0
         this.traffic.episodes = 0
@@ -505,9 +539,22 @@ class MockServer {
         break
       }
 
+      case 'start_auto_tune':
+        this.autotune.start(this.params, this.map !== null, this.status.practicalMode ?? false)
+        break
+
+      case 'stop_auto_tune_and_save':
+        this.autotune.stop()
+        break
+
       case 'set_app_mode': {
         const practical = msg.mode === 'taxi'
         if (practical === (this.status.practicalMode ?? false)) return
+        if (practical && this.autotune.running) {
+          // 楽観的に切り替えた画面を status で戻す（実機と同じ）
+          this.sendStatus({ message: '（モック）学習の自動化の間は実用モードに切り替えられません' })
+          return
+        }
         if (!practical) this.taxi.cancel('（モック）開発モードに戻したため配車を終了しました')
         this.sendStatus({
           practicalMode: practical,

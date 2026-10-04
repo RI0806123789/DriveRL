@@ -978,6 +978,24 @@ p {
   cursor: not-allowed;
   opacity: 0.38;
 }
+/* 学習の自動化が値を決めている間。読み取り専用として、つまみと値は見えるままにする */
+.m3-slider[data-auto='true'] .m3-slider-input:disabled {
+  cursor: default;
+  opacity: 0.8;
+}
+.m3-slider[data-auto='true'] .m3-slider-value {
+  color: var(--m3-primary);
+}
+.m3-slider-auto {
+  flex: 0 0 auto;
+  padding: 0 6px;
+  border-radius: var(--m3-shape-full);
+  background: var(--m3-primary-container);
+  color: var(--m3-on-primary-container);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 16px;
+}
 .m3-slider-input::-webkit-slider-runnable-track {
   height: 12px;
   border-radius: var(--m3-shape-full);
@@ -2021,13 +2039,16 @@ button.m3-chip:active:not(:disabled) {
   }
 }
 
+/* span で組んでも幅と高さが効くよう block にする（inline のままだと中身が 0×0 で描かれない） */
 .m3-bar {
+  display: block;
   height: 8px;
   border-radius: var(--m3-shape-full);
   background: var(--m3-surface-container-highest);
   overflow: hidden;
 }
 .m3-bar-fill {
+  display: block;
   width: 100%;
   height: 100%;
   border-radius: var(--m3-shape-full);

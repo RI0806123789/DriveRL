@@ -9,6 +9,9 @@ import pytest
 
 from app import config
 from app.contracts import (
+    AutotuneBest,
+    AutotuneSnapshot,
+    AutotuneTrial,
     FrameSnapshot,
     MapData,
     MetricsSnapshot,
@@ -112,6 +115,29 @@ class TestWireKeysMatchProtocolTs:
         assert_wire_matches(
             MetricsSnapshot().to_wire(), ts_interfaces["MetricsMessage"], added_by_sender=TYPE_ONLY
         )
+
+    def test_autotune(self, ts_interfaces: dict[str, TsInterface]) -> None:
+        wire = AutotuneSnapshot(
+            available=True,
+            running=True,
+            phase="running",
+            study_name="live-ginza",
+            trial=3,
+            trial_progress=0.5,
+            trial_steps=1536,
+            finished_trials=2,
+            prior_trials=1,
+            tuned_keys=["learningRate"],
+            current={"learningRate": 1e-4},
+            best=AutotuneBest(trial=1, score=0.3, params={"learningRate": 1e-4}),
+            history=[AutotuneTrial(trial=1, score=0.3, outcome="complete")],
+            message="試行 #3 を走らせています",
+        ).to_wire()
+        assert_wire_matches(wire, ts_interfaces["AutotuneMessage"], added_by_sender=TYPE_ONLY)
+        assert_wire_matches(wire["best"], ts_interfaces["AutotuneBest"])
+        assert_wire_matches(wire["history"][0], ts_interfaces["AutotuneTrial"])
+        idle = AutotuneSnapshot().to_wire()
+        assert_wire_matches(idle, ts_interfaces["AutotuneMessage"], added_by_sender=TYPE_ONLY)
 
     @pytest.mark.parametrize("include_route", [False, True])
     def test_taxi(self, include_route: bool, ts_interfaces: dict[str, TsInterface]) -> None:

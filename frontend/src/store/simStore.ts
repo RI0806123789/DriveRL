@@ -4,6 +4,7 @@ import type { ThemeName } from '../scene/palette'
 import { bootstrapTheme } from './themeClock'
 import { create } from 'zustand'
 import type {
+  AutotuneMessage,
   ConnectionState,
   DetectorMessage,
   ErrorMessage,
@@ -22,6 +23,7 @@ import type {
 import { PROTOCOL_VERSION } from '../types/protocol'
 import { pushFrame, resetFrameBuffer } from './frameBuffer'
 import { normalizeAssistRate } from './assistRate'
+import { lostSessionNotice, readAutotuneFlag, writeAutotuneFlag } from './autotune'
 import { normalizeRatio } from './curriculum'
 
 /** メトリクス履歴に**上限は設けない**。 */
@@ -199,6 +201,8 @@ export interface SimStore {
   network: NetworkMessage | null
   /** 認識器（CNN）の学習状況。接続直後に 1 通届き、以後は進捗が動いたときだけ。 */
   detector: DetectorMessage | null
+  /** 学習の自動化（Optuna の探索）の状態。接続直後に 1 通届く。`init` のたびに null へ戻す */
+  autotune: AutotuneMessage | null
   /** 実用モードの配車状態。`route` は届いた最新のものを保持し続ける */
   taxi: TaxiMessage
   errors: ErrorEntry[]
@@ -287,6 +291,7 @@ export const useSimStore = create<SimStore>((set, get) => ({
   latestMetrics: null,
   network: null,
   detector: null,
+  autotune: null,
   taxi: IDLE_TAXI,
   errors: [],
 
@@ -363,6 +368,8 @@ export const useSimStore = create<SimStore>((set, get) => ({
           pendingPresetId: null,
           // 再起動したサーバーはマップを持っていない（map を送ってこない）。前のマップを残さない
           map: status.mapLoaded ? s.map : null,
+          // 次に届く autotune を「接続し直した最初の 1 通」として扱う
+          autotune: null,
         }))
         const cfg = init.config ?? DEFAULT_CONFIG
         if (get().followTarget >= cfg.maxVehicles) set({ followTarget: 0 })
@@ -447,6 +454,19 @@ export const useSimStore = create<SimStore>((set, get) => ({
 
       case 'detector': {
         set({ detector: msg as DetectorMessage })
+        break
+      }
+
+      case 'autotune': {
+        const first = get().autotune === null
+        const lost = first ? lostSessionNotice(readAutotuneFlag(), msg) : null
+        writeAutotuneFlag(msg.running)
+        set((s) => {
+          if (!lost) return { autotune: msg }
+          errorSeq += 1
+          const entry: ErrorEntry = { id: errorSeq, kind: 'notice', code: null, message: lost, at: Date.now() }
+          return { autotune: msg, errors: [...s.errors, entry].slice(-5) }
+        })
         break
       }
 
