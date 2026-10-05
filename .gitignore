@@ -1,6 +1,7 @@
 # -- dev --
 /memo
 /data
+*.mp4
 
 # -- AI Agent --
 .claude
