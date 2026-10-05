@@ -181,6 +181,14 @@ def _layout_notes() -> dict[str, tuple[str, str]]:
             "max(0, 1 - d/30), 交差点（信号の無い交差点の入口か次の停止線）への近さ max(0, 1 - d/30)]。"
             "近くに車がいないか、v2xComm を切ったときは 4 つとも 0",
         ),
+        "occlusion": (
+            "camera",
+            f"4 台のカメラの検出と走行可能距離だけから作った見通しと死角（半径 {config.OBS_FREESPACE_MAX_DISTANCE:.0f}m）。"
+            f"[左カメラの見通し距離 / {config.OBS_FREESPACE_MAX_DISTANCE:.0f}m, 右カメラの見通し距離 / "
+            f"{config.OBS_FREESPACE_MAX_DISTANCE:.0f}m, 前方カメラの画角のうち検出した車両の陰の割合, "
+            "いちばん近い遮蔽の角までの距離 / 20m（無ければ 1）, 前・後・左・右の 90 度の扇のうち見えている面積の割合]。"
+            "見通し距離はそのカメラの画角で見えている奥行きの最大。まだ撮っていないカメラの欄は 0",
+        ),
     }
 
 

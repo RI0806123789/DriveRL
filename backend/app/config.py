@@ -127,6 +127,9 @@ OBS_SURROUND_DIM = OBS_SURROUND_CAMERAS * OBS_SURROUND_FIELDS
 # 車車間通信（V2X）で近くの車から受け取ったメッセージの平均（車速・右左折の意図・危険・交差点への近さ）。sim/v2x.py
 OBS_V2X_DIM = 4
 
+# 4 台のカメラだけから作った見通しと死角（左右の見通し距離・前方の遮蔽率・角までの距離・前後左右の見えている割合）。percep/occlusion.py
+OBS_OCCLUSION_DIM = 8
+
 # 観測ベクトルの連結順と区画の大きさ。percep/encoder.py の添字と書き出しのメタデータはここから導く
 # 後から足した欄は必ず末尾に置く（旧い重みを 0 埋めで読み込めるのはこのため。rl/ppo.py）
 OBS_LAYOUT: tuple[tuple[str, int], ...] = (
@@ -142,14 +145,20 @@ OBS_LAYOUT: tuple[tuple[str, int], ...] = (
     ("freespace", OBS_FREESPACE_DIM),
     ("surround", OBS_SURROUND_DIM),
     ("v2x", OBS_V2X_DIM),
+    ("occlusion", OBS_OCCLUSION_DIM),
 )
 
 OBS_DIM = sum(size for _name, size in OBS_LAYOUT)
-#: 周囲カメラの欄を足す前（66）と、V2X の欄を足す前（75）の観測の次元
-OBS_DIM_BEFORE_V2X = OBS_DIM - OBS_V2X_DIM
+#: 周囲カメラの欄を足す前（66）・V2X の欄を足す前（75）・死角の欄を足す前（79）の観測の次元
+OBS_DIM_BEFORE_OCCLUSION = OBS_DIM - OBS_OCCLUSION_DIM
+OBS_DIM_BEFORE_V2X = OBS_DIM_BEFORE_OCCLUSION - OBS_V2X_DIM
 OBS_DIM_BEFORE_SURROUND = OBS_DIM_BEFORE_V2X - OBS_SURROUND_DIM
 #: この次元のチェックポイントは、入力の末尾に 0 の列を足して読み込める
-OBS_WIDENABLE_DIMS: tuple[int, ...] = (OBS_DIM_BEFORE_SURROUND, OBS_DIM_BEFORE_V2X)
+OBS_WIDENABLE_DIMS: tuple[int, ...] = (
+    OBS_DIM_BEFORE_SURROUND,
+    OBS_DIM_BEFORE_V2X,
+    OBS_DIM_BEFORE_OCCLUSION,
+)
 
 ACTION_DIM = 2
 

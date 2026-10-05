@@ -51,6 +51,7 @@ __all__ = [
     "detect_ground_truth_batch",
     "detect_ground_truth_views",
     "freespace_ground_truth",
+    "freespace_ground_truth_views",
 ]
 
 
@@ -785,27 +786,49 @@ def freespace_ground_truth(
     max_distance: float = float(config.OBS_FREESPACE_MAX_DISTANCE),
 ) -> np.ndarray:
     """走行可能領域の真値。カメラの視線の ±90 度を `OBS_FREESPACE_DIM` 本に分けた距離 [m]。"""
-    slot = int(slot)
-    out = np.full(config.OBS_FREESPACE_DIM, float(max_distance), dtype=np.float32)
-    if not (0 <= slot < len(world.slots)) or not bool(world.fleet.active[slot]):
+    return freespace_ground_truth_views(world, (int(slot),), (spec,), max_distance)[0, 0]
+
+
+def freespace_ground_truth_views(
+    world: "World",
+    slots: Sequence[int],
+    specs: Sequence[CameraSpec],
+    max_distance: float = float(config.OBS_FREESPACE_MAX_DISTANCE),
+) -> np.ndarray:
+    """複数の車・カメラの走行可能領域の真値をまとめて作る。形は (車, カメラ, `OBS_FREESPACE_DIM`) [m]。"""
+    max_d = float(max_distance)
+    fleet = world.fleet
+    out = np.full((len(slots), len(specs), config.OBS_FREESPACE_DIM), max_d, dtype=np.float32)
+    pairs = [
+        (i, j, int(s))
+        for i, s in enumerate(slots)
+        if 0 <= int(s) < len(world.slots) and bool(fleet.active[int(s)])
+        for j in range(len(specs))
+    ]
+    if not pairs:
         return out
 
-    heading = float(world.fleet.heading[slot])
-    pose = camera_pose(
-        float(world.fleet.x[slot]), float(world.fleet.y[slot]), heading, spec
-    )
-    ox, oy = pose.eye_x, pose.eye_y
-    angles = (float(view_heading(heading, spec)) + FREESPACE_ANGLES).astype(np.float64)
+    count = len(pairs)
+    origin = np.empty((count, 2), dtype=np.float64)
+    angles = np.empty((count, config.OBS_FREESPACE_DIM), dtype=np.float64)
+    owner = np.empty(count, dtype=np.int64)
+    for p, (_i, j, s) in enumerate(pairs):
+        heading = float(fleet.heading[s])
+        pose = camera_pose(float(fleet.x[s]), float(fleet.y[s]), heading, specs[j])
+        origin[p] = (pose.eye_x, pose.eye_y)
+        angles[p] = (float(view_heading(heading, specs[j])) + FREESPACE_ANGLES).astype(np.float64)
+        owner[p] = s
 
+    rows = np.full((count, config.OBS_FREESPACE_DIM), max_d, dtype=np.float32)
     try:
         hit = world.map_index.raycast(
-            np.array([ox], dtype=np.float32),
-            np.array([oy], dtype=np.float32),
-            angles.reshape(1, -1).astype(np.float32),
-            float(max_distance),
+            origin[:, 0].astype(np.float32),
+            origin[:, 1].astype(np.float32),
+            angles.astype(np.float32),
+            max_d,
             1.0,
         )
-        out[:] = np.asarray(hit, dtype=np.float32).reshape(-1)
+        rows[:] = np.asarray(hit, dtype=np.float32).reshape(count, -1)
     except Exception:
         warn_once(
             "percep.groundtruth.freespace_raycast",
@@ -814,29 +837,48 @@ def freespace_ground_truth(
             "（初回のみ記録）",
         )
 
-    blockers: list[tuple[float, float, float]] = []
-    fleet = world.fleet
-    for other in np.flatnonzero(fleet.active):
-        if int(other) == slot:
-            continue
-        blockers.append(
-            (float(fleet.x[other]), float(fleet.y[other]), VEHICLE_BLOCK_RADIUS)
+    # 他車・障害物・歩行者は円として当てる。自分の車体は当てない（owner が同じ円を外す）
+    active = np.flatnonzero(fleet.active)
+    parts = [
+        np.column_stack(
+            (
+                np.asarray(fleet.x[active], dtype=np.float64),
+                np.asarray(fleet.y[active], dtype=np.float64),
+                np.full(active.size, VEHICLE_BLOCK_RADIUS, dtype=np.float64),
+            )
         )
-    for obstacle in world.obstacles:
-        blockers.append((float(obstacle.x), float(obstacle.y), float(obstacle.radius)))
-    for px, py in world.pedestrian_xy:
-        blockers.append((float(px), float(py), float(config.PEDESTRIAN_RADIUS)))
-    if blockers:
-        circles = np.asarray(blockers, dtype=np.float64)
-        dirs = np.stack([np.cos(angles), np.sin(angles)], axis=1)
-        rel = circles[None, :, :2] - np.array([[ox, oy]], dtype=np.float64)[:, None, :]
-        along = rel[..., 0] * dirs[:, None, 0] + rel[..., 1] * dirs[:, None, 1]
-        perp2 = (rel * rel).sum(axis=2) - along * along
-        radius2 = circles[None, :, 2] ** 2
-        crosses = (along > 0.0) & (perp2 <= radius2)
+    ]
+    owners = [active.astype(np.int64)]
+    if world.obstacles:
+        parts.append(
+            np.array([(float(o.x), float(o.y), float(o.radius)) for o in world.obstacles], dtype=np.float64)
+        )
+        owners.append(np.full(len(world.obstacles), -1, dtype=np.int64))
+    walkers = np.asarray(world.pedestrian_xy, dtype=np.float64).reshape(-1, 2)
+    if walkers.size:
+        parts.append(
+            np.column_stack((walkers, np.full(walkers.shape[0], float(config.PEDESTRIAN_RADIUS))))
+        )
+        owners.append(np.full(walkers.shape[0], -1, dtype=np.int64))
+    circles = np.concatenate(parts, axis=0)
+    circle_owner = np.concatenate(owners)
+    if circles.shape[0]:
+        dirs = np.stack([np.cos(angles), np.sin(angles)], axis=2)
+        rel = circles[None, :, :2] - origin[:, None, :]
+        along = rel[:, None, :, 0] * dirs[:, :, None, 0] + rel[:, None, :, 1] * dirs[:, :, None, 1]
+        perp2 = (rel * rel).sum(axis=2)[:, None, :] - along * along
+        radius2 = circles[:, 2] ** 2
+        crosses = (
+            (along > 0.0)
+            & (perp2 <= radius2)
+            & (circle_owner[None, None, :] != owner[:, None, None])
+        )
         if crosses.any():
             back = np.sqrt(np.maximum(radius2 - perp2, 0.0))
             entry = np.where(crosses, np.maximum(along - back, 0.0), np.inf)
-            out[:] = np.minimum(out, entry.min(axis=1).astype(np.float32))
+            rows[:] = np.minimum(rows, entry.min(axis=2).astype(np.float32))
 
-    return np.clip(out, 0.0, float(max_distance)).astype(np.float32)
+    rows = np.clip(rows, 0.0, max_d).astype(np.float32)
+    for p, (i, j, _s) in enumerate(pairs):
+        out[i, j] = rows[p]
+    return out

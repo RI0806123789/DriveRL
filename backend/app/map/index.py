@@ -15,6 +15,8 @@ from shapely.ops import substring
 
 from app import config
 from app.contracts import (
+    BRANCH_LEFT,
+    BRANCH_RIGHT,
     SIGNAL_MERGE_M,
     MapData,
     MapEdge,
@@ -55,6 +57,9 @@ ROUTE_MAX_START_TURN_RAD = math.radians(120.0)
 ROUTE_END_EPS_M = 0.01
 #: 停止線の位置で、経路の向きと灯器の向きがこれ以上ずれていれば、その灯器に従わない [rad]
 SIGNAL_HEADING_TOLERANCE_RAD = math.radians(35.0)
+#: 交差点に着いた向きから、この範囲に入ってくる道を「左（右）から来る道」とみなす [rad]
+BRANCH_SIDE_MIN_RAD = math.radians(30.0)
+BRANCH_SIDE_MAX_RAD = math.radians(150.0)
 
 
 class MapIndexImpl:
@@ -205,6 +210,28 @@ class MapIndexImpl:
     def is_intersection(self, node_id: int) -> bool:
         """3 方向以上に道がつながるノードか（交差点の入口で左右を確かめるのに使う）。"""
         return int(node_id) in self._junctions
+
+    def branch_sides(self, node_id: int, arrive_heading: float) -> int:
+        """`arrive_heading` で交差点に着いたとき、左（BRANCH_LEFT）・右（BRANCH_RIGHT）から車が入ってくる道があるか。"""
+        node = int(node_id)
+        if not self.graph.has_node(node):
+            return 0
+        sides = 0
+        # 車が入ってくるのは、このノードへ向かう辺がある道だけ（出ていくだけの一方通行からは来ない）
+        for pred in self.graph.predecessors(node):
+            attrs = self.graph.get_edge_data(pred, node) or {}
+            edge = self._edges_by_id.get(int(attrs.get("edge_id", -1)))
+            if edge is None or len(edge.polyline) < 2:
+                continue
+            pts = [(float(px), float(py)) for px, py in edge.polyline]
+            if int(edge.u) != node:
+                pts.reverse()
+            rel = _wrap(_direction(pts, at_end=False) - float(arrive_heading))
+            if BRANCH_SIDE_MIN_RAD < rel < BRANCH_SIDE_MAX_RAD:
+                sides |= BRANCH_LEFT
+            elif -BRANCH_SIDE_MAX_RAD < rel < -BRANCH_SIDE_MIN_RAD:
+                sides |= BRANCH_RIGHT
+        return sides
 
     def nearest_node(self, x: float, y: float) -> int:
         """指定座標に最も近い道路ノード ID を返す。"""

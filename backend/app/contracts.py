@@ -110,6 +110,10 @@ class MapBuilding:
 #: （`sim/pedestrians.py`）が別の基でも同じ現示になるよう、ここが唯一の出典
 SIGNAL_MERGE_M = 8.0
 
+#: 交差点に着いた向きから見て、左・右から車が入ってくる道があるか（`MapIndex.branch_sides` のビット）
+BRANCH_LEFT = 1
+BRANCH_RIGHT = 2
+
 
 @dataclass
 class MapSignal:
@@ -251,6 +255,10 @@ class MapIndex(Protocol):
 
     def is_intersection(self, node_id: int) -> bool:
         """3 方向以上に道がつながるノードか。"""
+        ...
+
+    def branch_sides(self, node_id: int, arrive_heading: float) -> int:
+        """交差点に着いた向きから見て、左（1）・右（2）から車が入ってくる道があるか（ビットの和）。"""
         ...
 
     def nearest_node(self, x: float, y: float) -> int:
@@ -610,6 +618,8 @@ class FrameSnapshot:
     detections: dict[int, list[dict[str, Any]]] = field(default_factory=dict)
     #: 周囲カメラ（rear / left / right）の検出。**購読されている車（`watch_surround`）の分だけ**載る
     surround: dict[int, dict[str, list[dict[str, Any]]]] = field(default_factory=dict)
+    #: 4 台のカメラから作った見通しと死角。**購読されている車（`watch_occlusion`）の分だけ**載る
+    occlusion: dict[int, dict[str, Any]] = field(default_factory=dict)
     weather: dict[str, float] | None = None
     routed_slots: tuple[int, ...] = ()
 
@@ -632,6 +642,8 @@ class FrameSnapshot:
             }
         if self.surround:
             payload["surround"] = {str(slot): cams for slot, cams in self.surround.items()}
+        if self.occlusion:
+            payload["occlusion"] = {str(slot): view for slot, view in self.occlusion.items()}
         return payload
 
 

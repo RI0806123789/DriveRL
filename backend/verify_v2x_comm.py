@@ -144,9 +144,14 @@ check("危険は自車のカメラに写った歩行者・障害物のうち近�
 check("何も写っていなければ inf", _nearest_danger(PerceptionResult(slot=0), DEFAULT_CAMERA, None) == float("inf"))
 
 # ---------------------------------------------------------------------------
-section("3. 観測の末尾 4 次元（合成の碁盤の目）")
+section("3. 観測の V2X の 4 次元（合成の碁盤の目）")
 base = OBS_OFFSETS["v2x"]
-check(f"観測は {config.OBS_DIM} 次元で、V2X の欄は末尾", config.OBS_DIM == 79 and base + V == config.OBS_DIM, f"欄の先頭 {base}")
+tail = base + V
+check(
+    f"V2X の欄は観測の 75〜78 で、後ろには死角の欄だけが続く（観測は {config.OBS_DIM} 次元）",
+    base == 75 and tail == OBS_OFFSETS["occlusion"] and tail + config.OBS_OCCLUSION_DIM == config.OBS_DIM,
+    f"欄の先頭 {base}",
+)
 env = make_env(N, walkers=16)
 consistent = True
 linked = 0
@@ -157,8 +162,8 @@ for _ in range(400):
     fleet = env.world.fleet
     messages = env.v2x.compute_messages(env.world, float(env.params.max_speed), env.latest_perception, env.latest_surround, DEFAULT_CAMERA)
     inbox, links = env.v2x.route_and_aggregate(np.column_stack((fleet.x, fleet.y)), fleet.active, messages)
-    consistent &= bool(np.allclose(obs[:, base:], inbox, atol=1e-6)) and links == env.v2x_links
-    finite &= bool(np.all(np.isfinite(obs[:, base:]))) and bool(np.all(np.abs(obs[:, base:]) <= 1.0 + 1e-6))
+    consistent &= bool(np.allclose(obs[:, base:tail], inbox, atol=1e-6)) and links == env.v2x_links
+    finite &= bool(np.all(np.isfinite(obs[:, base:tail]))) and bool(np.all(np.abs(obs[:, base:tail]) <= 1.0 + 1e-6))
     linked += len(links)
     for slot in np.flatnonzero(fleet.active):
         s = int(slot)
@@ -166,7 +171,7 @@ for _ in range(400):
         want = min(1.0, max(0.0, 1.0 - min(env.world.next_junction(s), signal_m) / 30.0))
         consistent &= math.isclose(float(messages[s, 3]), want, abs_tol=1e-6)
         consistent &= float(messages[s, 1]) == float(np.sign(env.world.turn_signal[s]))
-check("観測の末尾 4 次元は、近傍から受け取ったメッセージの平均と一致する", consistent)
+check("観測の V2X の 4 次元は、近傍から受け取ったメッセージの平均と一致する", consistent)
 check("V2X の欄は有限で -1..1", finite)
 check("8 台で走らせるとリンクができる", linked > 0, f"400 ステップで延べ {linked} 台分")
 frame = env.snapshot(0, 0.0)
@@ -183,7 +188,7 @@ check("リンクの無い車には v2xConnectedIds を載せない（転送量�
 lonely = make_env(1)
 for _ in range(50):
     lonely.step(np.zeros((N, A), dtype=np.float32), expert=lonely.active_mask.copy())
-check("単独走行なら V2X の欄は 0", bool(np.all(lonely.observations[:, base:] == 0.0)) and lonely.v2x_links == {})
+check("単独走行なら V2X の欄は 0", bool(np.all(lonely.observations[:, base:tail] == 0.0)) and lonely.v2x_links == {})
 
 on = make_env(N, seed=4)
 off = make_env(N, seed=4, v2x=False)
@@ -194,27 +199,34 @@ for _ in range(150):
     act = rng.uniform(-1, 1, (N, A)).astype(np.float32)
     ra = on.step(act)
     rb = off.step(act)
-    head_same &= np.array_equal(ra.obs[:, :base], rb.obs[:, :base]) and np.array_equal(ra.rewards, rb.rewards)
-    tail_zero &= bool(np.all(rb.obs[:, base:] == 0.0))
-check("v2xComm を切ると末尾 4 次元は 0、リンクも無い", tail_zero and off.v2x_links == {})
-check("V2X は観測の末尾だけを変え、先頭 75 次元と報酬は切ったときと完全に一致する", head_same)
+    head_same &= (
+        np.array_equal(ra.obs[:, :base], rb.obs[:, :base])
+        and np.array_equal(ra.obs[:, tail:], rb.obs[:, tail:])
+        and np.array_equal(ra.rewards, rb.rewards)
+    )
+    tail_zero &= bool(np.all(rb.obs[:, base:tail] == 0.0))
+check("v2xComm を切ると V2X の 4 次元は 0、リンクも無い", tail_zero and off.v2x_links == {})
+check("V2X は自分の 4 次元だけを変え、ほかの欄と報酬は切ったときと完全に一致する", head_same)
 
 perc = env.latest_perception
 enc_with = encode_observations(env.world, env.params, perc, v2x=np.full((N, V), 0.25, dtype=np.float32))
 enc_without = encode_observations(env.world, env.params, perc)
 active_rows = env.world.fleet.active
-check("encode_observations は v2x を末尾へ入れるだけ（先頭は変えない）", np.array_equal(enc_with[:, :base], enc_without[:, :base]))
+check(
+    "encode_observations は v2x を自分の欄へ入れるだけ（ほかの欄は変えない）",
+    np.array_equal(enc_with[:, :base], enc_without[:, :base]) and np.array_equal(enc_with[:, tail:], enc_without[:, tail:]),
+)
 check("走っていない車の行は 0 のまま", bool(np.all(enc_with[~active_rows] == 0.0)))
 
 # ---------------------------------------------------------------------------
-section("4. 79 次元の方策と、旧い重みの読み込み")
+section(f"4. {config.OBS_DIM} 次元の方策と、旧い重みの読み込み")
 policy = ActorCritic(config.OBS_DIM, A)
 x = torch.randn(32, config.OBS_DIM)
 dist, value = policy.forward(x)
 loss = dist.log_prob(torch.zeros(32, A)).sum() + value.sum()
 loss.backward()
 grads_ok = all(p.grad is None or bool(torch.isfinite(p.grad).all()) for p in policy.parameters())
-check("79 次元で順伝播・逆伝播が通る（NaN なし）", grads_ok and dist.mean.shape == (32, A))
+check(f"{config.OBS_DIM} 次元で順伝播・逆伝播が通る（NaN なし）", grads_ok and dist.mean.shape == (32, A))
 
 params = SimParams()
 for old_dim in config.OBS_WIDENABLE_DIMS:
@@ -236,9 +248,10 @@ for old_dim in config.OBS_WIDENABLE_DIMS:
         d_old, v_old = old.policy.forward(torch.from_numpy(x_old))
         d_new, v_new = new.policy.forward(torch.from_numpy(x_new))
     diff = max(float((d_old.mean - d_new.mean).abs().max()), float((v_old - v_new).abs().max()))
+    # 足した入力の重みは 0 だが、行列積の足し算の順序が入力の幅で変わるので float32 の丸めの差は残る
     check(
-        f"{old_dim} 次元の重みを 0 埋めで読み込み、方策と価値の出力が元と同じ",
-        loaded and new.widened_from == old_dim and diff == 0.0,
+        f"{old_dim} 次元の重みを 0 埋めで読み込み、方策と価値の出力が元と同じ（丸めの差 1e-6 以内）",
+        loaded and new.widened_from == old_dim and diff <= 1e-6,
         f"読み込み {loaded} / 最大差 {diff:.3e}",
     )
     check(f"{old_dim} 次元のファイルは書き出しからの読み込み（importer）も受け付ける", accepted)
@@ -248,7 +261,7 @@ with tempfile.TemporaryDirectory() as tmp:
     path = Path(tmp) / "odd.pt"
     odd.save(path)
     rejected = not PPOTrainer(config.OBS_DIM, A, params, N, seed=2).load(path)
-check("移行の対象でない次元（78）は読み込まない", rejected)
+check(f"移行の対象でない次元（{config.OBS_DIM - 1}）は読み込まない", rejected)
 
 trainer = PPOTrainer(config.OBS_DIM, A, SimParams(rollout_length=16), N, seed=0)
 env2 = make_env(N, seed=7)
@@ -259,7 +272,7 @@ while stats is None:
     r = env2.step(act)
     trainer.store(obs=obs, actions=act, log_probs=lp, values=val, rewards=r.rewards, dones=r.dones, active=r.active, learn=r.learn)
     stats = trainer.maybe_update(r.obs, r.active)
-check("79 次元の観測で PPO の更新が最後まで回る（NaN なし）", all(math.isfinite(v) for v in stats.values()), f"{ {k: round(v, 4) for k, v in stats.items()} }")
+check(f"{config.OBS_DIM} 次元の観測で PPO の更新が最後まで回る（NaN なし）", all(math.isfinite(v) for v in stats.values()), f"{ {k: round(v, 4) for k, v in stats.items()} }")
 
 # ---------------------------------------------------------------------------
 section("5. 所要時間（8 台）")

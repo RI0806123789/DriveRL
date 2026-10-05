@@ -11,6 +11,8 @@ import numpy as np
 
 from app import config
 from app.contracts import (
+    BRANCH_LEFT,
+    BRANCH_RIGHT,
     FrameSnapshot,
     MapIndex,
     ObstacleSnapshot,
@@ -149,6 +151,8 @@ class SlotState:
     sign_limits: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.float32))
     #: 信号の無い交差点の入口の弧長（昇順）。安全ギミックが徐行して左右を確かめる位置
     junction_arcs: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.float32))
+    #: その交差点の左（1）・右（2）から車が入ってくる道があるか（`map_index.branch_sides`。junction_arcs と同じ並び）
+    junction_sides: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.int8))
     #: 交差点で曲がる所（入る辺の車線を出る弧長・出る辺の車線に入る弧長・向き -1=左 / +1=右）
     turn_starts: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.float32))
     turn_ends: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.float32))
@@ -790,7 +794,9 @@ class World:
         else:
             state.sign_arcs = np.zeros(0, dtype=np.float32)
             state.sign_limits = np.zeros(0, dtype=np.float32)
-        state.junction_arcs = self._junction_arcs(plan.legs, state.signal_arcs)
+        state.junction_arcs, state.junction_sides = self._junction_arcs(
+            plan.legs, state.signal_arcs, state.route, state.route_cum
+        )
         state.turn_starts, state.turn_ends, state.turn_sides = self._junction_turns(
             state.route, state.route_cum, plan.legs
         )
@@ -804,13 +810,19 @@ class World:
         return True
 
     def _junction_arcs(
-        self, legs: tuple[RouteLeg, ...], signal_arcs: np.ndarray
-    ) -> np.ndarray:
-        """経路が信号の無い交差点へ入る弧長（車線がその辺を出る所）。"""
+        self,
+        legs: tuple[RouteLeg, ...],
+        signal_arcs: np.ndarray,
+        route: np.ndarray,
+        cum: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """経路が信号の無い交差点へ入る弧長（車線がその辺を出る所）と、その交差点の左右から来る道。"""
+        empty = (np.zeros(0, dtype=np.float32), np.zeros(0, dtype=np.int8))
         check = getattr(self.map_index, "is_intersection", None)
         if check is None or not legs:
-            return np.zeros(0, dtype=np.float32)
-        out: list[float] = []
+            return empty
+        sides_of = getattr(self.map_index, "branch_sides", None)
+        found: list[tuple[float, int]] = []
         for leg in legs:
             if not check(int(leg.exit_node)):
                 continue
@@ -818,20 +830,42 @@ class World:
             near = (signal_arcs >= end - JUNCTION_SIGNAL_REACH_M) & (
                 signal_arcs <= end + JUNCTION_SIGNAL_AFTER_M
             )
-            if not bool(near.any()):
-                out.append(end)
-        return np.asarray(sorted(out), dtype=np.float32)
+            if bool(near.any()):
+                continue
+            # 分かれ方が分からない索引では、両側から来るものとして扱う（見通しを両側に求める）
+            sides = BRANCH_LEFT | BRANCH_RIGHT
+            if sides_of is not None and route.shape[0] >= 2:
+                marks = np.array([max(end - TURN_HEADING_SPAN_M, 0.0), end])
+                xs = np.interp(marks, cum, route[:, 0])
+                ys = np.interp(marks, cum, route[:, 1])
+                if math.hypot(xs[1] - xs[0], ys[1] - ys[0]) >= 0.5:
+                    heading = math.atan2(ys[1] - ys[0], xs[1] - xs[0])
+                    sides = int(sides_of(int(leg.exit_node), heading))
+            found.append((end, sides))
+        if not found:
+            return empty
+        found.sort(key=lambda item: item[0])
+        return (
+            np.asarray([a for a, _ in found], dtype=np.float32),
+            np.asarray([s for _, s in found], dtype=np.int8),
+        )
 
     def next_junction(self, slot: int) -> float:
         """前方の直近の、信号の無い交差点の入口までの距離 [m]（車体の中心から）。無ければ inf。"""
-        arcs = self.slots[int(slot)].junction_arcs
+        return self.junction_ahead(slot)[0]
+
+    def junction_ahead(self, slot: int, passed_m: float = JUNCTION_PASSED_M) -> tuple[float, int]:
+        """入口を `passed_m` 越えるまでの直近の信号の無い交差点の、入口までの距離 [m]（車体の中心から）と左右から来る道。"""
+        state = self.slots[int(slot)]
+        arcs = state.junction_arcs
         if arcs.size == 0:
-            return float("inf")
+            return float("inf"), 0
         arc = float(self.arc[int(slot)])
-        i = int(np.searchsorted(arcs, arc - JUNCTION_PASSED_M, side="left"))
+        i = int(np.searchsorted(arcs, arc - float(passed_m), side="left"))
         if i >= arcs.size:
-            return float("inf")
-        return float(arcs[i]) - arc
+            return float("inf"), 0
+        sides = int(state.junction_sides[i]) if i < state.junction_sides.size else BRANCH_LEFT | BRANCH_RIGHT
+        return float(arcs[i]) - arc, sides
 
     def _junction_turns(
         self, route: np.ndarray, cum: np.ndarray, legs: tuple[RouteLeg, ...]

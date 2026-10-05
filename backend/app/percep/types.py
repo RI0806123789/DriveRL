@@ -22,8 +22,11 @@ __all__ = [
     "REAR_CAMERA",
     "RIGHT_CAMERA",
     "SURROUND_CAMERAS",
+    "CameraVisibility",
     "DetClass",
     "Detection",
+    "OcclusionResult",
+    "ShadowPolygon",
     "FACING_TOLERANCE",
     "LANE_LOOKAHEAD_M",
     "LANE_POLYLINE_POINTS",
@@ -247,6 +250,105 @@ class PerceptionResult:
 
     def to_wire(self) -> list[dict[str, Any]]:
         return [d.to_wire() for d in self.detections]
+
+
+SHADOW_DYNAMIC = "dynamic"
+SHADOW_STATIC = "static"
+
+
+@dataclass(frozen=True)
+class ShadowPolygon:
+    """死角 1 つ。カメラから見た方位 [start, end]（カメラの向きから測り左が正）と、奥行き [near, far] の扇で持つ。"""
+
+    camera: str
+    #: dynamic = 検出した車両の陰 / static = 走行可能距離の先（建物の陰・視程の外）
+    kind: str
+    start: float
+    end: float
+    near: float
+    far: float
+
+    def to_wire(self) -> dict[str, Any]:
+        return {
+            "camera": self.camera,
+            "kind": self.kind,
+            "from": round(self.start, 3),
+            "to": round(self.end, 3),
+            "near": round(self.near, 1),
+        }
+
+
+@dataclass
+class CameraVisibility:
+    """1 台のカメラで見えている奥行き。画角を等分した方位ごとに持つ。"""
+
+    key: str
+    #: このカメラの結果があるか。無ければ何も見えていないものとして扱う
+    known: bool
+    #: 方位ごとの見えている奥行き [m]（`percep/occlusion.py` の RAY_ANGLES の順）
+    depths: np.ndarray
+
+    def runs(self, angles: np.ndarray, half_width: float) -> list[list[float]]:
+        """奥行きが同じ方位をまとめた [始まりの方位, 終わりの方位, 奥行き] の列（ワイヤ形式）。"""
+        out: list[list[float]] = []
+        for angle, depth in zip(angles, self.depths):
+            lo, hi, d = float(angle) - half_width, float(angle) + half_width, round(float(depth), 1)
+            if out and abs(out[-1][2] - d) < 0.05:
+                out[-1][1] = round(hi, 3)
+            else:
+                out.append([round(lo, 3), round(hi, 3), d])
+        return out
+
+
+@dataclass
+class OcclusionResult:
+    """1 台ぶんの見えている所と死角。どれもカメラの検出と走行可能距離だけから作る（`percep/occlusion.py`）。"""
+
+    cameras: dict[str, CameraVisibility]
+    shadows: list[ShadowPolygon]
+    #: 左右のカメラの見通し距離 [m]。そのカメラの結果が無ければ None
+    los_left: float | None
+    los_right: float | None
+    #: 前方カメラの画角のうち、検出した車両の陰になっている割合
+    front_occluded: float
+    #: いちばん近い遮蔽の角（奥行きが跳ぶ所の手前）までの距離 [m]。無ければ None
+    corner_distance: float | None
+    #: 前・後・左・右の 90 度ずつの扇（半径は見る距離）のうち、見えている面積の割合
+    sectors: tuple[float, float, float, float]
+    #: 観測の末尾 8 次元（`config.OBS_LAYOUT` の occlusion）
+    features: np.ndarray
+    reach: float = 0.0
+
+    def to_wire(self, angles: np.ndarray, half_width: float) -> dict[str, Any]:
+        """frame.occlusion に載せる形。座標は自車座標（前方 +x / 左 +y）、方位は rad。"""
+        cams = []
+        for key, vis in self.cameras.items():
+            if not vis.known:
+                continue
+            spec = CAMERAS_BY_KEY[key]
+            cams.append(
+                {
+                    "key": key,
+                    # + 0.0 は -0.0 を 0.0 にするため
+                    "at": [round(float(spec.forward), 2) + 0.0, round(-float(spec.right), 2) + 0.0],
+                    "yaw": round(spec.yaw, 4),
+                    "seen": vis.runs(angles, half_width),
+                }
+            )
+        out: dict[str, Any] = {
+            "range": round(self.reach, 1),
+            "los": [
+                None if self.los_left is None else round(self.los_left, 1),
+                None if self.los_right is None else round(self.los_right, 1),
+            ],
+            "sectors": [round(float(v), 3) for v in self.sectors],
+            "frontOccluded": round(float(self.front_occluded), 3),
+            "cameras": cams,
+            "shadows": [s.to_wire() for s in self.shadows],
+        }
+        if self.corner_distance is not None:
+            out["corner"] = round(float(self.corner_distance), 1)
+        return out
 
 
 SIGNAL_MOUNT_HEIGHT = 5.0
