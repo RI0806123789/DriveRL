@@ -178,6 +178,12 @@ DETECTOR_PATH = DETECTOR_DIR / "detector.keras"
 DETECTOR_DATASET_DIR = DETECTOR_DIR / "dataset"
 DETECTOR_DIR.mkdir(parents=True, exist_ok=True)
 
+#: 認識器の推論を動かす先。auto = NPU があれば NPU・無ければ OpenVINO の CPU / cpu = OpenVINO の CPU /
+#: keras = OpenVINO を使わず従来の Keras（torch）の CPU。openvino が入っていなければ auto でも Keras になる
+PERCEP_DEVICE = os.getenv("DRIVERL_PERCEP_DEVICE", "auto").strip().lower() or "auto"
+#: 1 回の推論に通す画像の最大枚数（前方は全車 + 周囲カメラの予算）。NPU の形の固定（バケット）の上限になる
+PERCEP_MAX_BATCH = MAX_VEHICLES + SURROUND_CNN_IMAGES_PER_STEP
+
 PERCEP_MAX_DETECTIONS = 15
 
 PERCEP_CONF_THRESHOLD = 0.35

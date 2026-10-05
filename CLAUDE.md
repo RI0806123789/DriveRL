@@ -46,6 +46,7 @@ npm run dev             # Vite だけ立てる。?mock=1 でバックエンド�
 .venv\Scripts\python.exe -m app.map.prefetch          # OSM の事前ダウンロード（初回は数十秒/エリア）
 .venv\Scripts\python.exe train_detector.py --samples 2400 --epochs 12   # 認識器の学習
 .venv\Scripts\python.exe train_detector.py --collect-only              # 教師データ収集だけ
+.venv\Scripts\python.exe export_openvino.py --bench    # 認識器を OpenVINO の IR へ変換し、Keras / OpenVINO CPU / NPU の速さと差を測る（要 pip install openvino）
 # ↑ どちらも操作パネルの「モデル作成」タブから同じことができる（中身は同じ実装）
 .venv\Scripts\python.exe verify_log_std.py           # 方策分布の健全性チェック
 .venv\Scripts\python.exe verify_online_assist.py    # オンライン模倣（割り込みの確率・危険の判定・模倣の損失。合成の碁盤の目で走らせる）
@@ -151,7 +152,7 @@ world（真値）
   │      ↓ 視程
   ├─ percep/camera.py     擬似カメラ 192×144 を numpy で描く（前方・後方・左・右の 4 台）
   │      ↓ 画像
-  ├─ percep/detector.py   CNN（Keras 3 / torch バックエンド。TensorFlow は入れない）
+  ├─ percep/detector.py   CNN（Keras 3 / torch バックエンド。TensorFlow は入れない。openvino があれば推論は NPU / OpenVINO）
   │      ↓ 検出結果 (percep/types.py)
   ├─ percep/encoder.py    → 観測 79 次元（66〜74 が周囲カメラ、末尾 4 次元が V2X。sim/v2x.py）
   │      ↓ 同じ検出結果
@@ -249,6 +250,66 @@ CNN では信号の 14.3%・歩行者の 31.6% で先頭が最近傍ではなく
   既定の 4,800 枚では **600 ステップ中 278 ステップ（46.3%）が薄いまま**でした
   （銀座・8 台で 24 本 → 8 本）。**寄せ直しとパイロンを
   別々の周期に任せない**という上の約束は、狙うクラスについても同じです。
+
+### 認識器の推論を NPU / OpenVINO で動かす（`percep/openvino_backend.py`。#95）
+
+`openvino` が入っていれば、`Detector.load()` は認識器を OpenVINO の IR にして NPU（無ければ OpenVINO の CPU）で
+動かします。入っていない・設定で切った・どこかで失敗した、のどれでも従来の Keras（torch）の CPU に戻ります。
+**`openvino` は `requirements.txt` に入れていません**（依存を足さない約束。コメントで任意と書いてあるだけで、
+使う人が別に `pip install openvino` する）。学習（`model.fit`）は CPU の Keras のままです（NPU は推論専用）。
+
+| 動かし先 | 選ばれるとき | 出力 |
+|---|---|---|
+| NPU | `DRIVERL_PERCEP_DEVICE=auto`（既定）で NPU が見える | fp16。Keras と最大 1e-2 ずれる（検出の一致 99.8〜99.9%）|
+| OpenVINO の CPU | NPU が無い・`cpu`・NPU の読み込みや確認に落ちた | fp32。最大差 3.5e-6、検出は Keras と完全一致 |
+| Keras の CPU | openvino が無い・`keras`・変換や読み込みに落ちた | **以前と 1 ビットも同じ**（main と CNN で 80 ステップ走らせた観測・報酬・検出の指紋が一致）|
+
+- ★ **内蔵 GPU は選ばないこと**（`choose_device`）。ブラウザの 3D 描画（Three.js）とメモリ帯域・時分割を取り合い、
+  描画のカクつき・20Hz の揺れ・TDR を招くため（issue の検討）
+- ★ **IR のファイル名に `detector.keras` の内容の指紋（sha256 の先頭 16 桁）を入れること**（`ir_path`。
+  `detector.ir1-<指紋>.xml` / `.bin`）。学習・手での差し替え・`detector.prev.keras` からの戻しのどれで `.keras` が
+  変わっても、古い IR は名前が合わないので**構造的に読まれません**（指紋を定数にする変異で、テストの出力差が 0.22 に開いて
+  落ちることを確かめた）。変換の仕方を変えたら `IR_TAG` を上げること（`CACHE_VERSION` と同じ約束）
+- ★ **変換したら、書く前に Keras と突き合わせること**（`build_ir`。OpenVINO の CPU の fp32 で最大差 1e-3 以内。
+  枚数を変えて 2 回通すのは、トレースした例（1 枚）にバッチ数が焼き付いていないかの確認）。合わなければ書かずに Keras で動かす。
+  NPU は**読み込むたびに** CPU と突き合わせます（0.1 以内。fp16 の丸めは許し、壊れた出力だけを弾く）
+- ★ **IR は `compress_to_fp16=False` で書き、`.bin` → `.xml` の順に `os.replace` すること。** 既定の True だと重みが fp16 に
+  なり、CPU の出力が Keras とずれます。`.xml` を最後に置くのは「書き終えた」の印にするため
+- ★ **`aten::subtract` の変換規則を登録すること**（`convert_keras` の `ConversionExtension`）。Keras の
+  BatchNormalization が `torch.subtract` を使い、OpenVINO 2026.4 にはその規則がありません。`torch.subtract` を
+  `torch.sub` に差し替えても効きません（演算子のディスパッチの層で記録されるため。試した）
+- ★ **NPU は形を固定してコンパイルするので、バッチ数を 4 刻みのバケットに丸めて 0 で詰めること**（`BucketedEngine`。
+  既定 4 / 8 / 12。`config.PERCEP_MAX_BATCH` = 前方 8 台 + 周囲の予算 3 枚 = 11 を覆う）。NPU の 1 枚あたりの時間は
+  4 枚以上ではほぼ一定（実測 0.47〜0.57ms。1〜2 枚では 1.0〜1.2ms）なので詰め物は安く、全部の枚数でコンパイルすると 1 つ 0.4〜1.4 秒かかります。
+  上限を超えたら最大のバケットで刻みます。1 枚のときも 4 枚に詰めるので、1 枚専用より 1ms ほど遅い
+- ★ **NPU のコンパイル済みは `data/detector/ov_cache/` に置き、新しい IR を作るたびに丸ごと消すこと**（`prune_stale`）。
+  初回は 3 バケットで約 3 秒、2 回目からは IR の読み込みを含めて 0.3 秒です。消さないと古いモデルの blob が積み上がります
+- ★ **NPU の推論が途中で落ちたら、その場で OpenVINO の CPU へ切り替えて続けること**（`OpenVinoRunner`。ノート PC の
+  スリープからの復帰などを想定）。例外を env まで上げると「推論が落ちたら認識器を手放す」で真値に落ち、**成績が良くなる
+  方向**に倒れます。CPU で落ちたときは従来どおり env へ上げる
+- ★ **学習の検証（`trainer._verify_saved`）は `Detector.load(..., accelerate=False)` で Keras だけを読むこと。** 検証するのは
+  差し替える `.keras` そのもので、`detector.staged.keras` の IR を作らないため。IR は差し替えた後に `fit_detector` が
+  手元の Keras モデルから作ります（`_refresh_openvino_ir`）。失敗しても載せ替えは止めず（Keras で動く）、理由を
+  `FitResult.warning` に載せ、古い IR は消します
+- IR がある間は Keras を読みません（`Detector.model` は None。起動とメモリが軽い）。いまの動かし先は `Detector.backend` で、
+  起動ログに「認識器を … で動かします」と出ます。変換時の `TracerWarning`（Keras の形の判定がトレースで定数になる旨）は抑えています
+- 実測（Core Ultra 7 155H・8 台・全車が経路追従・歩行者 16 人・CNN。同じプロセスで動かし先を切り替えながら 100 ステップ × 3 回。
+  この日は機械が重く、Keras の値は上の「実行時のスレッド構成」の表より遅い）:
+
+  | | Keras の CPU | OpenVINO の CPU | NPU |
+  |---|---|---|---|
+  | 1 ステップ（最小）銀座 / 金沢 | 75.4〜79.9 / 77.6ms | 36.9〜48.1 / 46.7ms | **32.7〜33.6 / 35.8ms** |
+  | 推論と復号 1 回（11 枚）| 約 45ms | 約 20ms | **約 9ms** |
+  | 1 ステップに使う CPU 時間（全スレッドの合計・銀座）| 1,105ms | 146ms | **22ms** |
+
+  Keras の CPU 時間が大きいのは、torch のスレッドが待ちの間も全コアで回り続けるためです。NPU に移すとこれが消えるので、
+  ブラウザの描画に CPU が空きます（**ブラウザの fps そのものは測っていません**）
+- **まだやっていないこと**: 開発モードで PPO を回しながらの実測、ブラウザの 60fps への影響の実測、非同期推論
+  （`AsyncInferQueue`。issue のフェーズ 3。観測が 1 ステップ古くなるので入れるなら PPO から見た環境が変わる）
+- 検査は `backend/tests/test_openvino_backend.py`（openvino が無くても、バケットと詰め物・降格・設定・Keras へ戻ること・
+  学習後の変換に失敗しても差し替えること まで。あれば変換の一致・学習後に差し替えたモデルの IR を作ること・
+  別のモデルの IR を使わないこと・壊れた IR の作り直し・NPU の全バッチ数）と
+  `backend/export_openvino.py --bench`（その PC での速さと差）
 
 ### 信号の現示（`sim/signals.py`）
 
@@ -561,6 +622,8 @@ CNN では信号の 14.3%・歩行者の 31.6% で先頭が最近傍ではなく
 ほとんど依存しません**（画像の大きさで決まるため）。
 推論を 10Hz に落とせば平均は半分になりますが、観測が 1 ステップ古くなって PPO から
 見た環境が変わるので、入れていません。
+**上の表は Keras の CPU で推論したときの値です。** NPU に載せると銀座 32.7ms / 金沢 35.8ms（同じ日に Keras で 79.9 / 77.6ms）で
+予算に収まります（「認識器の推論を NPU / OpenVINO で動かす」の節）。
 
 ★ **再スポーン（`world.try_respawn`）もエンジンスレッドで走ります。** 経路生成の
 コストは**経路の長さにそのまま比例する**ので、広いマップでは 1 台ぶんだけで予算を
@@ -2586,6 +2649,8 @@ OSM キャッシュ・チェックポイント・認識器と教師データ・�
 
 `.env`（任意。`.env.example` を複製する）で `DRIVERL_HOST` / `DRIVERL_PORT` を変えられます。
 **ポートを変えたら `frontend/vite.config.ts` のプロキシ先も直すこと。**
+認識器の推論の動かし先は `DRIVERL_PERCEP_DEVICE`（`auto` / `cpu` / `keras`。知らない値は `auto` として初回だけ記録する）。
+その IR（`detector/detector.ir1-<指紋>.xml` / `.bin`）と NPU のコンパイル済み（`detector/ov_cache/`）も生成物で、消しても次に読むとき作り直します。
 
 ### 接続元の確認（`app/host_guard.py`）
 

@@ -38,3 +38,9 @@ optuna==5.0.0
 # バックエンドの指定は app/rl/export.py が import 前に環境変数で行う。
 keras==3.15.1
 h5py==3.16.0                   # .keras の中の重み（model.weights.h5）
+
+# --- （任意）認識器の推論を NPU / OpenVINO の CPU で動かす（app/percep/openvino_backend.py）---
+# 入っていなくてもサーバーは起動する（認識器は従来どおり Keras の CPU で動く）。使うなら別に入れる:
+#   backend/.venv/Scripts/python.exe -m pip install openvino
+# 2026.4.1 で確かめた（numpy 2.5.2 と組み合わせて動く）。
+# openvino==2026.4.1

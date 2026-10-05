@@ -25,6 +25,7 @@ DriveRL/
 ├── backend/                        Python（バックエンド一式）
 │   ├── run.py                      起動（--dev で Vite も子プロセスとして面倒を見る）
 │   ├── train_detector.py           画像認識器の学習 CLI（中身は app/percep/trainer.py）
+│   ├── export_openvino.py          認識器を OpenVINO の IR へ変換し、Keras / OpenVINO CPU / NPU の速さと差を測る CLI
 │   ├── warmstart_policy.py         「止まる」に固まった方策を経路追従で立て直す CLI
 │   ├── tune_hyperparams.py         ハイパーパラメータの自動探索 CLI（Optuna。中身は app/runtime/autotune.py）
 │   ├── verify_log_std.py           方策分布（log_std）の健全性チェック
@@ -61,6 +62,7 @@ DriveRL/
 │   │   │   ├── geometry.py         カメラ姿勢と透視投影。**描く側とラベル側の唯一の実装**
 │   │   │   ├── weather.py          天候（雨・霧）。**視程はここが唯一の出典**
 │   │   │   ├── detector.py         CNN 認識器（Keras 3 / torch バックエンド）
+│   │   │   ├── openvino_backend.py 認識器の推論を OpenVINO（NPU / CPU）で動かす（任意。openvino が無ければ使わない）
 │   │   │   ├── trainer.py          認識器の学習本体。**CLI と画面が共有する唯一の実装**
 │   │   │   ├── evaluate.py         収集前に現行の認識器を採点（弱点を狙う重み）
 │   │   │   ├── groundtruth.py      真値から作る「理想の検出結果」（教師データ兼フォールバック）
@@ -182,6 +184,7 @@ GPU は要りません（CPU で学習します）。
 py -3.13 -m venv backend\.venv
 backend\.venv\Scripts\python.exe -m pip install -r requirements.txt
 backend\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt   # テストを回すときだけ
+backend\.venv\Scripts\python.exe -m pip install openvino                  # （任意）認識器を NPU / OpenVINO で速く動かす
 cd frontend; npm install; cd ..
 
 # （推奨）マップの事前ダウンロード。Overpass API 経由なので初回は 1 エリア数十秒かかる
@@ -293,6 +296,7 @@ cd backend; .venv\Scripts\python.exe -m app.map.prefetch; cd ..
 | 認識器 | 内容 |
 |---|---|
 | フレームワーク | Keras 3（torch バックエンド。TensorFlow は入れていません）|
+| 推論の動かし先 | openvino が入っていれば NPU（Intel AI Boost など）→ 無ければ OpenVINO の CPU。入っていなければ従来の Keras の CPU（下の「NPU で速く動かす」）|
 | 入力 | 192×144 の擬似カメラ画像（前方・後方・左・右の 4 台。numpy で描く）|
 | 出力 | 6×8 グリッドの検出（6 クラス・灯色・規制速度・距離など）と走行可能領域。出典は `percep/detector.py` の `CHANNELS` |
 | 規模 | 約 153,000 パラメータ |
@@ -300,8 +304,36 @@ cd backend; .venv\Scripts\python.exe -m app.map.prefetch; cd ..
 - **雨は画を濁らせるだけ、霧は視程を縮めます。** 視程の外のものは正解ラベルからも外れます（擬似カメラと正解ラベルは同じ視程を使う）
 - 運転席カメラにすると、認識したものに枠・名称・推定距離が重なります。**枠はそのまま強化学習の入力**で、画面用に
   描き直していません（認識が外れていれば、そのとおり外れて見える）。車線だけは路面に帯で描きます
-- 認識器で走ると、擬似カメラの描画と推論で 1 ステップが 50ms 前後かそれ以上かかります（銀座・8 台。真値で走らせると 10ms 前後）。
-  そのため**車両は 8 台が上限**で、倍速は等倍前後で頭打ちになります
+- 認識器を Keras の CPU で動かすと、擬似カメラの描画と推論で 1 ステップが 50ms 前後かそれ以上かかります（銀座・8 台。真値で走らせると 10ms 前後）。
+  そのため**車両は 8 台が上限**で、倍速は等倍前後で頭打ちになります。NPU に載せると 30ms 台に収まります（次の節）
+
+### NPU で速く動かす（任意）
+
+`openvino` を入れると、認識器の推論を **NPU（Intel AI Boost などの OpenVINO 対応アクセラレータ）** へ移します。
+NPU が無ければ OpenVINO の CPU で動かし、どちらでも駄目なら従来の Keras の CPU に戻ります（理由はログに残ります）。
+**内蔵 GPU は選びません**（ブラウザの 3D 描画とメモリ帯域を取り合うため）。
+
+```powershell
+backend\.venv\Scripts\python.exe -m pip install openvino
+cd backend
+.venv\Scripts\python.exe export_openvino.py --bench   # 変換して、Keras / OpenVINO CPU / NPU の速さと差を測る（任意）
+```
+
+- 変換は自動です。サーバーが認識器を読むとき・「モデル作成」タブで学習し終えたときに、`data/detector/` へ
+  OpenVINO の IR（`detector.ir1-<指紋>.xml` / `.bin`）を作ります。2 回目からは Keras を読まずに IR から 0.3 秒ほどで載ります
+- 動かし先は `.env` の `DRIVERL_PERCEP_DEVICE` で選べます（`auto` = NPU → CPU / `cpu` = OpenVINO の CPU / `keras` = 従来どおり）
+- NPU は fp16 で計算するので、出力は Keras と少しだけ違います（検出の一致 99.8〜99.9%・距離の差は中央値 2cm 弱）。
+  OpenVINO の CPU は fp32 で、検出は Keras と完全に一致します
+
+実測（Core Ultra 7 155H・8 台・全車が経路追従・歩行者 16 人。同じプロセスで動かし先を切り替えながら 100 ステップ × 3 回）:
+
+| | Keras CPU | OpenVINO CPU | OpenVINO NPU |
+|---|---|---|---|
+| 銀座の 1 ステップ（最小）| 75.4〜79.9ms | 36.9〜48.1ms | **32.7〜33.6ms** |
+| 金沢の 1 ステップ（最小）| 77.6ms | 46.7ms | **35.8ms** |
+| 推論 1 回（11 枚。前方 8 + 周囲 3）| 約 45ms | 約 20ms | **約 9ms** |
+| 1 ステップに使う CPU 時間（全スレッドの合計・銀座）| 1,105ms | 146ms | **22ms** |
+| 検出の一致（Keras が基準。晴れ・雨・霧）| — | 100% | 銀座 99.94% / 金沢 99.83% |
 
 ### 認識器を学習する
 
@@ -484,7 +516,8 @@ cd backend; .venv\Scripts\python.exe -m pytest --runslow -k ginza  # 1 つのプ
 | 認識結果の枠が出ない | カメラが「運転席」か、「表示」タブのスイッチ、追跡している車があるかを確かめてください |
 | 認識器が何も検出しない | 収集後のクラスの内訳に 0 件のクラスが無いか、学習の最後の検証時の検出数を見てください。枚数とエポックを増やすのも有効です |
 | 認識器の学習中に車が止まった | 仕様です（CPU を使い切るので物理と PPO を止める）。完了・中断すると自動で再開します |
-| 認識器を入れたら遅くなった | 仕組み上そうなります。車両数を減らすか、モデルの大きさを 0.5 倍にして学習し直してください（CLI なら `--width 0.5`）|
+| 認識器を入れたら遅くなった | Keras の CPU では仕組み上そうなります。`pip install openvino` で NPU / OpenVINO に載せるか（「NPU で速く動かす」）、車両数を減らすか、モデルの大きさを 0.5 倍にして学習し直してください（CLI なら `--width 0.5`）|
+| NPU で動いていない | 起動ログの「認識器を … で動かします」を見てください。`openvino` が入っていない・`.env` の `DRIVERL_PERCEP_DEVICE` が `cpu` / `keras`・NPU のドライバが無い、のどれかです。`export_openvino.py --bench` でデバイスの一覧が出ます |
 
 ---
 
