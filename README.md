@@ -9,6 +9,12 @@
   真値で行うので、見逃されることはありません
 - **バックエンド**（Python / FastAPI）が地図の変換・擬似カメラ・認識・物理・学習を、
   **フロントエンド**（React / TypeScript / Three.js）が 3D の描画と介入を受け持ちます
+---
+
+## 紹介動画
+
+https://github.com/user-attachments/assets/25f82de4-2de3-41ca-8efe-a6b0f1128dd1
+
 
 ---
 
