@@ -7,7 +7,7 @@ import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 for st in (sys.stdout, sys.stderr):
     try:
         st.reconfigure(encoding="utf-8", errors="replace")

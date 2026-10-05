@@ -52,7 +52,7 @@ Python は `backend/.venv`、Node は `frontend/`。詳しいコマンドは `CL
 ## 確かめる
 
 自動テストの入口は 2 つです。どちらも既存の検証スクリプト（`frontend/scripts/verify-*.ts` /
-`backend/verify_*.py`）を子プロセスで回して終了コードで合否を決め、加えて純粋関数と契約の単体テストを持ちます。
+`backend/verify/verify_*.py`）を子プロセスで回して終了コードで合否を決め、加えて純粋関数と契約の単体テストを持ちます。
 詳しい約束（一覧の出典・重いテストの切り分け・マップのキャッシュが古いときのスキップ）は `CLAUDE.md`「テスト」節にあります。
 
 ```powershell
@@ -68,7 +68,7 @@ cd backend
 .venv\Scripts\python.exe -m pytest --runslow    # verify_*.py もすべて（重い。-k ginza で絞れる）
 ```
 
-新しい `verify_*.py` を足したら `backend/tests/test_verify_wrappers.py` の `PLANS` に読むマップを書くこと
+新しい `verify_*.py` は `backend/verify/` に置き、`backend/tests/test_verify_wrappers.py` の `PLANS` に読むマップを書くこと
 （書かないとテストが落ちる。書かないまま回すと、キャッシュが古いときに Overpass から取り直してしまう）。
 
 `npm run verify` がある理由は、**3D の向きは間違っていても型チェックもビルドも通る**からです。
@@ -172,20 +172,20 @@ cd backend
   価値を残したまま走り出すと、advantage の誤差で**2 更新で元へ戻る**（実測）
 - **オンライン模倣（`rl/online_assist.py`）でエキスパートが運転したステップは PPO の代理損失に入れない。**
   価値の損失と模倣の損失にだけ使う（`RolloutBuffer.assisted`）。`learn`（安全ギミックが引き受けたステップを外す）とは
-  別の印で、`assisted` は `learn` の部分集合。検査は `backend/verify_online_assist.py`
+  別の印で、`assisted` は `learn` の部分集合。検査は `backend/verify/verify_online_assist.py`
 - **ヒヤリハット（`sim/curriculum.py`）で急制動を掛けた前走車のステップは学習に使わない**（前走車も PPO の車）。
-  難易度 0 の間は乱数を引かず、ON でも OFF でも結果は 1 ビットも変わらない。検査は `backend/verify_curriculum.py`
+  難易度 0 の間は乱数を引かず、ON でも OFF でも結果は 1 ビットも変わらない。検査は `backend/verify/verify_curriculum.py`
 - **V2X（`sim/v2x.py`）の「危険」は自車のカメラの検出から作る**（真値を混ぜると、CNN で走ったとき見えないはずの
-  ものが観測に入る）。近くに車がいなければ観測の V2X の 4 次元（75〜78）は 0。検査は `backend/verify_v2x_comm.py`
+  ものが観測に入る）。近くに車がいなければ観測の V2X の 4 次元（75〜78）は 0。検査は `backend/verify/verify_v2x_comm.py`
 - **見通しと死角（`percep/occlusion.py`）は 4 台のカメラの検出と走行可能距離だけから作る**（地図の建物を直接見ない）。
   観測の末尾 8 次元（87 次元）。見通しの悪い交差点の顔出し（安全ギミックの `creep`）は、**交差道路がある側**
   （`map_index.branch_sides`）の見通しが 20m 未満の間だけ掛ける。検査は `backend/tests/test_occlusion.py` と
-  `backend/verify_occlusion.py`
+  `backend/verify/verify_occlusion.py`
 - **方策は階層型（`rl/hierarchical_policy.py`）。上位が 4 つの意図を 20 ステップごとに選び、下位が観測 + 意図の one-hot
   から操作を出す。** 下位の部品名は平らな方策のままで、階層型にする前の重みは意図の入力と偏りを 0 にして読み込む
   （読み込んだ直後の振る舞いは元と同じ。元は `.flat` へ控える）。下位の報酬の整形（加加速度・車線維持・意図の速度帯）は
   学習器の中で足し、`StepResult.rewards` と metrics は変えない。お手本が運転し始めたときに選んだ意図は上位の方策の勾配に
-  入れない。検査は `backend/verify_hierarchical_policy.py`
+  入れない。検査は `backend/verify/verify_hierarchical_policy.py`
 - **`map/loader.py` と `public/sw.js` の `CACHE_VERSION` は、生成物の中身を変えたら上げる**
 - **実用モード（自動運転タクシー）では重みの更新だけが止まる。** 物理も推論も配信も動き続ける。
   この間は**全車**を PPO ではなく経路追従（Pure Pursuit）で走らせ、徴用した 1 台は
@@ -198,12 +198,12 @@ cd backend
 - **現示の群（`MapSignal.group`）は 0/1 の 2 値ではない。** 交差点ごとに、軸のそろった
   進入路をまとめた数だけ 0 から連番になる（`loader._phase_groups`）。2 値で分けていた
   ころは、進入路が 3 本以上ある交差点で**ほぼ直交する流れが同時に青**になっていた
-  （実測: 金沢 65 か所 / 梅田 5 か所）。検査は `backend/verify_signal_phases.py`
+  （実測: 金沢 65 か所 / 梅田 5 か所）。検査は `backend/verify/verify_signal_phases.py`
 - **配信に載せる差分は「作った」ではなく「取られた」で落とす。** `take_frame` /
   `take_taxi` は**最新の 1 件しか配らない**ので、取りに来るより速く次を作ると前の通は
   誰にも読まれずに消える。そこへ「版が変わったときだけ載せる」経路を乗せていると、
   **配車の経路が地図とカーナビから消えたまま戻らない**（検査は
-  `backend/verify_publish_routes.py`）
+  `backend/verify/verify_publish_routes.py`）
 - **信号の位相のずれを整数の剰余で散らさない。** `(phase_key * 7919) % 60` は
   7919 % 60 = 59 ≡ -1 なので、**番号が隣り合う交差点が 1 秒ずつずれた波**になる
   （実測・旧実装: 銀座も金沢も隣接組の 100% が 1 秒差）
@@ -222,12 +222,12 @@ cd backend
   運転席視点では**車ごと前後に揺れる**（検査は `npm run verify:playout`）
 - **走っている車の経路の出だしを直線で作らない**（`map/index.py` の `road_lead`）。
   最寄りのノードまで直線でつなぐと、並行する裏通りのノードを選んだときに**建物を突き抜ける**
-  （検査は `backend/verify_route_start.py`）
+  （検査は `backend/verify/verify_route_start.py`）
 - **経路の始点より後ろ・終点より先の信号と標識は経路に載せない**（`map/index.py` の `signals_on_route` /
   `speed_limits_on_route`）。最寄りの経路点の弧長のままだと端に張り付き、再スポーンした車の
   **後ろの停止線が「0m 先の赤」**になって、赤が終わるまで交差点の中心から動けない（#47。実測・銀座で
   再スポーンの 41.5% が 1 秒以上止められていた）。後ろの信号は 8m のまとめ（`SIGNAL_MERGE_M`）より前に外し、
-  信号無視の判定の「越えた信号」も毎ステップと同じ式で数える（検査は `backend/verify_route_signals.py`）
+  信号無視の判定の「越えた信号」も毎ステップと同じ式で数える（検査は `backend/verify/verify_route_signals.py`）
 - **信号と規制速度は「経路が通る辺」から引く**（`World` の `Route` が持つ `RouteLeg` の列）。経路に近い・向きが
   近いだけで拾うと、分岐する道の標識を拾う（梅田で経路の点の 2.6% が別の道の規制になっていた）。照合は
   辺の ID ではなく (入口, 出口) のノードの組で行い、規制速度の値は通る辺のものを使う（平行な 2 本の辺で
@@ -248,7 +248,7 @@ cd backend
   `surround` / `v2x`）。66・75 次元の重みは読み込み時にゼロ詰めで広げる（`rl/ppo.py` の `widen_observation`。
   元の重みは `.obs66` / `.obs75` へ控える）。**途中へ差し込むと、広げた重みが別の欄を読む**
 - **安全ギミックが運転を奪ったステップは PPO の学習から外す**（`StepResult.learn`）。外さないと、
-  方策が出していない操作の結果を方策の手柄として教えることになる（検査は `backend/verify_safety_gimmicks.py`）。
+  方策が出していない操作の結果を方策の手柄として教えることになる（検査は `backend/verify/verify_safety_gimmicks.py`）。
   **外すのは損失のマスク（`RolloutBuffer.learn`）だけで、「生きているか」（`active`）とは分ける**。混ぜると
   GAE が外したステップの手前を終端として扱い、価値目標が 0 に落ちる。ウォームスタートの教師からも外す
 - **地図の読み込み中は認識器の学習を始めない**（学習中の `load_map` を断るのと逆向き）。`engine.current_map()` は

@@ -18,7 +18,8 @@ LARGE_MAP_RADIUS_M = 1000.0
 TIMEOUT_SEC = 3600
 _VERSION_HEAD = re.compile(r'^\{"version":(\d+),')
 
-SCRIPTS = sorted(p.name for p in BACKEND_DIR.glob("verify_*.py"))
+VERIFY_DIR = BACKEND_DIR / "verify"
+SCRIPTS = sorted(p.name for p in VERIFY_DIR.glob("verify_*.py"))
 ALL_PRESETS = tuple(p.id for p in list_presets())
 SMALL_PRESETS = tuple(p.id for p in list_presets() if p.radius_m <= LARGE_MAP_RADIUS_M)
 
@@ -93,7 +94,7 @@ def test_verify_script(script: str, args: list[str], maps: tuple[str, ...]) -> N
         )
     env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
     proc = subprocess.run(
-        [sys.executable, script, *args],
+        [sys.executable, str(VERIFY_DIR / script), *args],
         cwd=BACKEND_DIR,
         env=env,
         capture_output=True,
