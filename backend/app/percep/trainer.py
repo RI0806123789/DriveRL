@@ -18,8 +18,10 @@ import numpy as np
 from app import config
 from app.contracts import SimParams
 from app.percep import detector as det
+from app.percep import openvino_backend as ovb
 from app.percep.types import CAMERAS_BY_KEY, DEFAULT_CAMERA, CameraSpec, DetClass
 from app.percep.weather import PRESETS, Weather
+from app.warn import warn_once
 
 if TYPE_CHECKING:
     from app.contracts import MapIndex
@@ -676,14 +678,48 @@ def fit_detector(
         staged.unlink(missing_ok=True)
     if log is not None:
         log(f"保存しました: {out_path}")
+    result.warning = _refresh_openvino_ir(model, out_path, spec, data, log)
     return result
+
+
+def _refresh_openvino_ir(
+    model: Any,
+    path: Path,
+    spec: CameraSpec,
+    data: dict[str, np.ndarray],
+    log: ProgressFn | None,
+) -> str:
+    """差し替えた認識器の OpenVINO 版を作る。失敗しても Keras 版は動くので、理由を返すだけ（空なら成功か対象外）。"""
+    if ovb.preference() == "keras" or not ovb.is_installed():
+        return ""
+    try:
+        ir = ovb.build_ir(
+            model,
+            path,
+            det.openvino_shapes(spec),
+            det._keras_forward_fn(model),
+            images=data["images"][:4],
+        )
+    except Exception:
+        warn_once(
+            "percep.openvino_build_ir",
+            "学習した認識器を OpenVINO へ変換できませんでした。Keras の CPU 推論で動かします",
+        )
+        try:
+            ovb.prune_stale(path, ovb.ir_path(path, ovb.fingerprint(path)))
+        except OSError:
+            warn_once("percep.openvino_prune_after_failure", "変換に失敗した後、古い IR を消せませんでした")
+        return "OpenVINO への変換に失敗したため、認識器は Keras の CPU 推論で動かします（ログを見てください）"
+    if log is not None:
+        log(f"OpenVINO 版を作りました: {ir.name}")
+    return ""
 
 
 def _verify_saved(
     path: Path, data: dict[str, np.ndarray], spec: CameraSpec, result: FitResult
 ) -> str:
     """保存したモデルを読み直して推論する。問題があれば理由を返す（無ければ空文字）。"""
-    loaded = det.Detector.load(path, spec)
+    loaded = det.Detector.load(path, spec, accelerate=False)
     if loaded is None:
         return "保存したモデルを Detector.load() が受け付けませんでした"
     sample = data["images"][: min(4, len(data["images"]))]

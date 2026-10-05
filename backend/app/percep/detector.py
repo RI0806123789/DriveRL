@@ -7,11 +7,12 @@ import logging
 import math
 import os
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 import numpy as np
 
 from app import config
+from app.percep import openvino_backend as ovb
 from app.percep.types import (
     DEFAULT_CAMERA,
     LANE_LOOKAHEAD_M,
@@ -22,6 +23,7 @@ from app.percep.types import (
     PerceptionResult,
     pack_by_class_quota,
 )
+from app.warn import warn_once
 
 logger = logging.getLogger("autoware_sim")
 
@@ -35,6 +37,7 @@ __all__ = [
     "decode_detections",
     "encode_freespace",
     "encode_targets",
+    "openvino_shapes",
     "speed_bin_index",
 ]
 
@@ -63,6 +66,8 @@ FREESPACE_OUTPUT_NAME = "freespace"
 
 LATERAL_SCALE = float(config.OBS_LATERAL_RANGE)
 FREESPACE_SCALE = float(config.OBS_FREESPACE_MAX_DISTANCE)
+
+_NOTED_NO_OPENVINO = False
 
 
 def _import_keras():
@@ -293,35 +298,50 @@ def decode_detections(
 class Detector:
     """学習済みの CNN で擬似カメラ画像から検出する。"""
 
-    def __init__(self, model: Any, spec: CameraSpec = DEFAULT_CAMERA) -> None:
+    def __init__(
+        self,
+        model: Any,
+        spec: CameraSpec = DEFAULT_CAMERA,
+        *,
+        runner: "ovb.OpenVinoRunner | None" = None,
+    ) -> None:
         self.model = model
         self.spec = spec
-        self._torch = None
-        try:
-            import torch  # noqa: PLC0415
+        self._runner = runner
+        self._keras = _keras_forward_fn(model) if model is not None else None
 
-            self._torch = torch
-        except ImportError:  # pragma: no cover - 他バックエンド用の逃げ道
-            self._torch = None
+    @property
+    def backend(self) -> str:
+        """いまの推論の動かし先（ログと確認用）。"""
+        if self._runner is not None:
+            return self._runner.description
+        return "Keras（torch）CPU"
 
     @classmethod
     def load(
-        cls, path: Path, spec: CameraSpec = DEFAULT_CAMERA
+        cls, path: Path, spec: CameraSpec = DEFAULT_CAMERA, *, accelerate: bool = True
     ) -> "Detector | None":
-        """学習済みモデルを読む。無ければ / 形が違えば None。"""
+        """学習済みモデルを読む。無ければ / 形が違えば None。`accelerate` が偽なら OpenVINO を使わない。"""
         path = Path(path)
         if not path.exists():
             logger.info("認識器が見つかりません（真値へフォールバックします）: %s", path)
             return None
-        try:
-            keras = _import_keras()
-            model = keras.models.load_model(path, compile=False)
-        except Exception:
-            logger.exception(
-                "認識器の読み込みに失敗しました（真値へフォールバックします）: %s", path
-            )
-            return None
 
+        loaded: dict[str, Any] = {}
+
+        def load_keras() -> Any:
+            if "model" not in loaded:
+                loaded["model"] = cls._read_keras(path)
+            return loaded["model"]
+
+        if accelerate:
+            runner = cls._open_runner(path, spec, load_keras)
+            if runner is not None:
+                return cls(None, spec, runner=runner)
+
+        model = load_keras()
+        if model is None:
+            return None
         problem = cls._validate(model, spec)
         if problem:
             logger.warning(
@@ -331,6 +351,53 @@ class Detector:
             )
             return None
         return cls(model, spec)
+
+    @staticmethod
+    def _read_keras(path: Path) -> Any:
+        try:
+            keras = _import_keras()
+            return keras.models.load_model(path, compile=False)
+        except Exception:
+            logger.exception(
+                "認識器の読み込みに失敗しました（真値へフォールバックします）: %s", path
+            )
+            return None
+
+    @staticmethod
+    def _open_runner(
+        path: Path, spec: CameraSpec, load_keras: Callable[[], Any]
+    ) -> "ovb.OpenVinoRunner | None":
+        """OpenVINO（NPU → CPU）で動かせるなら推論器を返す。使えなければ None（理由は記録する）。"""
+        pref = ovb.preference()
+        if pref == "keras":
+            return None
+        if not ovb.is_installed():
+            global _NOTED_NO_OPENVINO
+            if not _NOTED_NO_OPENVINO:
+                _NOTED_NO_OPENVINO = True
+                logger.info(
+                    "openvino が入っていないので Keras の CPU 推論で動かします"
+                    "（pip install openvino で NPU / OpenVINO の CPU を使えます）"
+                )
+            return None
+        try:
+            runner = ovb.open_runner(
+                path,
+                openvino_shapes(spec),
+                pref=pref,
+                max_batch=int(config.PERCEP_MAX_BATCH),
+                keras_loader=load_keras,
+                keras_forward=_keras_forward_fn,
+            )
+        except Exception:
+            warn_once(
+                "percep.openvino_load",
+                "OpenVINO での読み込みに失敗しました。Keras の CPU 推論で動かします",
+            )
+            return None
+        if runner is not None:
+            logger.info("認識器を %s で動かします", runner.description)
+        return runner
 
     @staticmethod
     def _validate(model: Any, spec: CameraSpec) -> str:
@@ -369,14 +436,10 @@ class Detector:
                 f"CameraSpec {self.spec.width}x{self.spec.height} と違います"
             )
         batch = batch.astype(np.float32, copy=False)
-
-        if self._torch is not None:
-            with self._torch.no_grad():
-                det, free = self.model(batch, training=False)
-        else:  # pragma: no cover - 他バックエンド用
-            det, free = self.model(batch, training=False)
-
-        return _to_numpy(det), _to_numpy(free)
+        if self._runner is not None:
+            return self._runner(batch)
+        assert self._keras is not None
+        return self._keras(batch)
 
     def detect(
         self, images: np.ndarray, slots: Sequence[int]
@@ -398,6 +461,34 @@ class Detector:
         det, free = self._forward(images)
         results = decode_detections(det, slots, self.spec)
         return results, (np.asarray(free, dtype=np.float32) * np.float32(FREESPACE_SCALE))
+
+
+def openvino_shapes(spec: CameraSpec = DEFAULT_CAMERA) -> ovb.Shapes:
+    """OpenVINO 版の入出力の形（バッチ軸を除く）。"""
+    return ovb.Shapes(
+        height=int(spec.height),
+        width=int(spec.width),
+        detections=(GRID_ROWS, GRID_COLS, CHANNELS),
+        freespace=(FREESPACE_DIM,),
+    )
+
+
+def _keras_forward_fn(model: Any) -> Callable[[np.ndarray], tuple[np.ndarray, np.ndarray]]:
+    """Keras のモデルを (N, H, W, 3) float32 -> (検出テンソル, 走行可能領域) の関数にする。"""
+    try:
+        import torch  # noqa: PLC0415
+    except ImportError:  # pragma: no cover - 他バックエンド用の逃げ道
+        torch = None
+
+    def forward(batch: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        if torch is not None:
+            with torch.no_grad():
+                det, free = model(batch, training=False)
+        else:  # pragma: no cover - 他バックエンド用
+            det, free = model(batch, training=False)
+        return _to_numpy(det), _to_numpy(free)
+
+    return forward
 
 
 def _to_numpy(tensor: Any) -> np.ndarray:
