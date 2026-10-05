@@ -282,6 +282,7 @@ export type AssistKind =
   | 'detour'
   | 'blind_spot'
   | 'peek'
+  | 'creep'
   | 'yield'
 
 /** 周囲カメラのキー。**バックエンドの `percep/types.py` の CAMERA_RIG と同じ値** */
@@ -289,6 +290,44 @@ export type SurroundKey = 'rear' | 'left' | 'right'
 
 /** 1 台ぶんの周囲カメラの検出。まだ撮っていないカメラのキーは無い */
 export type SurroundDetections = Partial<Record<SurroundKey, Detection[]>>
+
+/** 見通しと死角の 1 台のカメラ（protocol.md 2.3）。方位はカメラの向きから測った rad（左が正） */
+export interface OcclusionCamera {
+  key: 'front' | SurroundKey
+  /** カメラの位置。**自車座標系**（前方 +x / 左 +y、単位 m） */
+  at: Vec2
+  /** カメラの向き。車両の進行方向から測った rad（左が正） */
+  yaw: number
+  /** 見えている扇の列。[始まりの方位, 終わりの方位, 奥行き m] */
+  seen: [number, number, number][]
+}
+
+/** 死角 1 つ。カメラから見た方位 [from, to] と、奥行き near から range までの扇 */
+export interface OcclusionShadow {
+  camera: 'front' | SurroundKey
+  /** dynamic = 検出した車両の陰 / static = 走行可能距離の先（建物の陰・視程の外） */
+  kind: 'dynamic' | 'static'
+  from: number
+  to: number
+  near: number
+}
+
+/** 1 台ぶんの見通しと死角。4 台のカメラの検出と走行可能距離だけから作る（`percep/occlusion.py`） */
+export interface OcclusionView {
+  /** 見えている所・死角を考える半径 [m] */
+  range: number
+  /** 左・右のカメラの見通し距離 [m]。そのカメラの結果が無ければ null */
+  los: [number | null, number | null]
+  /** 前・後・左・右の 90 度の扇のうち見えている面積の割合 0..1 */
+  sectors: [number, number, number, number]
+  /** 前方カメラの画角のうち、検出した車両の陰の割合 0..1 */
+  frontOccluded: number
+  /** 結果のあるカメラだけ */
+  cameras: OcclusionCamera[]
+  shadows: OcclusionShadow[]
+  /** いちばん近い遮蔽の角までの距離 [m]。無ければ省略 */
+  corner?: number
+}
 
 export interface ObstacleState {
   id: number
@@ -361,6 +400,8 @@ export interface FrameMessage {
   detections?: Record<string, Detection[]>
   /** 周囲カメラの検出。`watch_surround` で頼んだ車の分だけ載る（キーはスロット番号の文字列） */
   surround?: Record<string, SurroundDetections>
+  /** 見通しと死角。`watch_occlusion` で頼んだ車の分だけ載る（キーはスロット番号の文字列） */
+  occlusion?: Record<string, OcclusionView>
   /** いま効いている天候。weatherAuto の間は params ではなくこちらが正。 */
   weather?: WeatherState
 }
@@ -858,6 +899,12 @@ export interface WatchSurroundMessage {
   vehicleId: number
 }
 
+/** その車の見通しと死角を frame に載せてもらう。**視野コーン・死角を出している間は 1 秒ごとに送り直す**（2.5 秒で切れる） */
+export interface WatchOcclusionMessage {
+  type: 'watch_occlusion'
+  vehicleId: number
+}
+
 /** クライアント → サーバーの全メッセージ */
 export type ClientMessage =
   | LoadMapMessage
@@ -884,6 +931,7 @@ export type ClientMessage =
   | CancelTaxiMessage
   | PlayerPoseMessage
   | WatchSurroundMessage
+  | WatchOcclusionMessage
   | PingMessage
 
 /** WebSocket の接続状態 */

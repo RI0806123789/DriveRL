@@ -5,6 +5,7 @@ import ast
 import re
 from typing import Any
 
+import numpy as np
 import pytest
 
 from app import config
@@ -22,6 +23,8 @@ from app.contracts import (
     VehicleSnapshot,
 )
 from app.map.presets import list_presets
+from app.percep.occlusion import RAY_ANGLES, RAY_HALF_WIDTH, CameraInput, evaluate_occlusion
+from app.percep.types import CAMERA_RIG, DetClass, Detection, PerceptionResult
 
 from .conftest import BACKEND_DIR, TsInterface
 
@@ -60,6 +63,20 @@ def _vehicle() -> VehicleSnapshot:
     )
 
 
+def _occlusion_wire() -> dict[str, Any]:
+    """車両の陰（動的）と建物の陰（静的）と角の両方が出る、見通しと死角の見本。省略できる欄も載る。"""
+    free = np.full(config.OBS_FREESPACE_DIM, config.OBS_FREESPACE_MAX_DISTANCE, dtype=np.float32)
+    free[3] = 8.0
+    car = Detection(DetClass.VEHICLE, 0.45, 0.4, 0.55, 0.8, 0.9, distance=12.0)
+    views = [
+        CameraInput(spec, PerceptionResult(0, [car] if spec.key == "front" else []), free)
+        for spec in CAMERA_RIG
+    ]
+    result = evaluate_occlusion(views)
+    assert result.corner_distance is not None
+    return result.to_wire(RAY_ANGLES, RAY_HALF_WIDTH)
+
+
 class TestWireKeysMatchProtocolTs:
     def test_sim_params(self, ts_interfaces: dict[str, TsInterface]) -> None:
         wire = SimParams().to_wire()
@@ -88,6 +105,7 @@ class TestWireKeysMatchProtocolTs:
                 assert_wire_matches(item, ts_interfaces[name])
 
     def test_frame_and_items(self, ts_interfaces: dict[str, TsInterface]) -> None:
+        occlusion = _occlusion_wire()
         frame = FrameSnapshot(
             tick=1,
             sim_time=0.05,
@@ -97,6 +115,7 @@ class TestWireKeysMatchProtocolTs:
             signals=[0, 2],
             detections={0: []},
             surround={0: {"rear": []}},
+            occlusion={0: occlusion},
             weather={"rain": 0.0, "fog": 0.2, "visibility": 120.0},
         )
         wire = frame.to_wire()
@@ -104,6 +123,14 @@ class TestWireKeysMatchProtocolTs:
         assert_wire_matches(wire["vehicles"][0], ts_interfaces["VehicleState"])
         assert_wire_matches(wire["obstacles"][0], ts_interfaces["ObstacleState"])
         assert_wire_matches(wire["pedestrians"][0], ts_interfaces["NpcPedestrianState"])
+        view = wire["occlusion"]["0"]
+        assert_wire_matches(view, ts_interfaces["OcclusionView"])
+        assert view["cameras"] and view["shadows"], "見本に、カメラと死角（動的・静的）の両方が載っていない"
+        for camera in view["cameras"]:
+            assert_wire_matches(camera, ts_interfaces["OcclusionCamera"])
+        for shadow in view["shadows"]:
+            assert_wire_matches(shadow, ts_interfaces["OcclusionShadow"])
+        assert {s["kind"] for s in view["shadows"]} == {"dynamic", "static"}
 
     def test_frame_omits_empty_optionals(self, ts_interfaces: dict[str, TsInterface]) -> None:
         wire = FrameSnapshot(tick=0, sim_time=0.0, vehicles=[], obstacles=[]).to_wire()

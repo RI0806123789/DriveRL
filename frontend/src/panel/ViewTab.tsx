@@ -174,6 +174,18 @@ export function ViewTab() {
           checked={view.detections}
           onChange={() => toggleView('detections')}
         />
+        <Switch
+          label="カメラの視野コーン"
+          description="追従中の車の前後左右 4 台のカメラが見えている範囲（半透明の緑・半径 30m）。走行可能距離と検出した車両の陰で切り取った、PPO の観測（末尾 8 次元）と同じものです。開発モードの追従・運転席カメラで表示します"
+          checked={view.cameraFrustums}
+          onChange={() => toggleView('cameraFrustums')}
+        />
+        <Switch
+          label="死角シャドウ"
+          description="カメラだけで推定した死角。赤は検出した車両の陰、暗い紫は建物の陰や霧で視程の外になった所です。見通しの悪い交差点では、交差道路の側の見通しが開けるまで車頭をゆっくり出します（介入「顔出し」）"
+          checked={view.occlusionShadows}
+          onChange={() => toggleView('occlusionShadows')}
+        />
       </Card>
 
     </>

@@ -25,6 +25,7 @@ from app.contracts import (
     TAXI_DRIVE_NORMAL,
 )
 from app.percep.encoder import encode_observations
+from app.percep.occlusion import RAY_ANGLES, RAY_HALF_WIDTH, CameraInput, evaluate_occlusion
 from app.percep.types import (
     CAMERA_RIG,
     DEFAULT_CAMERA,
@@ -32,6 +33,7 @@ from app.percep.types import (
     SURROUND_CAMERAS,
     CameraSpec,
     DetClass,
+    OcclusionResult,
     PerceptionResult,
 )
 from app.percep.weather import Weather, auto_weather
@@ -179,6 +181,13 @@ class SimulationEnv:
         #: (撮った時刻, そのときの経路の通し番号)。経路が変わったら古いものとして扱う
         self._surround_taken: dict[int, dict[str, tuple[float, int]]] = {}
         self._rear_free: dict[int, np.ndarray] = {}
+        # 周囲カメラの走行可能距離（見通しと死角に使う）。認識結果と同じ時刻・通し番号で持つ
+        self._surround_free: dict[int, dict[str, np.ndarray]] = {}
+        # 4 台のカメラから作った見通しと死角（`percep/occlusion.py`）と、その観測の欄 (N, 8)
+        self.latest_occlusion: dict[int, OcclusionResult] = {}
+        self._occlusion_obs = np.zeros((n, config.OBS_OCCLUSION_DIM), dtype=np.float32)
+        # 見通しと死角を frame に載せる車（`watch_occlusion`）
+        self.watched_occlusion: frozenset[int] = frozenset()
         self.safety = SafetySupervisor()
         # ヒヤリハットのオートカリキュラム。環境の乱数とは別の乱数で回す（難易度 0 の間は 1 つも引かない）
         self.curriculum = CurriculumManager(np.random.default_rng([int(seed), 63]))
@@ -1039,6 +1048,11 @@ class SimulationEnv:
         """world の外にあるもの（認識結果・天候・安全ギミックの介入）を載せる。"""
         frame.detections = self._detections_wire()
         frame.surround = self._surround_wire()
+        frame.occlusion = {
+            slot: self.latest_occlusion[slot].to_wire(RAY_ANGLES, RAY_HALF_WIDTH)
+            for slot in sorted(self.watched_occlusion)
+            if slot in self.latest_occlusion
+        }
         frame.weather = self.weather.to_wire(float(self._camera_spec.far))
         for vehicle in frame.vehicles:
             if vehicle.active:
@@ -1085,11 +1099,11 @@ class SimulationEnv:
 
         from app.percep.groundtruth import (
             detect_ground_truth_views,
-            freespace_ground_truth,
+            freespace_ground_truth_views,
         )
 
         self._ground_truth = detect_ground_truth_views
-        self._freespace_gt = freespace_ground_truth
+        self._freespace_gt = freespace_ground_truth_views
 
         if not config.DETECTOR_PATH.exists():
             logger.info(
@@ -1126,15 +1140,13 @@ class SimulationEnv:
     def _compute_observations(self) -> np.ndarray:
         """前方と周囲のカメラを描いて検出し、安全ギミックを評価してから観測ベクトルへ落とす。"""
         if not self._observations_enabled:
-            self.latest_perception = {}
-            self.latest_surround = {}
+            self._clear_perception()
             return np.zeros((config.MAX_VEHICLES, config.OBS_DIM), dtype=np.float32)
 
         active = self.world.fleet.active
         idx = np.flatnonzero(active)
         if idx.size == 0:
-            self.latest_perception = {}
-            self.latest_surround = {}
+            self._clear_perception()
             return np.zeros((config.MAX_VEHICLES, config.OBS_DIM), dtype=np.float32)
 
         self._ensure_percep()
@@ -1142,13 +1154,17 @@ class SimulationEnv:
         weather = self.weather
         freespace: dict[int, np.ndarray] = {}
         results: list[PerceptionResult] | None = None
-        # このステップで撮り直した周囲カメラ（CNN は予算の分だけ、真値は全部）
+        # このステップで撮り直した周囲カメラ（CNN は予算の分だけ、真値は全部）と、その走行可能距離
         fresh: dict[int, dict[str, PerceptionResult]] = {}
+        fresh_free: dict[int, dict[str, np.ndarray]] = {}
         rear_free: dict[int, np.ndarray] = {}
 
         if self._detector is not None and self._camera is not None:
             try:
-                results, freespace, fresh, rear_free = self._detect_cnn(idx, weather)
+                results, freespace, fresh, fresh_free = self._detect_cnn(idx, weather)
+                for slot, frees in fresh_free.items():
+                    if REAR_CAMERA.key in frees:
+                        rear_free[slot] = frees[REAR_CAMERA.key]
             except Exception:
                 self._detector = None
                 self._camera = None
@@ -1161,6 +1177,7 @@ class SimulationEnv:
                 results = None
                 freespace.clear()
                 fresh.clear()
+                fresh_free.clear()
                 rear_free.clear()
 
         replace_all = False
@@ -1174,17 +1191,21 @@ class SimulationEnv:
                 )
                 try:
                     results = []
-                    for slot in idx:
+                    rig = (spec, *SURROUND_CAMERAS)
+                    # 4 台ぶんの走行可能距離を全車まとめて 1 回で作る（1 台 1 カメラずつと値は同じ）
+                    frees = self._freespace_gt(self.world, [int(s) for s in idx], rig, reach)
+                    for i, slot in enumerate(idx):
                         s = int(slot)
                         views = self._ground_truth(self.world, s, CAMERA_RIG, weather)
                         results.append(views[0])
                         fresh[s] = {
                             cam.key: view for cam, view in zip(CAMERA_RIG[1:], views[1:])
                         }
-                        freespace[s] = self._freespace_gt(self.world, s, spec, reach)
-                        # 後方の建物までの距離は、下がる前後の車の分だけ作る
+                        freespace[s] = frees[i, 0]
+                        fresh_free[s] = {cam.key: frees[i, j + 1] for j, cam in enumerate(SURROUND_CAMERAS)}
+                        # 安全ギミックに渡す後方の建物までの距離は、下がる前後の車の分だけ
                         if REAR_CAMERA.key in self.safety.demand(s):
-                            rear_free[s] = self._freespace_gt(self.world, s, REAR_CAMERA, reach)
+                            rear_free[s] = fresh_free[s][REAR_CAMERA.key]
                     replace_all = True
                 except Exception:
                     if not self._ground_truth_failed:
@@ -1195,6 +1216,7 @@ class SimulationEnv:
                     results = None
                     freespace.clear()
                     fresh.clear()
+                    fresh_free.clear()
                     rear_free.clear()
 
         perceptions: dict[int, PerceptionResult] = {}
@@ -1204,7 +1226,8 @@ class SimulationEnv:
 
         self.latest_perception = perceptions
         self._latest_freespace = freespace
-        self._merge_surround(idx, fresh, rear_free, replace_all)
+        self._merge_surround(idx, fresh, rear_free, replace_all, fresh_free)
+        self._update_occlusion(idx)
         self._run_safety()
         return encode_observations(
             self.world,
@@ -1214,7 +1237,37 @@ class SimulationEnv:
             spec=spec,
             surround=self.latest_surround,
             v2x=self._exchange_v2x(perceptions, spec),
+            occlusion=self._occlusion_obs,
         )
+
+    def _clear_perception(self) -> None:
+        """認識していない（観測を作らない・走っている車がいない）ときに、前の認識結果を残さない。"""
+        self.latest_perception = {}
+        self.latest_surround = {}
+        self._surround_free = {}
+        self.latest_occlusion = {}
+        self._occlusion_obs[:] = 0.0
+
+    def _update_occlusion(self, idx: np.ndarray) -> None:
+        """前方と周囲のカメラの検出・走行可能距離から、車ごとの見通しと死角を作る（`percep/occlusion.py`）。"""
+        self.latest_occlusion = {}
+        self._occlusion_obs[:] = 0.0
+        if not self.latest_perception:
+            return
+        spec = self._camera_spec
+        for slot in idx:
+            s = int(slot)
+            front = self.latest_perception.get(s)
+            cams = self.latest_surround.get(s) or {}
+            frees = self._surround_free.get(s) or {}
+            views = [CameraInput(spec, front, self._latest_freespace.get(s) if front is not None else None)]
+            views.extend(
+                CameraInput(cam, cams.get(cam.key), frees.get(cam.key) if cam.key in cams else None)
+                for cam in SURROUND_CAMERAS
+            )
+            result = evaluate_occlusion(views)
+            self.latest_occlusion[s] = result
+            self._occlusion_obs[s] = result.features
 
     def _exchange_v2x(self, perceptions: dict[int, PerceptionResult], spec: CameraSpec) -> np.ndarray:
         """V2X のメッセージを作って近くの車へ配り、受け取った平均 (N, 4) を返す（`sim/v2x.py`）。切っていれば 0。"""
@@ -1236,9 +1289,9 @@ class SimulationEnv:
         list[PerceptionResult],
         dict[int, np.ndarray],
         dict[int, dict[str, PerceptionResult]],
-        dict[int, np.ndarray],
+        dict[int, dict[str, np.ndarray]],
     ]:
-        """前方は全車、周囲は予算の分だけ描いて、1 回の推論にまとめて通す。"""
+        """前方は全車、周囲は予算の分だけ描いて、1 回の推論にまとめて通す。周囲は検出と走行可能距離を返す。"""
         assert self._camera is not None and self._detector is not None
         frame_index = int(self.world.sim_time * config.SIM_HZ)
         images = [self._camera.render(self.world, idx, weather, frame_index)]
@@ -1258,15 +1311,14 @@ class SimulationEnv:
         n = int(idx.size)
         freespace = {int(slot): free_arr[i] for i, slot in enumerate(idx)}
         fresh: dict[int, dict[str, PerceptionResult]] = {}
-        rear_free: dict[int, np.ndarray] = {}
+        fresh_free: dict[int, dict[str, np.ndarray]] = {}
         for k, (slot, key) in enumerate(order):
             result = found[n + k]
             # 車線は前方カメラの意味（経路の先）しか持たないので、周囲の画からは捨てる
             result.detections = [d for d in result.detections if d.cls != DetClass.LANE]
             fresh.setdefault(slot, {})[key] = result
-            if key == REAR_CAMERA.key:
-                rear_free[slot] = free_arr[n + k]
-        return found[:n], freespace, fresh, rear_free
+            fresh_free.setdefault(slot, {})[key] = free_arr[n + k]
+        return found[:n], freespace, fresh, fresh_free
 
     def _surround_schedule(self, idx: np.ndarray) -> tuple[CameraSpec, list[int]]:
         """CNN に通す周囲カメラを 1 種類だけ選び（描画はカメラ 1 種類ごとに固定費が掛かる）、その車を古い順に予算まで返す。"""
@@ -1307,6 +1359,7 @@ class SimulationEnv:
         fresh: dict[int, dict[str, PerceptionResult]],
         rear_free: dict[int, np.ndarray],
         replace_all: bool,
+        fresh_free: dict[int, dict[str, np.ndarray]] | None = None,
     ) -> None:
         """撮り直した周囲カメラを取り込む。撮り直していないものは古さを添えたまま残す。"""
         now = float(self.world.sim_time)
@@ -1315,23 +1368,28 @@ class SimulationEnv:
             self.latest_surround = {}
             self._surround_taken = {}
             self._rear_free = {}
+            self._surround_free = {}
         for slot in list(self.latest_surround):
             if slot not in alive:
                 self.latest_surround.pop(slot, None)
                 self._surround_taken.pop(slot, None)
                 self._rear_free.pop(slot, None)
+                self._surround_free.pop(slot, None)
                 continue
             # 経路が変わった（再スポーンで別の場所へ移った）車の結果は、前の場所で写したもの
             serial = int(self.world.route_serial[slot])
             kept = self.latest_surround[slot]
             stamps = self._surround_taken.setdefault(slot, {})
+            frees = self._surround_free.get(slot, {})
             for key in [k for k in kept if stamps.get(k, (0.0, -1))[1] != serial]:
                 kept.pop(key, None)
                 stamps.pop(key, None)
+                frees.pop(key, None)
                 if key == REAR_CAMERA.key:
                     self._rear_free.pop(slot, None)
             if not kept:
                 self.latest_surround.pop(slot, None)
+                self._surround_free.pop(slot, None)
         for slot, cams in fresh.items():
             serial = int(self.world.route_serial[slot])
             kept = self.latest_surround.setdefault(slot, {})
@@ -1339,6 +1397,9 @@ class SimulationEnv:
             for key, result in cams.items():
                 kept[key] = result
                 stamps[key] = (now, serial)
+        for slot, frees in (fresh_free or {}).items():
+            if slot in self.latest_surround:
+                self._surround_free.setdefault(slot, {}).update(frees)
         for slot, free in rear_free.items():
             self._rear_free[slot] = free
 
@@ -1363,6 +1424,7 @@ class SimulationEnv:
             self.latest_surround,
             ages,
             rear_free,
+            self.latest_occlusion,
         )
 
     def _encode_last_perception(self) -> np.ndarray:
@@ -1377,4 +1439,5 @@ class SimulationEnv:
             spec=self._camera_spec,
             surround=self.latest_surround,
             v2x=self._exchange_v2x(self.latest_perception, self._camera_spec),
+            occlusion=self._occlusion_obs,
         )

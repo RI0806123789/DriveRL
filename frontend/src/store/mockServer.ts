@@ -11,6 +11,7 @@ import type {
   SimParams,
   StatusPayload,
   SurroundDetections,
+  OcclusionView,
   VehicleState,
   WeatherPreset,
   WeatherState,
@@ -28,6 +29,7 @@ import { MockAutotune } from './mock/autotune.ts'
 import { FRAME_MS, SIM_HZ, makeRng } from './mock/grid.ts'
 import { MOCK_PRESETS, MockSignals, buildMockMap } from './mock/map.ts'
 import { mockSurround } from './mock/surround.ts'
+import { mockOcclusion } from './mock/occlusion.ts'
 import { MockTaxi } from './mock/taxi.ts'
 import { MockTraffic } from './mock/traffic.ts'
 import { ASSIST_P_MIN } from './assistRate.ts'
@@ -39,7 +41,7 @@ const MOCK_CONFIG: SimConfig = {
   maxVehicles: 8,
   maxPedestrians: 64,
   simHz: SIM_HZ,
-  obsDim: 79,
+  obsDim: 87,
   actionDim: 2,
 }
 
@@ -131,6 +133,7 @@ class MockServer {
   private progress = 0
   /** 周囲カメラの検出を頼まれた車と、頼まれた時刻 [ms] */
   private surroundWatch = new Map<number, number>()
+  private occlusionWatch = new Map<number, number>()
 
   constructor(emit: (json: string) => void) {
     this.emit = emit
@@ -277,7 +280,24 @@ class MockServer {
     if (detections) frame.detections = detections
     const surround = this.buildSurround(frame)
     if (surround) frame.surround = surround
+    const occlusion = this.buildOcclusion(frame)
+    if (occlusion) frame.occlusion = occlusion
     this.send(frame)
+  }
+
+  /** 頼まれている車の見通しと死角（本物は `env._decorate`）。頼みは周囲カメラと同じく 2.5 秒で切れる */
+  private buildOcclusion(frame: FrameMessage): Record<string, OcclusionView> | null {
+    const now = Date.now()
+    const out: Record<string, OcclusionView> = {}
+    for (const [id, at] of this.occlusionWatch) {
+      if (now - at > MOCK_SURROUND_TTL_MS) {
+        this.occlusionWatch.delete(id)
+        continue
+      }
+      const car = frame.vehicles.find((v) => v.id === id && v.active)
+      if (car) out[String(id)] = mockOcclusion(car, frame.vehicles)
+    }
+    return Object.keys(out).length ? out : null
   }
 
   /** 頼まれている車の周囲カメラの検出（本物は `env._surround_wire`） */
@@ -601,6 +621,11 @@ class MockServer {
       case 'watch_surround': {
         // 本物と同じく、頼まれてから 2.5 秒だけ載せる
         this.surroundWatch.set(msg.vehicleId, Date.now())
+        break
+      }
+
+      case 'watch_occlusion': {
+        this.occlusionWatch.set(msg.vehicleId, Date.now())
         break
       }
 

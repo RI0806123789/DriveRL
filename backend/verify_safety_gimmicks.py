@@ -48,6 +48,8 @@ AEB_BEHIND_M = 2.6
 #: 後退 AEB で止まったときに、バンパーと物体の面の間に残っていてほしい距離 [m]
 AEB_MIN_GAP_M = 0.5
 BUDGET_MS = 50.0
+#: 旧い次元の重みを 0 埋めで広げたときに許す出力の差（float32 の足し算の順序の違いだけ）
+WIDEN_TOLERANCE = 1e-6
 #: 巻き込み防止の試験で、歩行者が離れてから発進を待つ最長 [s]（赤信号で並んでいたときは青まで待つ）
 RESUME_WAIT_SEC = 60.0
 
@@ -540,9 +542,10 @@ def verify_checkpoint() -> None:
         d_old, v_old = old.policy.forward(torch.from_numpy(x_old))
         d_new, v_new = new.policy.forward(torch.from_numpy(x_new))
     diff = max(float((d_old.mean - d_new.mean).abs().max()), float((v_old - v_new).abs().max()))
+    # 足した入力の重みは 0 だが、行列積の足し算の順序が入力の幅で変わるので float32 の丸めの差は残る
     check(
-        "66 次元の重みを 0 埋めで読み込み、方策と価値の出力が元と同じ",
-        loaded and new.widened_from == config.OBS_DIM_BEFORE_SURROUND and diff == 0.0,
+        "66 次元の重みを 0 埋めで読み込み、方策と価値の出力が元と同じ（丸めの差 1e-6 以内）",
+        loaded and new.widened_from == config.OBS_DIM_BEFORE_SURROUND and diff <= WIDEN_TOLERANCE,
         f"読み込み {loaded} / 最大差 {diff:.3e}",
     )
 

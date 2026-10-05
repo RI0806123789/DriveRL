@@ -510,6 +510,13 @@ async def handle_client_message(websocket: WebSocket, message: dict[str, Any]) -
             engine.watch_surround(raw)
         return
 
+    if kind == "watch_occlusion":
+        # 視野コーン・死角を出している間 1 秒ごとに届く。読めない値は黙って捨てる（watch_surround と同じ）
+        raw = message.get("vehicleId")
+        if isinstance(raw, int) and not isinstance(raw, bool):
+            engine.watch_occlusion(raw)
+        return
+
     if kind == "cancel_taxi":
         halt = coerce_bool(message.get("halt")) or False
         engine.taxi_command("halt" if halt else "cancel")

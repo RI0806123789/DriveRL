@@ -27,6 +27,8 @@ export function assistSummary(kind: AssistKind | undefined): AssistBadge | null 
       return { text: '巻き込み確認: 一時停止', level: 'stop' }
     case 'peek':
       return { text: '交差点: 徐行して左右確認', level: 'info' }
+    case 'creep':
+      return { text: '見通しの悪い交差点: 車頭をゆっくり出して確認', level: 'warn' }
     case 'yield':
       return { text: '接近車あり: 交差点の手前で待機', level: 'stop' }
     default:
@@ -57,5 +59,6 @@ export function paneAssist(
   if (kind === 'blind_spot' && turnSignal === side) return { text: '巻き込み確認', level: 'stop' }
   if (kind === 'yield') return { text: '接近車を確認', level: 'stop' }
   if (kind === 'peek') return { text: '左右確認', level: 'info' }
+  if (kind === 'creep') return { text: '見通し確認', level: 'warn' }
   return null
 }

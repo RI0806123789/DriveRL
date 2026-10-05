@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Iterable
 import numpy as np
 
 from app import config
+from app.contracts import BRANCH_LEFT, BRANCH_RIGHT
 from app.percep.encoder import SURROUND_CLASSES, local_xy
 from app.percep.types import (
     DEFAULT_CAMERA,
@@ -18,6 +19,7 @@ from app.percep.types import (
     CameraSpec,
     DetClass,
     Detection,
+    OcclusionResult,
     PerceptionResult,
 )
 from app.sim.signals import stop_speed_limit
@@ -27,6 +29,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "ASSIST_BLIND_SPOT",
+    "ASSIST_CREEP",
     "ASSIST_DETOUR",
     "ASSIST_FRONT_HOLD",
     "ASSIST_PEEK",
@@ -42,6 +45,7 @@ __all__ = [
 ASSIST_FRONT_HOLD = "front_hold"
 ASSIST_BLIND_SPOT = "blind_spot"
 ASSIST_PEEK = "peek"
+ASSIST_CREEP = "creep"
 ASSIST_YIELD = "yield"
 ASSIST_REVERSE_CHECK = "reverse_check"
 ASSIST_REVERSING = "reversing"
@@ -136,6 +140,19 @@ TRACK_SMOOTH = 0.5
 #: 周囲カメラの結果がこれより古ければ判断に使わない [秒]（CNN で回すときは毎ステップ撮り直さないため）
 FRESH_SEC = 0.2
 
+#: 見通しの悪い交差点の顔出し: 左右のカメラの見通し距離がこれ以上になったら開けたとみなし、これ未満に戻ったら閉じたとみなす [m]
+LOS_OPEN_M = 20.0
+LOS_CLOSE_M = 15.0
+#: 見通しが効かない間の速さ v = √(クリープ速度² + 2 a max(入口までの距離 - 余裕, 0))
+CREEP_DECEL_MPS2 = 1.5
+CREEP_MARGIN_M = 1.5
+CREEP_SPEED_MPS = 1.2
+#: 入口を車体の中心（左右のカメラの位置）がこれだけ越えても開けなければ、顔出しをやめて通常へ戻す [m]
+CREEP_PAST_M = 2.0
+#: 入口のこれだけ手前（バンパーから）から見通しを見る [m]。40km/h から 1.5m/s² で落とすのに約 34m 要るので、
+#: 徐行（PEEK_ZONE_M）と同じ 10m からでは間に合わず、最大減速で詰めることになる
+CREEP_ZONE_M = 30.0
+
 
 @dataclass
 class SafetyCommand:
@@ -192,6 +209,9 @@ class _SlotSafety:
     blind_since: float = -1.0
     blind_seen: float = -1.0
     peek_since: float = -1.0
+    #: 顔出しの間、左右の見通しが開けているか（ヒステリシスつき）。交差点の手前に入る前は None
+    sight_open: bool | None = None
+    creep_junction: float = math.nan
     tracks: dict[str, _Track] = field(
         default_factory=lambda: {LEFT_CAMERA.key: _Track(), RIGHT_CAMERA.key: _Track()}
     )
@@ -245,6 +265,7 @@ class SafetySupervisor:
         surround: dict[int, dict[str, PerceptionResult]],
         ages: dict[int, dict[str, float]],
         rear_free: dict[int, np.ndarray],
+        occlusion: dict[int, OcclusionResult] | None = None,
     ) -> None:
         """認識結果から介入の指示を作り直し、介入の根拠になった検出に危険度を付ける。"""
         for result in front.values():
@@ -266,8 +287,9 @@ class SafetySupervisor:
                 for key, result in (surround.get(slot) or {}).items()
                 if (ages.get(slot) or {}).get(key, math.inf) <= FRESH_SEC
             }
+            sight = _fresh_sight((occlusion or {}).get(slot), fresh)
             self.commands[slot] = self._evaluate_slot(
-                world, slot, float(now), front.get(slot), fresh, rear_free.get(slot)
+                world, slot, float(now), front.get(slot), fresh, rear_free.get(slot), sight
             )
 
     def _evaluate_slot(
@@ -278,6 +300,7 @@ class SafetySupervisor:
         front: PerceptionResult | None,
         cams: dict[str, PerceptionResult],
         rear_free: np.ndarray | None,
+        sight: tuple[float | None, float | None] = (None, None),
     ) -> SafetyCommand:
         serial = int(world.route_serial[slot])
         if self._state[slot].route_serial != serial:
@@ -292,7 +315,7 @@ class SafetySupervisor:
             return self._resume(world, slot, now, cams)
         if st.mode == _MODE_DETOUR:
             return self._detour(world, slot, now, front)
-        return self._drive(world, slot, now, front, cams)
+        return self._drive(world, slot, now, front, cams, sight)
 
     def _set_mode(self, st: _SlotSafety, mode: str, now: float) -> None:
         st.mode = mode
@@ -306,6 +329,7 @@ class SafetySupervisor:
         now: float,
         front: PerceptionResult | None,
         cams: dict[str, PerceptionResult],
+        sight: tuple[float | None, float | None] = (None, None),
     ) -> SafetyCommand:
         st = self._state[slot]
         cmd = SafetyCommand()
@@ -358,8 +382,49 @@ class SafetySupervisor:
         if peek_assist and not cmd.assist:
             cmd.assist = peek_assist
 
+        creep_cap, creeping = self._creep(world, slot, sight)
+        if creeping:
+            demand.extend((LEFT_CAMERA.key, RIGHT_CAMERA.key))
+        if creep_cap < cmd.speed_cap:
+            cmd.speed_cap = creep_cap
+        # 見通しが悪いと見ている間は、手前の徐行（4m/s）のほうが低くても顔出しとして示す
+        if math.isfinite(creep_cap) and cmd.assist in ("", ASSIST_PEEK):
+            cmd.assist = ASSIST_CREEP
+
         st.demand = tuple(dict.fromkeys(demand))
         return cmd
+
+    def _creep(
+        self, world: "World", slot: int, sight: tuple[float | None, float | None]
+    ) -> tuple[float, bool]:
+        """見通しの悪い交差点の顔出し。交差道路がある側の見通しが開けるまで、入口で止まれる速さ + クリープ速度に絞る。"""
+        st = self._state[slot]
+        centre_gap, sides = world.junction_ahead(slot, CREEP_PAST_M)
+        bumper_gap = centre_gap - HALF_LENGTH
+        if not math.isfinite(centre_gap) or bumper_gap > CREEP_ZONE_M or not sides:
+            st.sight_open = None
+            return math.inf, False
+        junction = float(world.arc[slot]) + centre_gap
+        # 弧長の足し引きの丸めで毎ステップ別の交差点と取り違えないよう、幅を持たせて比べる（NaN は別物）
+        if not abs(st.creep_junction - junction) <= 0.5:
+            st.creep_junction = junction
+            st.sight_open = None
+        needed = [v for bit, v in ((BRANCH_LEFT, sight[0]), (BRANCH_RIGHT, sight[1])) if sides & bit]
+        if any(v is None for v in needed):
+            # 撮れていない間は判断しない（手前の徐行 `_peek` はそのまま効く）
+            return math.inf, True
+        reach = min(float(v) for v in needed if v is not None)
+        if st.sight_open is None:
+            st.sight_open = reach >= LOS_OPEN_M
+        elif st.sight_open and reach < LOS_CLOSE_M:
+            st.sight_open = False
+        elif not st.sight_open and reach >= LOS_OPEN_M:
+            st.sight_open = True
+        if st.sight_open:
+            return math.inf, True
+        room = max(bumper_gap - CREEP_MARGIN_M, 0.0)
+        # 減速度 a でちょうどクリープ速度に落ちる速さ。√(2ad) + v とすると、止まり際の減速度が際限なく大きくなる
+        return math.sqrt(CREEP_SPEED_MPS * CREEP_SPEED_MPS + 2.0 * CREEP_DECEL_MPS2 * room), True
 
     def _front_hold(
         self,
@@ -764,6 +829,17 @@ class SafetySupervisor:
         st.retry_at = now + RETRY_SEC
         st.blockers = []
         st.stuck_since = -1.0
+
+
+def _fresh_sight(
+    occlusion: OcclusionResult | None, fresh: dict[str, PerceptionResult]
+) -> tuple[float | None, float | None]:
+    """左右のカメラの見通し距離のうち、撮ってから `FRESH_SEC` 以内のものだけ（古ければ None）。"""
+    if occlusion is None:
+        return None, None
+    left = occlusion.los_left if LEFT_CAMERA.key in fresh else None
+    right = occlusion.los_right if RIGHT_CAMERA.key in fresh else None
+    return left, right
 
 
 def _nearest(

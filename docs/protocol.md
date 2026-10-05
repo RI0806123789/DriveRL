@@ -68,7 +68,7 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
     "maxVehicles": 8,       // 事前確保するエージェントスロット数
     "maxPedestrians": 64,   // 街を歩く NPC 歩行者の上限
     "simHz": 20,            // 物理・学習ステップの周波数
-    "obsDim": 79,
+    "obsDim": 87,
     "actionDim": 2
   },
   "weatherPresets": [       // 天候の選択肢。**(rain, fog) の数値はここが唯一の出典**
@@ -245,6 +245,22 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
       "left": [],
       "right": [{ "cls": 5, "box": [0.62, 0.31, 0.7, 0.66], "conf": 1.0, "distance": 5.4 }]
     }
+  },
+  "occlusion": {                  // 4 台のカメラから作った見通しと死角。watch_occlusion で頼まれた車だけ
+    "3": {
+      "range": 30.0,              // 見えている所・死角を考える半径 [m]
+      "los": [8.0, 30.0],         // 左・右のカメラの見通し距離 [m]（結果が無ければ null）
+      "sectors": [0.62, 0.71, 0.18, 0.76],  // 前・後・左・右の 90 度の扇のうち見えている面積の割合
+      "frontOccluded": 0.114,     // 前方カメラの画角のうち、検出した車両の陰の割合
+      "corner": 8.4,              // いちばん近い遮蔽の角までの距離 [m]（無ければ省略）
+      "cameras": [                // 結果のあるカメラだけ。at は自車座標 [前方+x, 左+y] m、yaw と方位は rad（左が正）
+        { "key": "front", "at": [0.35, -0.36], "yaw": 0.0, "seen": [[-0.593, -0.187, 30.0], [-0.187, 0.593, 12.0]] }
+      ],
+      "shadows": [                // 死角。カメラから見た方位 [from, to]・奥行き near から range までの扇
+        { "camera": "front", "kind": "dynamic", "from": -0.067, "to": 0.067, "near": 12.0 },
+        { "camera": "left", "kind": "static", "from": -0.589, "to": -0.196, "near": 8.0 }
+      ]
+    }
   }
 }
 ```
@@ -395,6 +411,25 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
 - CNN で走るときは周囲カメラを**毎ステップ撮り直さない**（1 ステップに `SURROUND_CNN_IMAGES_PER_STEP` 枚）。
   撮り直していないカメラは前に撮った検出がそのまま載る。真値で走るときは毎ステップ全部作り直す
 
+**`occlusion`（見通しと死角）**
+
+4 台のカメラ（前方・後方・左・右）の**検出と走行可能距離だけ**から作った、自車まわりの見えている所と死角
+（`backend/app/percep/occlusion.py`）。地図の建物は見ていない（真値で走るときは、走行可能距離の真値が建物を見る）。
+
+- **`watch_occlusion`（3 章）で頼まれた車の分だけ載る。** 2.5 秒（`engine.OCCLUSION_WATCH_TTL_SEC`）で消えるので、
+  視野コーン・死角を出している間はクライアントが 1 秒ごとに送り直す
+- 座標は**自車座標系**（前方 +x / 左 +y、単位 m）。方位は**カメラの向きから測った rad**（左が正）で、カメラの位置 `at`
+  と向き `yaw`（車両の進行方向から、左が正）と組み合わせると `at + d·(cos(yaw+θ), sin(yaw+θ))` で点になる。
+  three.js へは `detections[].lanePoints` と同じく `(x, 0, -y)` で写す
+- `cameras[].seen` は画角（±34 度）を 35 本に分けた方位ごとの**見えている奥行き**を、同じ奥行きが続く所でまとめたもの。
+  奥行きは、走行可能距離（画角に入る 3 本）と、検出した車両の陰の手前のうち近いほう。**まだ撮っていないカメラは載らない**
+  （CNN で走るとき、周囲カメラは毎ステップ撮り直さない）
+- `shadows` の `dynamic` は検出した**車両**の陰（枠の左右の端の方位から、推定距離 `near` より奥）。パイロンと人は
+  背後の車や人を隠さないので陰を作らない。`static` は走行可能距離の先（建物の陰か、霧で視程の外）。走行可能距離の
+  当たりが検出した物体で説明できる方位（物体の距離と 3m 以内）は `static` にしない
+- `los` は左右のカメラの**見通し距離**（そのカメラの `seen` の奥行きの最大）。観測の末尾 8 次元（`OBS_LAYOUT` の
+  `occlusion`）と同じ値から作るので、画面と学習が食い違わない
+
 **`assist`（安全ギミックの介入）**
 
 | 値 | 意味 |
@@ -407,6 +442,7 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
 | `detour` | 障害物の脇を、経路を横へずらして抜けている |
 | `blind_spot` | 交差点で曲がる手前で、曲がる側に歩行者・並走車が写っているので曲がり始めない（巻き込み防止。赤信号などで先に止まっていても出す） |
 | `peek` | 信号の無い交差点の手前で徐行して左右を確かめている |
+| `creep` | 見通しの悪い交差点で、交差道路がある側のカメラの見通しが開けるまで、入口で止まれる速さ + 1.2m/s に絞って車頭を出している（顔出し） |
 | `yield` | 左右のカメラに近づいてくる車が写っているので交差点の入口で待っている |
 
 介入するのは**経路追従で走っている車**（実用モードの全車・配車中の車）と、`safetyAssist`（2.5）が
@@ -493,7 +529,7 @@ true のときの学習中の車だけ。判断は検出枠と推定距離から
     "safetyAssist": false,    // 学習中の車にも安全ギミック（検出枠連動の停止・切り返し）を掛けるか
     "onlineAssist": true,     // 学習中の車に経路追従（エキスパート）を割り込ませ、模倣の教師にするか
     "incidentCurriculum": true, // 成績に応じて学習中の車にヒヤリハット（飛び出し・前走車の急制動）を起こすか
-    "v2xComm": true           // 車車間通信（V2X）で近くの車のメッセージを観測の末尾 4 次元に足すか
+    "v2xComm": true           // 車車間通信（V2X）で近くの車のメッセージを観測の 4 次元（75〜78）に足すか
   }
 }
 ```
@@ -527,7 +563,7 @@ true のときの学習中の車だけ。判断は検出枠と推定距離から
 `v2xComm` が true の間、各車は 4 次元のメッセージ（車速 / `maxSpeed`・右左折の意図（方向指示器と同じ -1/0/+1）・
 自車のカメラ（前方と周囲）に写った歩行者・障害物の近さ `max(0, 1 - d/30)`・交差点（信号の無い交差点の入口か次の
 停止線の近いほう）への近さ `max(0, 1 - d/30)`）を出し、**30m 以内の近い 2 台**から受け取ったものの平均を
-観測の末尾 4 次元（`OBS_LAYOUT` の `v2x`）に入れる（`sim/v2x.py`）。電波なので建物で遮られない。
+観測の 4 次元（`OBS_LAYOUT` の `v2x`。75〜78）に入れる（`sim/v2x.py`）。電波なので建物で遮られない。
 近くに車がいなければ 0 で、false にしたときも 0（近くに車がいないときと同じ）。受け取った相手は
 `frame.vehicles[].v2xConnectedIds` に載る（2.3）。実用モードでも観測は同じように作る。
 
@@ -604,14 +640,14 @@ true のときの学習中の車だけ。判断は検出枠と推定距離から
 {
   "type": "network",
   "updates": 1234,
-  "obsDim": 79,
+  "obsDim": 87,
   "actionDim": 2,
   "hiddenSizes": [128, 128],
   "layers": [
     {
       "name": "policy_trunk.0",   // パラメータ名から `.weight` を除いたもの
       "role": "policy",           // "policy" | "value"
-      "inDim": 79,
+      "inDim": 87,
       "outDim": 128,
       "weightAbsMean": 0.0421,    // |w| の平均。学習が進むと動く
       "weightStd": 0.0688,
@@ -904,6 +940,7 @@ true のときの学習中の車だけ。判断は検出枠と推定距離から
 { "type": "cancel_taxi", "halt": true }                        // halt=true は [space] の緊急停止
 { "type": "player_pose", "at": [12.5, -30.2] }                 // 徒歩キャラの位置。null で街から消える
 { "type": "watch_surround", "vehicleId": 3 }                   // その車の周囲カメラの検出を frame に載せてもらう（2.5 秒で切れる）
+{ "type": "watch_occlusion", "vehicleId": 3 }                  // その車の見通しと死角を frame に載せてもらう（2.5 秒で切れる）
 { "type": "ping" }                                            // → {"type":"pong","t":<server epoch ms>}
 ```
 
@@ -911,6 +948,9 @@ true のときの学習中の車だけ。判断は検出枠と推定距離から
 最後に届いてから 2.5 秒で、その車の `frame.surround` は載らなくなる（タブを閉じたクライアントの
 ぶんを載せ続けないため）。複数のタブが別の車を頼めば両方載る。`vehicleId` が整数でなければ
 黙って捨てる（`player_pose` と同じく頻繁に届くので、エラーを返し続けない）。
+
+`watch_occlusion` も同じ形で、視野コーン・死角シャドウ（3D 画面のトグル）を出している間、追従中の車について
+**1 秒ごとに送り直す**。最後に届いてから 2.5 秒で `frame.occlusion` は載らなくなる。
 
 `set_network` は隠れ層の構成を変える。**重みは引き継げない**（層の形が変わるので
 `load_state_dict` が通らない）ため、学習は 0 からやり直しになる。
@@ -1051,6 +1091,9 @@ Optuna が入っていない・いまの重みに NaN / Inf がある、のど�
 意図の one-hot の重みと意図ごとの偏りを 0 にして読み込む（上位方策は初期値。`rl/ppo.py` の `upgrade_flat_state`）。
 学習の自動化（`autotune` / `start_auto_tune` / `stop_auto_tune_and_save`）を足したときも 2 のまま据え置いた。
 新しいメッセージ型だけで、古いクライアントは `autotune` を無視し、送らない限り探索は始まらない。
+見通しと死角（`frame.occlusion` / `watch_occlusion` / `assist` の `creep`）を足したときも 2 のまま据え置いた。
+古いクライアントは `occlusion` を無視し、`creep` は知らない介入として表示しないだけ。`config.obsDim` は 79 から 87 へ
+増えたが、欄を末尾に足したので **66・75・79 次元の重みも 0 で足して読み込める**（`config.OBS_WIDENABLE_DIMS`）。
 
 不正なメッセージには `error` (`INVALID_MESSAGE`) を返し、接続は維持する。
 
@@ -1104,10 +1147,10 @@ WebSocket に載せないものはここに置く。バイナリの受け渡し�
 TorchScript の入出力：
 
 ```
-forward(obs: float32[B, 79]) -> (action: float32[B, 2], value: float32[B])
+forward(obs: float32[B, 87]) -> (action: float32[B, 2], value: float32[B])
 ```
 
-観測の次元（79）は `config.OBS_DIM` が出典で、書き出したメタデータの `model.obsDim` にも入る。
+観測の次元（87）は `config.OBS_DIM` が出典で、書き出したメタデータの `model.obsDim` にも入る。
 
 `action` は方策分布の平均（学習時と同じく `tanh` で `[-1, 1]` に収めたもの）で、決定論的な行動。
 学習時と同じ確率的な行動が欲しい場合は、同梱の buffer `log_std` を使って
@@ -1119,7 +1162,7 @@ forward(obs: float32[B, 79]) -> (action: float32[B, 2], value: float32[B])
 Keras 版の入出力：
 
 ```
-model(obs: float32[B, 79]) -> [action: float32[B, 2], value: float32[B]]
+model(obs: float32[B, 87]) -> [action: float32[B, 2], value: float32[B]]
 ```
 
 `value` の Dense(1) 出力は素のままだと `[B, 1]` になるが、TorchScript 版
@@ -1150,7 +1193,7 @@ TorchScript や Keras 形式を渡した場合は、その旨を説明する `40
   "sizeBytes": 578601,
   "checkpoint": {
     "updates": 585,
-    "obsDim": 79,
+    "obsDim": 87,
     "actionDim": 2,
     "hiddenSizes": [128, 128],
     "hasOptimizer": true,          // false だと学習の立ち上がりが鈍る

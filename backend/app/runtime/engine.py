@@ -53,6 +53,8 @@ PLAYER_POSE_TTL_SEC = 1.0
 
 #: 周囲カメラの検出を frame に載せ続ける時間 [秒]。4 分割表示のクライアントは 1 秒ごとに送り直す
 SURROUND_WATCH_TTL_SEC = 2.5
+#: 見通しと死角を frame に載せ続ける時間 [秒]。視野コーン・死角を出しているクライアントは 1 秒ごとに送り直す
+OCCLUSION_WATCH_TTL_SEC = 2.5
 
 
 @dataclass
@@ -188,6 +190,8 @@ class SimulationEngine:
         self._player_pose_at: float = 0.0
         # 周囲カメラの検出を見たい車と、最後に頼まれた時刻（複数タブなら和集合）
         self._surround_watch: dict[int, float] = {}
+        # 見通しと死角を見たい車と、最後に頼まれた時刻
+        self._occlusion_watch: dict[int, float] = {}
 
         # 学習の自動化（Optuna）。セッションはエンジンスレッドだけが触り、asyncio 側へは配る形にして渡す
         self._autotune = LiveAutoTune()
@@ -310,6 +314,12 @@ class SimulationEngine:
         if vehicle_id is None or not (0 <= int(vehicle_id) < config.MAX_VEHICLES):
             return
         self._inbox.put(("watch_surround", int(vehicle_id)))
+
+    def watch_occlusion(self, vehicle_id: int | None) -> None:
+        """その車の見通しと死角を、しばらく frame に載せるよう頼む（None は何もしない）。"""
+        if vehicle_id is None or not (0 <= int(vehicle_id) < config.MAX_VEHICLES):
+            return
+        self._inbox.put(("watch_occlusion", int(vehicle_id)))
 
     def take_taxi(self, last_seq: int) -> tuple[int, dict[str, Any] | None]:
         """前回配信した番号より新しい配車状態があれば返す（経路はここで配り終える）。"""
@@ -653,6 +663,9 @@ class SimulationEngine:
 
         elif kind == "watch_surround":
             self._surround_watch[int(payload)] = time.perf_counter()
+
+        elif kind == "watch_occlusion":
+            self._occlusion_watch[int(payload)] = time.perf_counter()
 
         elif kind == "publish_taxi":
             with self._lock:
@@ -1315,6 +1328,12 @@ class SimulationEngine:
             if now - at < SURROUND_WATCH_TTL_SEC
         }
         env.watched_surround = frozenset(self._surround_watch)
+        self._occlusion_watch = {
+            vid: at
+            for vid, at in self._occlusion_watch.items()
+            if now - at < OCCLUSION_WATCH_TTL_SEC
+        }
+        env.watched_occlusion = frozenset(self._occlusion_watch)
 
         frame = (
             env.full_snapshot(self._tick, self._sim_time)

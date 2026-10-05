@@ -92,6 +92,10 @@ export interface ViewToggles {
   detections: boolean
   /** 開発モードの運転席視点を前後左右の 4 分割にする。scene/QuadViewRenderer.tsx */
   quad: boolean
+  /** 追従中の車の 4 台のカメラの見えている範囲（視野コーン）。scene/CameraFrustumOverlay.tsx */
+  cameraFrustums: boolean
+  /** 追従中の車の死角（車両の陰・建物の陰）。scene/OcclusionShadowOverlay.tsx */
+  occlusionShadows: boolean
 }
 
 /** 運転席の 4 分割表示を出すか。**実用モードでは出さない**（車載カメラは従来の 1 画面のまま） */
@@ -144,7 +148,7 @@ const DEFAULT_CONFIG: SimConfig = {
   maxVehicles: 8,
   maxPedestrians: DEFAULT_MAX_PEDESTRIANS,
   simHz: 20,
-  obsDim: 79,
+  obsDim: 87,
   actionDim: 2,
 }
 
@@ -318,6 +322,8 @@ export const useSimStore = create<SimStore>((set, get) => ({
     grid: false,
     detections: true,
     quad: true,
+    cameraFrustums: false,
+    occlusionShadows: false,
   },
 
   setPanelOpen: (open) => set({ panelOpen: open }),

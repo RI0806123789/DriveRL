@@ -35,6 +35,9 @@ import { frameBuffer } from '../store/frameBuffer'
 import { isQuadView, useSimStore } from '../store/simStore'
 import { QuadViewRenderer } from './QuadViewRenderer'
 import { VehicleReverseGuide } from './VehicleReverseGuide'
+import { CameraFrustumOverlay } from './CameraFrustumOverlay'
+import { OcclusionShadowOverlay } from './OcclusionShadowOverlay'
+import { useWatchOcclusion } from './occlusionWatch'
 import { ConeIcon, CarIcon, MapIcon } from '../ui/Icons'
 import type { MapBounds } from '../types/protocol'
 
@@ -72,6 +75,7 @@ export function SimulatorView() {
   const taxiMode = appMode === 'taxi'
   const taxiCameraOn = useSimStore((s) => s.taxiCameraOn)
   const quadView = useSimStore(isQuadView)
+  useWatchOcclusion()
 
   const bounds = map?.bounds ?? null
   const extent = shadowExtent(bounds)
@@ -142,6 +146,8 @@ export function SimulatorView() {
           {taxiMode && taxiCameraOn && <TaxiCameraFeed />}
 
           <VehicleReverseGuide />
+          {!taxiMode && view.cameraFrustums && <CameraFrustumOverlay />}
+          {!taxiMode && view.occlusionShadows && <OcclusionShadowOverlay />}
 
           <InteractionPlane bounds={bounds} />
           <CameraRig bounds={bounds} />
