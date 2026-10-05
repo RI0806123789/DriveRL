@@ -48,17 +48,17 @@ npm run dev             # Vite だけ立てる。?mock=1 でバックエンド�
 .venv\Scripts\python.exe train_detector.py --collect-only              # 教師データ収集だけ
 .venv\Scripts\python.exe export_openvino.py --bench    # 認識器を OpenVINO の IR へ変換し、Keras / OpenVINO CPU / NPU の速さと差を測る（要 pip install openvino）
 # ↑ どちらも操作パネルの「モデル作成」タブから同じことができる（中身は同じ実装）
-.venv\Scripts\python.exe verify_log_std.py           # 方策分布の健全性チェック
-.venv\Scripts\python.exe verify_online_assist.py    # オンライン模倣（割り込みの確率・危険の判定・模倣の損失。合成の碁盤の目で走らせる）
-.venv\Scripts\python.exe verify_curriculum.py       # ヒヤリハットのオートカリキュラム（昇降格・飛び出し・急制動。合成の道路で走らせる）
-.venv\Scripts\python.exe verify_v2x_comm.py        # 車車間通信（近傍の選び方・メッセージ・観測の V2X の 4 次元・旧い重みの読み込み）
-.venv\Scripts\python.exe verify_occlusion.py       # カメラだけの見通しと死角・見通しの悪い交差点の顔出し（建物つきの合成の交差点で走らせる）
-.venv\Scripts\python.exe verify_hierarchical_policy.py  # 階層型の方策（意図の分布・20 ステップ保つ・上位の GAE・勾配・整形・平らな重みの移し替え・書き出し）
-.venv\Scripts\python.exe verify_signal_phases.py    # 信号の現示（交差する流れが同時に青にならないか）
-.venv\Scripts\python.exe verify_publish_routes.py  # 経路の配信（取りこぼしても届くか）
-.venv\Scripts\python.exe verify_route_start.py     # 配車の経路の出だし（道なりに出るか・建物を突き抜けないか）
-.venv\Scripts\python.exe verify_route_signals.py   # 経路上の信号と規制速度（通る辺のものか・始点より後ろの停止線を 0m 先の赤と数えないか）
-.venv\Scripts\python.exe verify_safety_gimmicks.py # 周囲カメラと安全ギミック（切り返し・後退 AEB・巻き込み防止）。--kanazawa で金沢の予算も測る
+.venv\Scripts\python.exe verify\verify_log_std.py           # 方策分布の健全性チェック
+.venv\Scripts\python.exe verify\verify_online_assist.py    # オンライン模倣（割り込みの確率・危険の判定・模倣の損失。合成の碁盤の目で走らせる）
+.venv\Scripts\python.exe verify\verify_curriculum.py       # ヒヤリハットのオートカリキュラム（昇降格・飛び出し・急制動。合成の道路で走らせる）
+.venv\Scripts\python.exe verify\verify_v2x_comm.py        # 車車間通信（近傍の選び方・メッセージ・観測の V2X の 4 次元・旧い重みの読み込み）
+.venv\Scripts\python.exe verify\verify_occlusion.py       # カメラだけの見通しと死角・見通しの悪い交差点の顔出し（建物つきの合成の交差点で走らせる）
+.venv\Scripts\python.exe verify\verify_hierarchical_policy.py  # 階層型の方策（意図の分布・20 ステップ保つ・上位の GAE・勾配・整形・平らな重みの移し替え・書き出し）
+.venv\Scripts\python.exe verify\verify_signal_phases.py    # 信号の現示（交差する流れが同時に青にならないか）
+.venv\Scripts\python.exe verify\verify_publish_routes.py  # 経路の配信（取りこぼしても届くか）
+.venv\Scripts\python.exe verify\verify_route_start.py     # 配車の経路の出だし（道なりに出るか・建物を突き抜けないか）
+.venv\Scripts\python.exe verify\verify_route_signals.py   # 経路上の信号と規制速度（通る辺のものか・始点より後ろの停止線を 0m 先の赤と数えないか）
+.venv\Scripts\python.exe verify\verify_safety_gimmicks.py # 周囲カメラと安全ギミック（切り返し・後退 AEB・巻き込み防止）。--kanazawa で金沢の予算も測る
 .venv\Scripts\python.exe warmstart_policy.py --preset ginza  # 「止まる」に固まった方策を立て直す
 .venv\Scripts\python.exe tune_hyperparams.py --preset ginza --trials 20  # ハイパーパラメータの自動探索（Optuna。本番の重みは書き換えない）
 .venv\Scripts\python.exe tune_hyperparams.py --preset grid --trials 2 --trial-steps 128  # 地図のキャッシュを読まない短い動作確認
@@ -71,7 +71,7 @@ npm run dev             # Vite だけ立てる。?mock=1 でバックエンド�
 ### テスト
 
 自動テストの入口は 2 つです（#67）。**どちらも既存の検証スクリプトを書き直さず、子プロセスで回して
-終了コードで合否を決めます**（`python verify_*.py` / `npm run verify` を単独で回す使い方はそのまま）。
+終了コードで合否を決めます**（`python verify\verify_*.py` / `npm run verify` を単独で回す使い方はそのまま。スクリプトは `backend/verify/` にある）。
 
 | 入口 | ランナー | 中身 | 既定の所要（2026-10-04 の実測）|
 |---|---|---|---|
@@ -83,7 +83,7 @@ npm run dev             # Vite だけ立てる。?mock=1 でバックエンド�
 このリポジトリで機能している作法です（テストは「壊していないか」を見るもので、速さの比較の代わりにはなりません）。
 
 - ★ **一覧を手で書かないこと。** フロントは `package.json` の `verify:*` から、バックエンドは
-  `backend/verify_*.py` の glob からテストを作ります。さらに「`npm run verify` の連結が `verify:*` を漏れなく呼ぶか」
+  `backend/verify/verify_*.py` の glob からテストを作ります。さらに「`npm run verify` の連結が `verify:*` を漏れなく呼ぶか」
   「`scripts/verify-*.ts` がすべて登録されているか」「`verify_*.py` がすべて `PLANS`（`tests/test_verify_wrappers.py`）に
   載っているか」を検査するので、足し忘れると落ちます
 - ★ **新しい `verify_*.py` を足したら、`PLANS` に読むマップを書くこと。** テストは実行の前に
@@ -363,7 +363,7 @@ CNN では信号の 14.3%・歩行者の 31.6% で先頭が最近傍ではなく
   `CACHE_VERSION` を上げること。
 - **`SIGNAL_MERGE_M` の出典は `contracts.py` の 1 か所**（`map/index.py` の
   `signals_on_route` と `loader.py` の `_merge_phases` が同じ値を見ます）。
-- 検査は `backend/verify_signal_phases.py`（全プリセットのマップを読み、同じ群に
+- 検査は `backend/verify/verify_signal_phases.py`（全プリセットのマップを読み、同じ群に
   交差する流れが入っていないか・群が連番か・赤が 60 秒未満か・位相のずれが
   交差点ごとに散っているかを見る）。
   **この壊れ方は型チェックもビルドも通り、画面でも「たまたま出会わなければ」見えません。**
@@ -603,7 +603,7 @@ CNN では信号の 14.3%・歩行者の 31.6% で先頭が最近傍ではなく
 1Hz の配信をする）を決定的に再現すると、直す前は **2 通目に経路が載らず、
 クライアント側（`store/simStore.ts` の `route: msg.route ?? (版が同じなら前の経路)`）が
 `route: []` に落ちます**。地図（`panel/TaxiMap.tsx`）とカーナビから経路が消え、
-段階が進んで版が上がるまで戻りません。検査は `backend/verify_publish_routes.py`。
+段階が進んで版が上がるまで戻りません。検査は `backend/verify/verify_publish_routes.py`。
 
 - **配り終えたら載せ直さないこと。** 経路は数百点あるので、毎通載せると 20Hz の転送量が
   跳ねます（実測・銀座 40 秒: 直す前後どちらも frame 801 通・経路を載せた行 8 で変わらず）。
@@ -1019,7 +1019,7 @@ HTTP 側の `finally` で消すと、504 を返した後にエンジンが
   **係数を 1 にしないこと** — キャッシュの丸めで、辺の重みが両端の直線距離を最大 1.7mm 下回る辺が金沢に
   1.8 万本あり、見積もりが過大になります。**始点か終点が主成分（`_reachable_mask`）の外なら双方向 Dijkstra に
   戻すこと** — 届かないときに片側から探す A* は届く範囲を全部なめ、金沢で 0.1ms が 100ms を超えました
-- 検査は `backend/verify_route_start.py`（全プリセットで、経路が車の位置から道なりに始まるか・
+- 検査は `backend/verify/verify_route_start.py`（全プリセットで、経路が車の位置から道なりに始まるか・
   出だしに道路を外れた直線が無いか・建物を突き抜けるのが下の 2 つだけか・折り返さないか・
   配車の経路 1 本の作成時間）。★ **目的地は 150〜1,500m の輪の中から選ぶこと。** 以前は引き直しを
   30 回までにしていて、金沢では 2 割ほど外れたまま遠い目的地（最大 13km）で測っていました（「95% 35ms 未満」が
@@ -1172,7 +1172,7 @@ HTTP 側の `finally` で消すと、504 を返した後にエンジンが
   上書きしていました（銀座 588 本中 7 本 / 栄 596 本中 14 本）。始点の規制速度は最初の辺から取ります
 - **観測（`percep/`）はこの表を見ません。** 擬似カメラと真値の検出は前方に写る灯器から作るので、
   後ろの停止線の赤は観測に入っていませんでした（実測: 上の 8 件とも検出されず）
-- 検査は `backend/verify_route_signals.py`（全プリセットで、始点より後ろ・終点より先の信号が
+- 検査は `backend/verify/verify_route_signals.py`（全プリセットで、始点より後ろ・終点より先の信号が
   載らないか・通らない進入路の灯器を載せないか・規制速度が走っている道のものか・再スポーンと作り直しの
   直後に後ろの赤に止められないか・停止線の手前で作り直しても赤を越えないか・速度の上限と信号無視の判定が
   同じ信号を見るか）
@@ -1304,7 +1304,7 @@ HTTP 側の `finally` で消すと、504 を返した後にエンジンが
   画面は開発モードで車どうしを水色の線で結び（`scene/V2XLinks.tsx`。車体と同じ時刻・同じ区間で補間する）、
   追跡中の車のカードに「V2X: 車両#2とリンク中」のチップを出します（`panel/V2XStatusChip.tsx`）。線は鏡・周囲カメラには
   写しません（`useHiddenFromMirrors`）。線分の組み立ては `scene/v2xLinkGeometry.ts` で、モックも同じ近傍の規則で相手を決めます
-- 検査は `backend/verify_v2x_comm.py`（近傍の選び方・メッセージ・観測の V2X の 4 次元・66/75/79 次元の重みの読み込み・
+- 検査は `backend/verify/verify_v2x_comm.py`（近傍の選び方・メッセージ・観測の V2X の 4 次元・66/75/79 次元の重みの読み込み・
   87 次元での PPO の更新・所要時間。合成の碁盤の目で走らせる）と `npm run verify:v2x` / `npm run test:ui`
 - issue の完了条件の「金沢の T 字路で出会い頭の急ブレーキが減るか」は**まだ測っていません**（マップのキャッシュが要る）
 
@@ -1349,7 +1349,7 @@ HTTP 側の `finally` で消すと、504 を返した後にエンジンが
   **1 ビットも変わりません**（銀座・金沢、401 ステップ × 8 台・障害物と歩行者 32 人・乱数の操作で不一致 0）。
   1 ステップは真値で銀座 32.2 → 31.6ms / 金沢 31.3 → 30.2ms、CNN（Keras）で銀座 78.8〜90.3 → 83.0〜91.6ms（ゆらぎの範囲）
 - 検査は `backend/tests/test_occlusion.py`（視錐台・陰・静的な死角・見通し・特徴量・速さ・旧い重みの読み込み）と
-  `backend/verify_occlusion.py`（建物つきの合成の交差点で走らせる）、`npm test` の `src/__tests__/occlusionGeometry.test.ts`
+  `backend/verify/verify_occlusion.py`（建物つきの合成の交差点で走らせる）、`npm test` の `src/__tests__/occlusionGeometry.test.ts`
 
 **画面（`scene/CameraFrustumOverlay.tsx` / `OcclusionShadowOverlay.tsx`）**: 「表示」タブのトグル（`view.cameraFrustums` /
 `view.occlusionShadows`。既定は OFF）を入れると、開発モードの追従・運転席カメラで追っている車の見えている扇（緑）と
@@ -1492,7 +1492,7 @@ HTTP 側の `finally` で消すと、504 を返した後にエンジンが
 - 検出枠と周囲のカメラの画が重なることは、`verify:detections` が擬似カメラの式と three のカメラへの投影を
   270 点ずつ突き合わせて確かめます（最大差 1e-15）。**左右（後方カメラでは車の左が画の右）も投影で
   確かめること**（手で決めると、メーターの針やウインカーで左右を取り違えたのと同じ壊れ方をする）
-- 検査は `backend/verify_safety_gimmicks.py`（写り方・後退ギア・重みの移行・観測の欄・学習からの除外・
+- 検査は `backend/verify/verify_safety_gimmicks.py`（写り方・後退ギア・重みの移行・観測の欄・学習からの除外・
   切り返し・後退 AEB・曲がり角・巻き込み防止・1 ステップの時間）と `npm run verify:detections`。
   巻き込み防止は、**止まるのに要る距離（v²/2a）+ 1m より手前で並んだときだけ**試します（それより近くで
   いきなり真横に現れた人の前では、どんな仕組みでも止まれない）
@@ -2447,7 +2447,7 @@ UV の v をずらして「その車の段」だけを貼ります（`vehicleMat
 - 割合は `metrics.assistRate`（直近 10 秒の学習中の車のステップのうち、エキスパートが運転した割合）で、
   学習タブのチップ（`panel/AssistRateChip.tsx`）とグラフに出します。表示の形は `store/assistRate.ts`
 - `rl/` は `sim/` を import しない約束なので、危険の判定の入れ物（`AssistDanger`）は `contracts.py` に置いてあります
-- 検査は `backend/verify_online_assist.py`（割り込みの確率・危険の判定・区間・バッファ・模倣の損失・環境。
+- 検査は `backend/verify/verify_online_assist.py`（割り込みの確率・危険の判定・区間・バッファ・模倣の損失・環境。
   **マップのキャッシュを読まず、合成の碁盤の目で走らせる**）と `npm run verify:assist` / `npm run test:ui`
 
 ### ヒヤリハットのオートカリキュラム（`sim/curriculum.py`。#63）
@@ -2486,7 +2486,7 @@ UV の v をずらして「その車の段」だけを貼ります（`vehicleMat
 - ゲージは幅ではなく `.m3-bar-fill` の `--m3-bar-value`（`transform: scaleX`）で伸ばします（issue は `width: 65%` を挙げて
   いましたが、上の遷移の規約に合わせた）。表示の形は `store/curriculum.ts`、部品は `panel/CurriculumGauge.tsx`
 - 実測（合成の碁盤の目・8 台・64 人）: 見届けと判定は 1 ステップ中央値 0.40ms・95% 0.78ms
-- 検査は `backend/verify_curriculum.py`（難易度の昇降格・飛び出しの動き・環境の中での発火・急制動と学習からの除外・見届け。
+- 検査は `backend/verify/verify_curriculum.py`（難易度の昇降格・飛び出しの動き・環境の中での発火・急制動と学習からの除外・見届け。
   合成の道路で走らせる）と `npm run verify:curriculum` / `npm run test:ui`
 
 ### 階層型の方策（`rl/hierarchical_policy.py`。#65）
@@ -2553,7 +2553,7 @@ UV の v をずらして「その車の段」だけを貼ります（`vehicleMat
   `metrics.optionShares`（直近 10 秒の方策が運転したステップの意図の割合）と `jerkRms`（同じステップの加加速度の二乗平均平方根。
   実際の速度の変化から出す）。バッジは車両の一覧・追跡中の車両のカード・画面右下の HUD に出します
   （`panel/OptionBadge.tsx`。配色は `styles/tokens.css` の `--m3-option-*`、対応表は `store/driveOption.ts`）
-- 検査は `backend/verify_hierarchical_policy.py`（意図の分布・意図で操作が変わるか・20 ステップ保つか・上位の GAE・
+- 検査は `backend/verify/verify_hierarchical_policy.py`（意図の分布・意図で操作が変わるか・20 ステップ保つか・上位の GAE・
   上位と下位の勾配・意図の模倣・整形・平らな重みの移し替え・書き出し・env の教師と `currentOption`・`act` の時間。
   合成の碁盤の目で走らせる）と `npm run verify:options` / `npm run test:ui`
 

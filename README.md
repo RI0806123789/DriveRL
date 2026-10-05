@@ -28,17 +28,18 @@ DriveRL/
 │   ├── export_openvino.py          認識器を OpenVINO の IR へ変換し、Keras / OpenVINO CPU / NPU の速さと差を測る CLI
 │   ├── warmstart_policy.py         「止まる」に固まった方策を経路追従で立て直す CLI
 │   ├── tune_hyperparams.py         ハイパーパラメータの自動探索 CLI（Optuna。中身は app/runtime/autotune.py）
-│   ├── verify_log_std.py           方策分布（log_std）の健全性チェック
-│   ├── verify_online_assist.py     オンライン模倣（経路追従の割り込みと模倣の損失）
-│   ├── verify_curriculum.py        ヒヤリハットのオートカリキュラム（飛び出し・前走車の急制動）
-│   ├── verify_v2x_comm.py          車車間通信（V2X）のメッセージと観測の 4 次元
-│   ├── verify_occlusion.py         カメラだけで作る見通しと死角・見通しの悪い交差点の顔出し（建物つきの合成の交差点）
-│   ├── verify_hierarchical_policy.py  階層型の方策（上位の意図の選択と下位の連続値の操作）
-│   ├── verify_signal_phases.py     信号の現示（交差する流れが同時に青にならないか）
-│   ├── verify_publish_routes.py    経路の配信（取りこぼしてもクライアントへ届くか）
-│   ├── verify_route_start.py       配車の経路の出だし（道なりに出るか・建物を突き抜けないか）
-│   ├── verify_route_signals.py     経路上の信号と規制速度（通る辺のものか・後ろの停止線を 0m 先の赤と数えないか）
-│   ├── verify_safety_gimmicks.py   前後左右のカメラと安全ギミック（切り返し・後退 AEB・巻き込み防止）
+│   ├── verify/                     検証スクリプト（単独でも回せる。pytest が子プロセスで回す）
+│   │   ├── verify_log_std.py           方策分布（log_std）の健全性チェック
+│   │   ├── verify_online_assist.py     オンライン模倣（経路追従の割り込みと模倣の損失）
+│   │   ├── verify_curriculum.py        ヒヤリハットのオートカリキュラム（飛び出し・前走車の急制動）
+│   │   ├── verify_v2x_comm.py          車車間通信（V2X）のメッセージと観測の 4 次元
+│   │   ├── verify_occlusion.py         カメラだけで作る見通しと死角・見通しの悪い交差点の顔出し（建物つきの合成の交差点）
+│   │   ├── verify_hierarchical_policy.py  階層型の方策（上位の意図の選択と下位の連続値の操作）
+│   │   ├── verify_signal_phases.py     信号の現示（交差する流れが同時に青にならないか）
+│   │   ├── verify_publish_routes.py    経路の配信（取りこぼしてもクライアントへ届くか）
+│   │   ├── verify_route_start.py       配車の経路の出だし（道なりに出るか・建物を突き抜けないか）
+│   │   ├── verify_route_signals.py     経路上の信号と規制速度（通る辺のものか・後ろの停止線を 0m 先の赤と数えないか）
+│   │   └── verify_safety_gimmicks.py   前後左右のカメラと安全ギミック（切り返し・後退 AEB・巻き込み防止）
 │   ├── pytest.ini                  pytest の設定（tests/ の場所・重いテストの印）
 │   ├── tests/                      自動テスト（契約・プロトコルの突き合わせ・verify_*.py を回すラッパー）
 │   ├── app/
@@ -500,7 +501,7 @@ cd backend; .venv\Scripts\python.exe -m pytest --runslow -k ginza  # 1 つのプ
 - 3D の向きは間違っていても型チェックもビルドも通るので、幾何計算を純粋関数に切り出し、`npm run verify` で数値の
   不変条件を確かめています（灯火の並びが左右逆だったバグをこれで見つけました）。1 本だけなら `npm run verify:signals`
   のように回せます。**どの検証があるかは `frontend/package.json` の `scripts` が唯一の出典です**
-- バックエンドの `verify_*.py`（上のディレクトリ構成を参照）は単独でも回せます。マップのキャッシュが無いか古い
+- バックエンドの `backend/verify/verify_*.py`（上のディレクトリ構成を参照）は、`backend` から `.venv\Scripts\python.exe verify\verify_log_std.py` のように単独でも回せます。マップのキャッシュが無いか古い
   プリセットはスキップするので、先に `app.map.prefetch` を回してください
 - 契約テストは、`contracts.py`・`frontend/src/types/protocol.ts`・`docs/protocol.md`・`main.py` の食い違いを見ます
 

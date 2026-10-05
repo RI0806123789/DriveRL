@@ -97,7 +97,7 @@ cd backend
 .venv\Scripts\python.exe -m pytest --runslow     # verify_*.py もすべて（経路・信号・地図・安全ギミックに触れたとき）
 ```
 
-- 新しい `verify_*.py` を足したら、`backend/tests/test_verify_wrappers.py` の `PLANS` に読むマップを登録します。
+- 新しい `verify_*.py` は `backend/verify/` に置き、`backend/tests/test_verify_wrappers.py` の `PLANS` に読むマップを登録します。
 - `verify:*` の本数など、手で書くと古くなる数字は `frontend/package.json` の `scripts` が唯一の出典です。
 
 ---
