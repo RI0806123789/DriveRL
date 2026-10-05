@@ -337,7 +337,8 @@ with torch.no_grad():
     )
     diffs = [float((up.policy.mean_action(xf, torch.full((64,), o)) - flat_mu).abs().max()) for o in range(4)]
 check("平らな方策のチェックポイントを読み込める（更新回数も引き継ぐ）", loaded and up.upgraded_flat and up.updates == 4321)
-check("読み込んだ直後は、どの意図でも元の操作と同じ（意図の入力と偏りは 0）", max(diffs) == 0.0, f"最大差 {max(diffs):.2e}")
+# 意図の入力の重みは 0 だが、行列積の足し算の順序が入力の幅で変わるので float32 の丸めの差は残る
+check("読み込んだ直後は、どの意図でも元の操作と同じ（意図の入力と偏りは 0。丸めの差 1e-6 以内）", max(diffs) <= 1e-6, f"最大差 {max(diffs):.2e}")
 check("書き出しからの読み込み（importer）も受け付ける", info.obs_dim == D)
 with tempfile.TemporaryDirectory() as tmp:
     path = Path(tmp) / "hier.pt"

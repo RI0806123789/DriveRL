@@ -454,9 +454,10 @@ def verify_observation(index) -> None:
         f"{np.round(rear, 3).tolist()}",
     )
     check(
-        "周囲カメラの欄は V2X の欄の手前（後から足した欄は末尾へ足していく）",
+        "周囲カメラの欄・V2X の欄・死角の欄の順（後から足した欄は末尾へ足していく）",
         base + config.OBS_SURROUND_DIM == OBS_OFFSETS["v2x"]
-        and OBS_OFFSETS["v2x"] + config.OBS_V2X_DIM == config.OBS_DIM,
+        and OBS_OFFSETS["v2x"] + config.OBS_V2X_DIM == OBS_OFFSETS["occlusion"]
+        and OBS_OFFSETS["occlusion"] + config.OBS_OCCLUSION_DIM == config.OBS_DIM,
         f"OBS_DIM {config.OBS_DIM} / 欄の先頭 {base}",
     )
 
