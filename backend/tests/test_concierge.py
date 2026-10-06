@@ -168,7 +168,8 @@ def _grid_index(k: int = 4, step: float = 120.0):
 
 class TestTaxiDriveMode:
     @pytest.fixture(scope="class")
-    def ride(self):
+    @classmethod
+    def ride(cls):
         import numpy as np
 
         from app.contracts import SimParams

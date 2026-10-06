@@ -49,6 +49,7 @@ class Bounds:
 class MapNode:
     """道路ネットワークの交差点／端点。"""
 
+    #: 0 からの連番（`build_map_index` が確かめる）。MapIndex と World は ID を行番号として引く
     id: int
     x: float
     y: float
