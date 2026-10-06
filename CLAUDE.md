@@ -410,10 +410,10 @@ CNN では信号の 14.3%・歩行者の 31.6% で先頭が最近傍ではなく
 |---|---|
 | **弧長は全点まとめて `np.diff` → `np.cumsum`** し、エッジの境目の区間長だけ 0 に落とす | 1 本ずつ回すと金沢で 488.9ms。まとめると 7.6ms（結果は一致。最大差 2.6e-09）|
 | **`dict.get(key, default)` の既定値に関数呼び出しを置かない** | Python は**既定値を必ず評価する**ので、灯器が無いノードでも向きの計算が走る。灯器に触れないエッジは先に弾くこと |
-| **ポリラインは平坦化して 1 回で `np.asarray`** する | エッジごとに `np.asarray` すると 57,128 回で 72.1ms。平坦化すれば 25.7ms |
+| ★ **頂点は `itertools.chain` で平坦にして、件数を渡した `np.fromiter` で 1 回で読む** | **エッジごとに `np.asarray` して `np.concatenate` しないこと**（#92 の案はこの形だった）。金沢の 17.6 万点で、エッジごと 59.3ms / 数値のリストを `np.asarray` 21.6ms / 点のタプルのリストを `np.asarray` 32.7ms / `np.fromiter` 13.1ms（2026-10-07・7 回の最小値。出力はどれも 1 ビット同じ）|
 
 実測（`SidewalkNetwork.__init__` 全体・3 回の最小値）: **銀座 5.6 → 0.7ms /
-金沢 635.4 → 88.7ms**。
+金沢 635.4 → 88.7ms**。`np.fromiter` にして金沢 93.8 → 79.7ms（2026-10-07・5 回の最小値。作る配列は全プリセットで新旧一致）。
 
 - ★ **状態は「どのエッジの歩道を、どちら向きに、左右どちら側を歩いているか」で持つこと。**
   座標を直接積分すると建物へめり込み、道路から離れていきます。位置は毎ステップ
@@ -2671,8 +2671,27 @@ Optuna（TPE）で PPO と報酬の重みのハイパーパラメータを探し
 
 - **チェックポイントは必ず `weights_only=True` で読む。フォールバックしない。**
   `rl/importer.py` がこれを宣言しており、`SECURITY.md` にも書いてあります。
-- 書き出し（`.pt` / TorchScript / `.keras`）には観測レイアウトと行動スケールを
+- 書き出し（`.pt` / `.pt2` / TorchScript / `.keras`）には観測レイアウトと行動スケールを
   メタデータとして必ず埋めます。無いと受け取った側が 87 次元（`config.OBS_DIM`）に何を入れるか分かりません。
+- ★ **推論専用の書き出しは `torch.export`（`pt2`。`.pt2`）が本命で、TorchScript は互換のために残している**（#93）。
+  PyTorch 2.14 は `torch.jit.script` / `save` / `load` に FutureWarning を出します。TorchScript を消すのは、
+  PyTorch が `torch.jit` を外したときか利用者が要らないと決めたとき。`tests/test_export.py` は TorchScript の試験でだけ
+  この警告を抑え、`pt2` の書き出しで非推奨の警告が出ないことと、出力が `InferencePolicy` と 1 ビットも同じこと
+  （バッチ数 1・3・64）を検査します
+  - ★ **トレース（`torch.export.export`）はエンジンスレッドで行うこと。別スレッドへ出さないこと。** トレースの間、
+    torch は分解の登録などの大域の状態を一時的に書き換えるので、PPO の学習が同時に走るスレッドの横で動かすと
+    学習の計算に混ざりえます。そのぶん、書き出す間シミュレーションが止まります（2026-10-07 の実測・`export_model`
+    1 回: 2 回目以降 140〜175ms（うちトレース 110〜140ms）。TorchScript は 31〜51ms、Keras は 48〜79ms）
+  - ★ **重い import だけは HTTP 側で先に済ませる**（`main.py` が `preload_torch_export()` を `asyncio.to_thread` で呼ぶ。
+    Keras の `preload_keras` と同じ形）。import はトレースと違って大域の状態を書き換えないので、別スレッドでよい。
+    プロセスの初回のエンジンスレッドでの所要は、先読みなしで 896ms、先読みすると 498ms（先読み自体は HTTP 側で 439ms。
+    2026-10-07 の実測）
+  - ★ **`torch.export.save` はメモリ上（`io.BytesIO`）へ書いてから `_atomic_save` で置くこと。** `.pt2.tmp` のような
+    `.pt2` で終わらない名前へ直接書くと torch が警告をログに出し、zip の最上位フォルダもファイル名から決まって
+    `xxx.pt2` になります。BytesIO なら最上位は常に `archive` で、torch を使わずにメタデータを読む置き場所
+    （`archive/extra/metadata.json`）が固定されます（README・`docs/protocol.md` に書いてある）
+  - 読み込みに `.pt2` を渡されたら、中身の名前（`*/archive_format` と `*/models/*.json`）で見分けて案内します
+    （`importer._looks_like_pt2`。TorchScript・Keras と同じく、見分けるのにデシリアライズしない）
 - ★ **読み込む前に今の重みを `exports/` へ `before-import` として退避できなければ、読み込みを止めること**
   （`engine._handle_import` が理由を返す）。以前は `ExportError` をログに残すだけで読み込みを続け、元の重みを
   `trainer.load()` と `trainer.save(CHECKPOINT_PATH)` で上書きしていました。画面は `backup` が無いと何も
@@ -2692,7 +2711,7 @@ Optuna（TPE）で PPO と報酬の重みのハイパーパラメータを探し
   `rl` は `percep` を import しないので、出典は依存の無い `config.py` に置いてあります
 - ★ **`config.OBS_LAYOUT` に区画を足したら、`rl/export.py` の `_layout_notes` にも説明を書くこと。** 書き出しのメタデータは
   区画ごとに説明を引くので、無いと**書き出しが `KeyError` で 500 になります**（V2X の `v2x` を足したときに実際に落ちた。
-  学習にも画面にも症状が出ないので、書き出すまで気づけない）。`backend/tests/test_export.py` が説明の漏れと、3 形式とも
+  学習にも画面にも症状が出ないので、書き出すまで気づけない）。`backend/tests/test_export.py` が説明の漏れと、すべての形式で
   最後まで書き出せるかを検査します
 
 ### マップのキャッシュ
@@ -2749,6 +2768,8 @@ OSM キャッシュ・チェックポイント・認識器と教師データ・�
 
 `.env`（任意。`.env.example` を複製する）で `DRIVERL_HOST` / `DRIVERL_PORT` を変えられます。
 **ポートを変えたら `frontend/vite.config.ts` のプロキシ先も直すこと。**
+`DRIVERL_PORT` が整数でない・1〜65535 の外なら、起動を止めずに 8000 で立ち上げ、理由をログに出します（`config._env_port`。#94。
+以前は `int()` の `ValueError` で起動時に落ちていた）。空なら書いていないのと同じで、何も言いません。
 認識器の推論の動かし先は `DRIVERL_PERCEP_DEVICE`（`auto` / `cpu` / `keras`。知らない値は `auto` として初回だけ記録する）。
 その IR（`detector/detector.ir1-<指紋>.xml` / `.bin`）と NPU のコンパイル済み（`detector/ov_cache/`）も生成物で、消しても次に読むとき作り直します。
 
