@@ -216,6 +216,8 @@ class DetectorTrainingJob:
     def __init__(self, hooks: EngineHooks) -> None:
         self._hooks = hooks
         self._lock = threading.Lock()
+        # start() の判定からスレッドの起動までを 1 本にする（進捗の _lock とは分ける）
+        self._start_lock = threading.Lock()
         self._cancel = threading.Event()
         self._thread: threading.Thread | None = None
         self._progress = _Progress()
@@ -228,6 +230,10 @@ class DetectorTrainingJob:
 
     def start(self, request: DetectorTrainRequest) -> str:
         """学習を始める。**始められなければ理由を返す**（空文字なら成功）。"""
+        with self._start_lock:
+            return self._start_locked(request)
+
+    def _start_locked(self, request: DetectorTrainRequest) -> str:
         if self.running:
             return "すでに学習を実行中です。完了を待つか中止してください"
         if self._hooks.practical_mode():
