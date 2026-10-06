@@ -114,6 +114,9 @@ npm run dev             # Vite だけ立てる。?mock=1 でバックエンド�
   `config.py`・`protocol.ts` の定数と冒頭・文書の題と本文と例のすべてで揃っているか。`protocol.ts` は
   `export interface` 直下の 2 字下げの欄を正規表現で読むので、**欄を 1 行 1 つで書く今の書き方を変えないこと**
 - `main.py` は import しないこと（最上位で `SimulationEngine()` を作る）
+- ★ **クラスの中のクラススコープの fixture は `@classmethod` にすること**（`@pytest.fixture(scope="class")` の下に重ねる）。
+  インスタンスメソッドのままだと pytest 10 で消える書き方で、`PytestRemovedIn10Warning` が出ます（#90。`test_concierge.py` の
+  `TestTaxiDriveMode.ride` が該当していた）。`pytest.ini` の `filterwarnings` でこの警告をエラーにしてあるので、書くと落ちます
 - ★ **ソースを正規表現で読む検査は、改行を `\r?\n` で書くこと。** Windows で `core.autocrlf` のまま取り出すと
   ファイルは CRLF になり、`\n  currentOption\?: DriveOption\n` のような `\n` 決め打ちは何も変えていないのに落ちます
   （`verify:options` と `verify:curriculum` がこれで落ちていた。#82 のときに直した）
@@ -228,6 +231,11 @@ CNN では信号の 14.3%・歩行者の 31.6% で先頭が最近傍ではなく
     索引（古い地図）と食い違います。以前は (古い索引, 新しい ID, 新しい名前) を返していたので、画面に
     「金沢 を走らせて…」と出たまま銀座で集めていました。モデルの書き出し・読み込み前の退避に埋めるエリアも
     同じ理由で取り込み済みのほうです（重みを学習した地図）
+- ★ **`DetectorTrainingJob.start` は、学習中かの判定から学習スレッドの起動までを `_start_lock` の中で行うこと**（#89）。
+  いまの呼び出し元は `main.py` の WebSocket の受け口だけで、asyncio の 1 スレッドから呼ばれ、判定と起動の間に `await` も
+  無いので、連打や複数タブでも 2 本は立ちません。それでも別スレッドから呼ぶと立つ形でした（8 本のスレッドから同時に
+  呼んで 8 本立った。`tests/test_detector_job.py`）。**進捗の `_lock` で代えないこと** — 判定の間にエンジンのフック
+  （`practical_mode()` など）を呼ぶので、その間 `_lock` を握ると `snapshot()` / `_update()` と取り合います
 - **弱点を狙わない（`class_focus` が空の）ときは、狙うクラスを選ばない。**
   一様に選ぶと信号・標識狙いの寄せ（`_place_facing`）が毎回 1/5 で走り、似た構図
   ばかりになって過学習します（実測: 銀座 1,600 枚 12 エポックで val_loss が学習損失の
@@ -1019,6 +1027,13 @@ HTTP 側の `finally` で消すと、504 を返した後にエンジンが
   **係数を 1 にしないこと** — キャッシュの丸めで、辺の重みが両端の直線距離を最大 1.7mm 下回る辺が金沢に
   1.8 万本あり、見積もりが過大になります。**始点か終点が主成分（`_reachable_mask`）の外なら双方向 Dijkstra に
   戻すこと** — 届かないときに片側から探す A* は届く範囲を全部なめ、金沢で 0.1ms が 100ms を超えました
+- ★ **道路ノードの ID は 0 からの連番にすること**（ローダーの `_renumber` が振り直す。`contracts.MapNode.id`）。
+  `MapIndexImpl`（`_reachable_mask`・`nearest_node`・`random_node_pair`・`_node_point`）と `World`（`_node_clearance`）は
+  ID を行番号として引くので、`build_map_index` は連番でなければ `ValueError` で断ります（#91）。以前は飛び番の地図を
+  黙って受け取り、主成分の判定がすべて偽になって A* の代わりに双方向 Dijkstra へ落ちていました（ほかの所は別のノードを
+  指していた）。**判定だけを集合に替えて飛び番を通さないこと** — 行番号として引く所が残るので、別のノードを指す方へ
+  壊れます。全プリセットのキャッシュと、テスト・検証スクリプトの合成の地図はどれも連番です。確かめる所要は金沢の
+  1.9 万ノードで約 1ms（2026-10-07 の実測）。検査は `tests/test_map_index.py`
 - 検査は `backend/verify/verify_route_start.py`（全プリセットで、経路が車の位置から道なりに始まるか・
   出だしに道路を外れた直線が無いか・建物を突き抜けるのが下の 2 つだけか・折り返さないか・
   配車の経路 1 本の作成時間）。★ **目的地は 150〜1,500m の輪の中から選ぶこと。** 以前は引き直しを
