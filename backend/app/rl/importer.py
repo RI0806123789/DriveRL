@@ -73,6 +73,18 @@ def _looks_like_torchscript(path: Path) -> bool:
     )
 
 
+def _looks_like_pt2(path: Path) -> bool:
+    """torch.export の .pt2（zip）を間違って渡されたかどうかを見分ける。"""
+    try:
+        with zipfile.ZipFile(path) as archive:
+            names = archive.namelist()
+    except Exception:
+        return False
+    return any(n.endswith("/archive_format") for n in names) and any(
+        "/models/" in n and n.endswith(".json") for n in names
+    )
+
+
 def inspect_checkpoint(
     path: Path,
     *,
@@ -105,6 +117,11 @@ def inspect_checkpoint(
         if _looks_like_torchscript(path):
             raise CheckpointImportError(
                 "これは TorchScript 形式（推論専用）のファイルです。"
+                "学習を再開するには「重み一式（.pt）」で書き出したファイルを選んでください"
+            ) from exc
+        if _looks_like_pt2(path):
+            raise CheckpointImportError(
+                "これは torch.export 形式（.pt2、推論専用）のファイルです。"
                 "学習を再開するには「重み一式（.pt）」で書き出したファイルを選んでください"
             ) from exc
         message = str(exc)

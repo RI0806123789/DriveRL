@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import copy
+import importlib
+import io
 import json
 import logging
 import os
@@ -19,12 +21,14 @@ import torch.nn as nn
 from app import config
 from app.rl.policy import ActorCritic
 from app.rl.ppo import CHECKPOINT_FORMAT
+from app.warn import warn_once
 
 __all__ = [
     "ExportResult",
     "ExportError",
     "export_model",
     "preload_keras",
+    "preload_torch_export",
     "prune_exports",
     "EXPORT_KINDS",
     "IMPORT_BACKUP_LABEL",
@@ -34,7 +38,17 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-EXPORT_KINDS = ("checkpoint", "torchscript", "keras")
+EXPORT_KINDS = ("checkpoint", "torchscript", "pt2", "keras")
+
+#: torch.export の初回に読み込まれる重いモジュール。HTTP 側で先に読み、エンジンスレッドでの初回の書き出しを軽くする
+PT2_PRELOAD_MODULES = (
+    "torch.export",
+    "torch._dynamo",
+    "sympy",
+    "torch.fx.experimental.symbolic_shapes",
+    "torch._subclasses.fake_tensor",
+    "torch._functorch.aot_autograd",
+)
 
 METADATA_VERSION = 2
 
@@ -260,7 +274,7 @@ def build_metadata(
                     "scaleToPhysical": f"steer * {config.MAX_STEER} [rad]",
                 },
             ],
-            "note": "TorchScript 版と Keras 版はいずれも分布の平均（tanh で [-1, 1] に収めたもの）を"
+            "note": "TorchScript 版・torch.export 版・Keras 版はいずれも分布の平均（tanh で [-1, 1] に収めたもの）を"
             "決定論的な行動として返す。学習時と同じ確率的な行動が欲しい場合は "
             "policy.logStd を使って Normal(action, exp(logStd)) からサンプリングすること。",
         },
@@ -308,6 +322,25 @@ def build_metadata(
 def preload_keras() -> None:
     """Keras を先に読み込んでおく。"""
     _import_keras()
+
+
+def preload_torch_export() -> None:
+    """torch.export が初回に読むモジュールを先に読み込む（トレースはしない）。HTTP 側のスレッドから呼ぶ。"""
+    for name in PT2_PRELOAD_MODULES:
+        try:
+            importlib.import_module(name)
+        except ImportError:
+            warn_once(
+                "rl.export.preload_torch_export",
+                f"torch.export の先読みで {name} を読み込めませんでした（書き出しはできますが、初回が遅くなります）",
+            )
+
+
+def _export_program(policy: ActorCritic, obs_dim: int) -> Any:
+    """推論モデルを torch.export でトレースする。バッチ数は 1 以上の任意の値で呼べる。"""
+    batch = torch.export.Dim("batch", min=1)
+    example = (torch.zeros(2, int(obs_dim), dtype=torch.float32),)
+    return torch.export.export(InferencePolicy(policy), example, dynamic_shapes={"obs": {0: batch}})
 
 
 def _import_keras():
@@ -512,6 +545,15 @@ def export_model(
                 "metadata": metadata,
             }
             _atomic_save(lambda p: torch.save(payload, p), path)
+            media_type = "application/octet-stream"
+
+        elif kind == "pt2":
+            path = directory / f"{base}.pt2"
+            program = _export_program(trainer.policy, int(trainer.obs_dim))
+            buffer = io.BytesIO()
+            extra = {"metadata.json": json.dumps(metadata, ensure_ascii=False, indent=2)}
+            torch.export.save(program, buffer, extra_files=extra)
+            _atomic_save(lambda p: p.write_bytes(buffer.getvalue()), path)
             media_type = "application/octet-stream"
 
         elif kind == "keras":

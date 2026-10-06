@@ -10,6 +10,7 @@
 *.pt
 *.keras
 *.torchscript.pt
+*.pt2
 
 
 # --- Python (backend) ---

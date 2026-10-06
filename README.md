@@ -78,7 +78,7 @@ DriveRL/
 │   │   │   ├── ppo.py              PPO 更新・永続化
 │   │   │   ├── warmstart.py        経路追従を教師にした行動クローニング
 │   │   │   ├── online_assist.py    学習中の車へ経路追従を割り込ませる度合い（DAgger 風のオンライン模倣）
-│   │   │   ├── export.py           モデルの書き出し（.pt / TorchScript / .keras）
+│   │   │   ├── export.py           モデルの書き出し（.pt / .pt2 / TorchScript / .keras）
 │   │   │   └── importer.py         モデルの読み込みと安全な検証
 │   │   ├── host_guard.py           WebSocket / HTTP の接続元（Host / Origin）の確認
 │   │   ├── warn.py                 失敗を握りつぶすときの初回だけのログ（warn_once）
@@ -154,7 +154,7 @@ DriveRL/
 | **車両の見た目** | 作り込んだ車体と内装、11 灯のライト、ナンバープレート、ワイパー、後ろの景色が映るミラー、加減速と旋回で傾く車体 |
 | **介入** | 走行中にクリックで障害物を置く・車両を足す。学習は止まらない |
 | **認識器の学習** | 「モデル作成」タブで、教師データの収集から学習・載せ替えまで完結する。集める前にいまの認識器を採点し、弱点を多めに集める |
-| **モデルの入出力** | 書き出し（.pt / TorchScript / .keras）と、読み込みによる学習の再開 |
+| **モデルの入出力** | 書き出し（.pt / .pt2 / TorchScript / .keras）と、読み込みによる学習の再開 |
 | **自動運転タクシー** | 実用モードで街に降り立ち、スマホ画面からタクシーを呼んで乗る。AI コンシェルジュ（Gemini）に走り方を頼める |
 | **PWA** | ブラウザからインストールして、全画面のアプリとして起動できる |
 
@@ -404,20 +404,21 @@ cd backend
 
 ## 学習したモデルを書き出す・読み込む
 
-「学習」タブ →「モデルの書き出し」から 3 つの形式でダウンロードできます（学習は止まりません）。
+「学習」タブ →「モデルの書き出し」から 4 つの形式でダウンロードできます（学習は止まりません）。
 どれにも、観測ベクトル（87 次元）の内訳と行動のスケールがメタデータとして入っています。
 
 | 形式 | 使いみち |
 |---|---|
 | 重み一式（`.pt`）| 「モデルの読み込み」で戻すと、続きから学習を再開できる |
-| TorchScript（`.torchscript.pt`）| このリポジトリのコード無しで推論できる |
+| torch.export（`.pt2`）| このリポジトリのコード無しで推論できる。PyTorch が TorchScript の後継として勧める形式 |
+| TorchScript（`.torchscript.pt`）| このリポジトリのコード無しで推論できる。PyTorch が非推奨にしたので、新しく使うなら `.pt2` |
 | Keras（`.keras`）| Keras 3 のモデルとして扱える（`custom_objects` 不要。`KERAS_BACKEND=torch` で読める）|
 
 ```python
 import json, torch
 
 extra = {"metadata.json": ""}
-policy = torch.jit.load("<書き出したファイル>.torchscript.pt", _extra_files=extra)
+policy = torch.export.load("<書き出したファイル>.pt2", extra_files=extra).module()
 meta = json.loads(extra["metadata.json"])
 print(meta["observation"]["layout"])            # 87 次元の内訳
 
@@ -425,11 +426,14 @@ obs = torch.zeros(1, meta["model"]["obsDim"])   # (B, 87) float32
 action, value = policy(obs)                     # action: (B, 2) = 加減速・操舵（-1〜1）
 ```
 
+TorchScript 版なら `policy = torch.jit.load("<書き出したファイル>.torchscript.pt", _extra_files=extra)` で、あとは同じです。
+
 - 読み込む前に、それまでの重みを `backend/data/exports/` へ自動で退避します（退避できなければ読み込みません）。
   `exports/` には書き出しを 20 世代、退避を 10 世代まで残します
-- TorchScript 版と Keras 版は推論専用で、学習の再開には使えません
+- torch.export 版・TorchScript 版・Keras 版は推論専用で、学習の再開には使えません
+- torch.export 版はモデルをトレースするので、書き出す間（1 秒足らず）シミュレーションが止まります
 - `.pt` は必ず `weights_only=True` で解析し、テンソルと素の値以外が入っていれば読み込みを止めます（詳しくは `SECURITY.md`）
-- コマンドラインからは `curl.exe -OJ http://127.0.0.1:8000/api/export/checkpoint`（`torchscript` / `keras`）で取れます
+- コマンドラインからは `curl.exe -OJ http://127.0.0.1:8000/api/export/checkpoint`（`pt2` / `torchscript` / `keras`）で取れます
 
 ---
 
