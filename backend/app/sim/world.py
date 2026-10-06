@@ -503,7 +503,7 @@ class World:
         return (distance, int(phase))
 
     def nth_signals(self, offset: int) -> tuple[np.ndarray, np.ndarray]:
-        """前方 offset 番目（0 が直近）の信号を (距離 [m], 灯色) の配列で返す。"""
+        """前方 offset 番目（0 が直近・負は越えた信号で距離も負）の信号を (距離 [m], 灯色) の配列で返す。"""
         n = config.MAX_VEHICLES
         distance = np.full(n, np.inf, dtype=np.float64)
         phase = np.full(n, RED, dtype=np.int8)
@@ -515,7 +515,7 @@ class World:
                 continue
             arc = float(self.arc[slot])
             ahead = int(np.searchsorted(state.signal_arcs, arc, side="left")) + int(offset)
-            if ahead >= size:
+            if not 0 <= ahead < size:
                 continue
             distance[slot] = float(state.signal_arcs[ahead] - arc)
             index = int(state.signal_ids[ahead])
