@@ -70,6 +70,11 @@ class MapIndexImpl:
         self._batch_collision_failed = False
 
         nodes = sorted(data.nodes, key=lambda n: n.id)
+        if any(int(n.id) != row for row, n in enumerate(nodes)):
+            raise ValueError(
+                "道路ノードの ID は 0 からの連番にしてください（ID を行番号として引くため。"
+                "map/loader.py の _renumber と同じ形）"
+            )
         self._node_xy = np.array([[n.x, n.y] for n in nodes], dtype=np.float64)
         if self._node_xy.size == 0:
             self._node_xy = np.zeros((0, 2), dtype=np.float64)
