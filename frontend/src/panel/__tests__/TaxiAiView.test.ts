@@ -59,6 +59,16 @@ describe('TaxiAiViewBody', () => {
     assert.equal(count(html, 'disabled=""'), 5, 'チップ 3 つ + 入力 + 送信')
   })
 
+  test('モック接続中はキーの有無に関わらずモックの理由を出し、チップも入力も押せない', () => {
+    for (const available of [null, true, false]) {
+      const html = view({ mock: true, available })
+      assert.ok(html.includes('モック接続中'), html)
+      assert.ok(!html.includes('GEMINI_API_KEY'), html)
+      assert.ok(html.includes('data-role="error"'), html)
+      assert.equal(count(html, 'disabled=""'), 5, 'チップ 3 つ + 入力 + 送信')
+    }
+  })
+
   test('いまの走り方のチップが点き、走り方の名前が見出しに出る', () => {
     const html = view({ driveMode: 'hurry' })
     assert.ok(html.includes('data-mode="hurry"'), html)

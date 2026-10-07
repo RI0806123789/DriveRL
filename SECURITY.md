@@ -65,7 +65,9 @@ PyTorch の `torch.load` は既定で pickle を実行するため、細工さ�
 | `backend/data/checkpoints/` | 学習済みモデル（自動保存） |
 | `backend/data/exports/` | 書き出したモデル |
 | `backend/data/uploads/` | 読み込みのためにアップロードされたモデル |
-| `backend/data/detector/` | 画像認識器（`detector.keras`）と教師データ（`dataset/`）|
+| `backend/data/detector/` | 画像認識器（`detector.keras`）と教師データ（`dataset/`）。`openvino` を入れていれば、その IR（`detector.ir1-<指紋>.xml` / `.bin`）と NPU のコンパイル済み（`ov_cache/`）も |
+| `backend/data/tuning/` | 学習の自動化の履歴（`driverl_optuna.db`）・最良の試行の値（`best_params.json`）・試行の一覧（`trial_summary.csv`）|
+| `backend/data/learning_params.json` | 「学習」タブの設定値の控え（起動時に戻す）|
 
 `exports/` は最新 20 世代だけ残し、それより古いものは書き出しのたびに自動で消します
 （`backend/app/rl/export.py` の `MAX_EXPORT_FILES`）。読み込み前の退避（`before-import`）は
@@ -83,8 +85,9 @@ HTTP 側で消すと、時間切れ（504）を返した後にエンジンが読
 `osmnx_cache/` と `map_cache/` は自動削除しません。地図の再取得には
 Overpass API へのアクセスが要るため、意図的に残しています。
 
-`detector/` は「モデル作成」タブ（`start_detector_training`）か
-`backend/train_detector.py` を実行したときだけ書き換わります。**学習が完了し、
+`detector.keras` は「モデル作成」タブ（`start_detector_training`）か
+`backend/train_detector.py` を実行したときだけ書き換わります（OpenVINO の IR と `ov_cache/` は、
+サーバーが認識器を読むときに `detector.keras` から作り直す派生物です）。**学習が完了し、
 一時ファイル（`detector.staged.keras`）に保存したモデルを読み直して推論できることを
 確かめたときにだけ差し替えます。** 中断したモデルと、読み直せない・何も検出しないモデルは
 保存しません（中途半端な重みで既存の認識器を黙って悪くしないため）。差し替えは `os.replace()` で
