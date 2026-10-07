@@ -1,0 +1,7 @@
+{
+  "name": "baseline",
+  "model": "kinematic",
+  "learner_vehicles": 1,
+  "background_vehicles": 3,
+  "driver_spread": 0.2
+}

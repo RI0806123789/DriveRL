@@ -1,0 +1,26 @@
+{
+  "name": "rush-hour",
+  "model": "dynamic",
+  "learner_vehicles": 1,
+  "background_vehicles": 5,
+  "start_hour": 7.99,
+  "driver_spread": 0.35,
+  "periods": [
+    { "start_hour": 0, "count": 2 },
+    { "start_hour": 8, "count": 5 },
+    { "start_hour": 10, "count": 3 },
+    { "start_hour": 18, "count": 5 },
+    { "start_hour": 21, "count": 2 }
+  ],
+  "signals": {
+    "mode": "adaptive",
+    "green_sec": 30,
+    "green_min_sec": 6,
+    "time_of_day": [
+      { "start_hour": 0, "group_weights": [1, 1] },
+      { "start_hour": 8, "group_weights": [2, 1] },
+      { "start_hour": 18, "group_weights": [1, 2] },
+      { "start_hour": 21, "group_weights": [1, 1] }
+    ]
+  }
+}

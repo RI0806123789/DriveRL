@@ -183,6 +183,8 @@ export interface MapSignal {
   group: number
   /** 進入路の幅 [m]。停止線・横断歩道の長さに使う */
   roadWidth: number
+  /** OSM タグ由来・シミュレーターの補完・出典不明。 */
+  source?: 'osm' | 'synthetic' | 'unknown'
 }
 
 /** 最高速度標識（規制標識「最高速度」）。 */
