@@ -152,6 +152,31 @@ def load_scenario(path: str | Path) -> Scenario:
     return Scenario(**values)
 
 
+def standard_scenario() -> Scenario:
+    """通常運転で常時使う詳細物理・背景交通・需要応答信号。"""
+    return Scenario(
+        name="standard",
+        dynamics=VehicleDynamics(),
+        learner_vehicles=1,
+        background_vehicles=3,
+        start_hour=12.0,
+        driver_spread=0.2,
+        periods=(
+            TrafficPeriod(0, 1), TrafficPeriod(8, 3), TrafficPeriod(10, 2),
+            TrafficPeriod(18, 3), TrafficPeriod(21, 1),
+        ),
+        signals=SignalPlan(
+            mode="adaptive",
+            start_hour=12.0,
+            time_of_day=(
+                SignalPeriod(0, (1, 1)), SignalPeriod(8, (2, 1)),
+                SignalPeriod(10, (1, 1)), SignalPeriod(18, (1, 2)),
+                SignalPeriod(21, (1, 1)),
+            ),
+        ),
+    )
+
+
 class ScenarioTraffic:
     """専用乱数で背景交通と一時的な道路イベントを管理する。"""
 

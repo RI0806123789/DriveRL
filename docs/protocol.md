@@ -149,7 +149,7 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
 - `source` は OSM の信号タグに基づく灯器なら `osm`、シミュレーターが交差点へ補完した灯器なら
   `synthetic`、古いデータなどで判別できなければ `unknown`。省略時も `unknown` として扱う。
   出典は実際の信号周期や現示を再現していることを意味しない。既存クライアントはこの追加欄を無視できる。
-- シナリオ設定時は固定周期の青配分を時間帯・交通需要に応じて変更できる。周期境界だけで切り替え、
+- 通常運転は標準シナリオで常に動作し、固定周期の青配分を時間帯・交通需要に応じて変更する。周期境界だけで切り替え、
   黄・全赤・各群の最短青を保つ。`frame.signals` の色と並びは変わらない。
 - OSM の `highway=traffic_signals` ノードから作る。**接続道路が 3 本以上**の
   交差点にだけ置く（2 本以下は単路部の押しボタン式とみなす）
@@ -511,7 +511,7 @@ true のときの学習中の車だけ。判断は検出枠と推定距離から
 {
   "type": "params",
   "params": {
-    "vehicleCount": 4,        // アクティブにする車両数 (0..maxVehicles)
+    "vehicleCount": 4,        // 標準シナリオの予約枠（読み取り専用）。実働台数は frame.vehicles の active で確認
     "pedestrianCount": 16,    // 街を歩く NPC 歩行者の数 (0..maxPedestrians)
     "simSpeed": 1.0,          // 実時間に対する倍率 (0.25..8.0)
     "learningRate": 3e-4,
@@ -539,6 +539,10 @@ true のときの学習中の車だけ。判断は検出枠と推定距離から
   }
 }
 ```
+
+通常運転の詳細物理・交通シナリオは常時有効で、選択や解除のメッセージはない。
+`vehicleCount` は予約枠を表し、`set_params` での変更はマップ読み込み前も拒否する。
+背景車の実働台数は時間帯に応じて変わる。標準設定の出典は `sim/scenario.py` の `standard_scenario()`。
 
 `safetyAssist` が false でも、**実用モードの経路追従の車には必ず掛かる**。true にすると開発モードの
 学習中の車にも掛かり、速度の上限（前方の障害物・巻き込み防止・交差点の左右確認）は `obeySignals` と
@@ -918,9 +922,9 @@ true のときの学習中の車だけ。判断は検出枠と推定距離から
 
 ```jsonc
 { "type": "load_map",     "presetId": "ginza" }
-{ "type": "set_params",   "params": { "vehicleCount": 5 } }   // 部分更新。渡したキーのみ反映。範囲外は丸めて反映し、INVALID_MESSAGE も返す
-{ "type": "spawn_vehicle","x": 10.0, "y": -20.0 }             // 最寄りの道路上にスナップされる。出せなければ断り、別の場所には出さない
-{ "type": "despawn_vehicle", "id": 2 }
+{ "type": "set_params",   "params": { "simSpeed": 2 } }       // 部分更新。渡したキーのみ反映。範囲外は丸めて反映し、INVALID_MESSAGE も返す
+{ "type": "spawn_vehicle","x": 10.0, "y": -20.0 }             // 通常運転では標準シナリオが台数を管理するため拒否する
+{ "type": "despawn_vehicle", "id": 2 }                       // 通常運転では同じ理由で拒否する
 { "type": "add_obstacle", "x": 10.0, "y": -20.0, "radius": 0.5 }
 { "type": "remove_obstacle", "id": 3 }
 { "type": "clear_obstacles" }

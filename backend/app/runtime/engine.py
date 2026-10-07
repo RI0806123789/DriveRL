@@ -263,8 +263,7 @@ class SimulationEngine:
             if self._autotune_running:
                 # 探索中の値は試行が決める。途中で変えると、その試行の成績が別の設定のものになる
                 patch = {k: v for k, v in patch.items() if k not in TUNED_WIRE_KEYS}
-            fixed_count = self._env.fixed_vehicle_count if self._env is not None else None
-            rejected_count = fixed_count is not None and "vehicleCount" in patch
+            rejected_count = "vehicleCount" in patch
             if rejected_count:
                 patch = {k: v for k, v in patch.items() if k != "vehicleCount"}
             result = self._params.apply_wire(
@@ -1128,6 +1127,7 @@ class SimulationEngine:
         started = time.perf_counter()
         from app.percep.groundtruth import clear_static_cache
         from app.sim.env import SimulationEnv
+        from app.sim.scenario import standard_scenario
 
         # 試行の成績は地図ごとに違うので、探索は続けない（main.py が断るのをすり抜けた場合）
         self._abort_autotune("エリアを切り替えたため学習の自動化を中止し、探索の前のパラメータと重みに戻しました")
@@ -1142,7 +1142,7 @@ class SimulationEngine:
 
         params = self.snapshot_params()
         try:
-            env = SimulationEnv(map_index, params, seed=0)
+            env = SimulationEnv(map_index, params, seed=0, scenario=standard_scenario())
             env.reset_all()
         except Exception:
             logger.exception("環境の構築に失敗しました: %s", preset_id)
@@ -1155,11 +1155,14 @@ class SimulationEngine:
         with self._lock:
             env.autopilot_all = self._practical_mode
         self._env = env
+        self._sync_vehicle_count()
+        params = self.snapshot_params()
         self._map_index = map_index
         # 新しい env は徒歩キャラを知らないので、次の報告が届くまで街に居ない扱い
         self._player_pose_at = 0.0
 
         logger.info("%s", self._env.world.signals.describe())
+        logger.info("標準シナリオを有効にしました（詳細物理・時間帯別交通・需要応答信号）")
 
         self._ensure_trainer()
         assert self._trainer is not None
