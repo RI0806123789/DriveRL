@@ -244,9 +244,9 @@ cd backend
   `scene/cameraMath.ts` の `SURROUND_CAMERAS` と揃えないと、4 分割に出す検出枠が実物からずれる
   （`npm run verify:detections` が `types.py` を読んで照合する）。**前方カメラは 1 ビットも変えない**
   （観測の 66 次元までと学習済みの認識器がこれを前提にする）
-- **観測は 79 次元。周囲カメラの 9 次元、V2X の 4 次元の順に末尾へ足してある**（`config.OBS_LAYOUT` の
-  `surround` / `v2x`）。66・75 次元の重みは読み込み時にゼロ詰めで広げる（`rl/ppo.py` の `widen_observation`。
-  元の重みは `.obs66` / `.obs75` へ控える）。**途中へ差し込むと、広げた重みが別の欄を読む**
+- **観測は 87 次元。周囲カメラの 9 次元、V2X の 4 次元、死角の 8 次元の順に末尾へ足してある**（`config.OBS_LAYOUT` の
+  `surround` / `v2x` / `occlusion`）。66・75・79 次元の重みは読み込み時にゼロ詰めで広げる（`rl/ppo.py` の `widen_observation`。
+  元の重みは `.obs66` / `.obs75` / `.obs79` へ控える）。**途中へ差し込むと、広げた重みが別の欄を読む**
 - **安全ギミックが運転を奪ったステップは PPO の学習から外す**（`StepResult.learn`）。外さないと、
   方策が出していない操作の結果を方策の手柄として教えることになる（検査は `backend/verify/verify_safety_gimmicks.py`）。
   **外すのは損失のマスク（`RolloutBuffer.learn`）だけで、「生きているか」（`active`）とは分ける**。混ぜると
