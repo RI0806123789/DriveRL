@@ -122,7 +122,7 @@ def off_route_signals(index, route: Route, found: list[tuple[float, int]]) -> in
 def force_phases(world, red: set[int]) -> None:
     """指定した信号だけを赤、ほかを青に固定する（地図の癖に左右されずに判定するため）。"""
     forced = [RED if i in red else GREEN for i in range(len(world.map_index.data.signals))]
-    world.signals.phases = lambda _t: forced
+    world.signals.phases = lambda _t, *, demand=None: forced
     world.signal_phases = forced
 
 

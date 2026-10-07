@@ -248,6 +248,8 @@ def decode_detections(
             f"検出テンソルの形が想定と違います: {grid.shape} "
             f"（期待 (N, {GRID_ROWS}, {GRID_COLS}, {CHANNELS})）"
         )
+    if len(slots) != grid.shape[0]:
+        raise ValueError("検出テンソルとスロットの数が違います")
     far = float(spec.far)
     out: list[PerceptionResult] = []
 
@@ -259,28 +261,33 @@ def decode_detections(
             out.append(PerceptionResult(slot=int(slot)))
             continue
         order = np.argsort(-obj[rows, cols], kind="stable")
+        selected = cell[rows[order], cols[order]]
+        boxes = selected[:, OFF_BOX:OFF_BOX + 4].astype(np.float64)
+        centers = np.column_stack((
+            (cols[order] + boxes[:, 0]) / GRID_COLS,
+            (rows[order] + boxes[:, 1]) / GRID_ROWS,
+        ))
+        half = boxes[:, 2:4] * 0.5
+        bounds = np.clip(np.column_stack((centers - half, centers + half)), 0.0, 1.0)
+        classes = np.argmax(selected[:, OFF_CLS:OFF_CLS + NUM_CLASSES], axis=1)
+        phases = np.argmax(selected[:, OFF_PHASE:OFF_PHASE + NUM_PHASES], axis=1)
+        speeds = np.argmax(selected[:, OFF_SPEED:OFF_SPEED + NUM_SPEED_BINS], axis=1)
         per_class: dict[DetClass, list[Detection]] = {c: [] for c in DetClass}
-        for k in order:
-            row, col = int(rows[k]), int(cols[k])
-            values = cell[row, col]
-            cx = (col + float(values[OFF_BOX + 0])) / GRID_COLS
-            cy = (row + float(values[OFF_BOX + 1])) / GRID_ROWS
-            half_w = float(values[OFF_BOX + 2]) * 0.5
-            half_h = float(values[OFF_BOX + 3]) * 0.5
-            cls = DetClass(int(np.argmax(values[OFF_CLS:OFF_CLS + NUM_CLASSES])))
+        for k, values in enumerate(selected):
+            cls = DetClass(int(classes[k]))
             det = Detection(
                 cls=cls,
-                x0=float(np.clip(cx - half_w, 0.0, 1.0)),
-                y0=float(np.clip(cy - half_h, 0.0, 1.0)),
-                x1=float(np.clip(cx + half_w, 0.0, 1.0)),
-                y1=float(np.clip(cy + half_h, 0.0, 1.0)),
+                x0=float(bounds[k, 0]),
+                y0=float(bounds[k, 1]),
+                x1=float(bounds[k, 2]),
+                y1=float(bounds[k, 3]),
                 confidence=float(values[OFF_OBJ]),
                 distance=float(values[OFF_DIST]) * far,
             )
             if cls is DetClass.TRAFFIC_LIGHT:
-                det.phase = int(np.argmax(values[OFF_PHASE:OFF_PHASE + NUM_PHASES]))
+                det.phase = int(phases[k])
             elif cls is DetClass.SPEED_SIGN:
-                bin_index = int(np.argmax(values[OFF_SPEED:OFF_SPEED + NUM_SPEED_BINS]))
+                bin_index = int(speeds[k])
                 det.speed_limit = float(SPEED_BINS_KMH[bin_index]) / 3.6
             elif cls is DetClass.LANE:
                 det.lateral = float(values[OFF_LATERAL]) * LATERAL_SCALE

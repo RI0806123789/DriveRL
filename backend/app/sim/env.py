@@ -145,7 +145,19 @@ class SimulationEnv:
         *,
         compute_observations: bool = True,
         scenario: Scenario | None = None,
+        perception_mode: str | None = None,
+        detector: Any | None = None,
+        perception_transform: Callable[[PerceptionResult, CameraSpec], PerceptionResult] | None = None,
+        deterministic_respawn: bool = False,
     ) -> None:
+        if perception_mode not in (None, "oracle", "cnn"):
+            raise ValueError("認識の評価モードは oracle / cnn のどちらかです")
+        if detector is not None and perception_mode != "cnn":
+            raise ValueError("評価用の認識器は cnn モードで指定してください")
+        self._perception_mode = perception_mode
+        self._evaluation_detector = detector
+        self._perception_transform = perception_transform
+        self._deterministic_respawn = bool(deterministic_respawn)
         self.map_index = map_index
         self.params = replace(params)
         self.rng = np.random.default_rng(seed)
@@ -652,7 +664,7 @@ class SimulationEnv:
                     "このスロットを非アクティブにします",
                     slot,
                 )
-            if self.scenario is not None or time.perf_counter() - started >= RESPAWN_BUDGET_SEC:
+            if self.scenario is not None or (not self._deterministic_respawn and time.perf_counter() - started >= RESPAWN_BUDGET_SEC):
                 break
 
     def step(self, actions: np.ndarray, expert: np.ndarray | None = None) -> StepResult:
@@ -1160,6 +1172,18 @@ class SimulationEnv:
         self._ground_truth = detect_ground_truth_views
         self._freespace_gt = freespace_ground_truth_views
 
+        if self._perception_mode == "oracle":
+            return
+        if self._perception_mode == "cnn":
+            from app.percep.camera import PseudoCamera
+            from app.percep.detector import Detector
+
+            self._camera = PseudoCamera(self.map_index, self._camera_spec)
+            self._detector = self._evaluation_detector or Detector.load(config.DETECTOR_PATH, self._camera_spec)
+            if self._detector is None:
+                raise ValueError("CNN の評価には読み込める学習済み認識器が必要です")
+            return
+
         if not config.DETECTOR_PATH.exists():
             logger.info(
                 "学習済みの認識器がありません（%s）。world の真値から作った"
@@ -1221,6 +1245,8 @@ class SimulationEnv:
                     if REAR_CAMERA.key in frees:
                         rear_free[slot] = frees[REAR_CAMERA.key]
             except Exception:
+                if self._perception_mode == "cnn":
+                    raise
                 self._detector = None
                 self._camera = None
                 if not self._detector_failed:
@@ -1236,7 +1262,7 @@ class SimulationEnv:
                 rear_free.clear()
 
         replace_all = False
-        if results is None and config.PERCEP_FALLBACK_GROUND_TRUTH:
+        if results is None and (self._perception_mode == "oracle" or config.PERCEP_FALLBACK_GROUND_TRUTH):
             if self._ground_truth is not None and self._freespace_gt is not None:
                 # 認識器を使う経路では CNN の出力をそのまま使う（画から判断させる）。
                 # 視程で頭打ちにするのは真値で代用するこちら側だけ。
@@ -1262,7 +1288,16 @@ class SimulationEnv:
                         if REAR_CAMERA.key in self.safety.demand(s):
                             rear_free[s] = fresh_free[s][REAR_CAMERA.key]
                     replace_all = True
+                    if self._perception_mode == "oracle":
+                        cam, slots = self._surround_schedule(idx)
+                        chosen = set(slots)
+                        fresh = {s: {cam.key: views[cam.key]} for s, views in fresh.items() if s in chosen}
+                        fresh_free = {s: {cam.key: views[cam.key]} for s, views in fresh_free.items() if s in chosen}
+                        rear_free = {s: views[REAR_CAMERA.key] for s, views in fresh_free.items() if REAR_CAMERA.key in views}
+                        replace_all = False
                 except Exception:
+                    if self._perception_mode == "oracle":
+                        raise
                     if not self._ground_truth_failed:
                         self._ground_truth_failed = True
                         logger.exception(
@@ -1278,6 +1313,11 @@ class SimulationEnv:
         if results is not None:
             for slot, result in zip(idx, results):
                 perceptions[int(slot)] = result
+
+        if self._perception_transform is not None:
+            perceptions = {slot: self._perception_transform(result, spec) for slot, result in perceptions.items()}
+            cameras = {cam.key: cam for cam in SURROUND_CAMERAS}
+            fresh = {slot: {key: self._perception_transform(result, cameras[key]) for key, result in views.items()} for slot, views in fresh.items()}
 
         self.latest_perception = perceptions
         self._latest_freespace = freespace
