@@ -1,0 +1,12 @@
+{
+  "name": "grid-roadworks",
+  "model": "dynamic",
+  "learner_vehicles": 1,
+  "background_vehicles": 2,
+  "road_weights": { "0": 1, "8": 2, "20": 1 },
+  "events": [
+    { "edge_id": 0, "kind": "parked", "start_sec": 10, "duration_sec": 40 },
+    { "edge_id": 8, "kind": "construction", "start_sec": 20, "duration_sec": 60 },
+    { "edge_id": 20, "kind": "closure", "start_sec": 40, "duration_sec": 30 }
+  ]
+}
