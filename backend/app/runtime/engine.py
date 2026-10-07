@@ -145,7 +145,7 @@ class SimulationEngine:
         self._state_before_loading: tuple[str, str] = ("idle", "")
         self._metrics = MetricsSnapshot()
         self._network: dict[str, Any] = {}
-        self._params = SimParams()
+        self._params = SimParams(vehicle_count=config.MAX_VEHICLES)
         self._params_dirty: bool = False
         # 学習タブの設定値の控え。None なら保存も復元もしない（テストや検査スクリプトが本番の控えに触らないため）
         self._param_store = param_store

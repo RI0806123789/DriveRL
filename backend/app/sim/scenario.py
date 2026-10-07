@@ -157,13 +157,13 @@ def standard_scenario() -> Scenario:
     return Scenario(
         name="standard",
         dynamics=VehicleDynamics(),
-        learner_vehicles=1,
-        background_vehicles=3,
+        learner_vehicles=4,
+        background_vehicles=4,
         start_hour=12.0,
         driver_spread=0.2,
         periods=(
-            TrafficPeriod(0, 1), TrafficPeriod(8, 3), TrafficPeriod(10, 2),
-            TrafficPeriod(18, 3), TrafficPeriod(21, 1),
+            TrafficPeriod(0, 2), TrafficPeriod(8, 4), TrafficPeriod(10, 3),
+            TrafficPeriod(18, 4), TrafficPeriod(21, 2),
         ),
         signals=SignalPlan(
             mode="adaptive",

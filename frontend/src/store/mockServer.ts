@@ -55,7 +55,7 @@ const MOCK_WEATHER_PRESETS: WeatherPreset[] = [
 ]
 
 const DEFAULT_PARAMS: SimParams = {
-  vehicleCount: 4,
+  vehicleCount: 8,
   pedestrianCount: 16,
   simSpeed: 1,
   learningRate: 3e-4,

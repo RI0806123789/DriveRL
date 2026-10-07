@@ -511,7 +511,7 @@ true のときの学習中の車だけ。判断は検出枠と推定距離から
 {
   "type": "params",
   "params": {
-    "vehicleCount": 4,        // 標準シナリオの予約枠（読み取り専用）。実働台数は frame.vehicles の active で確認
+    "vehicleCount": 8,        // 標準シナリオの予約枠（読み取り専用）。実働台数は frame.vehicles の active で確認
     "pedestrianCount": 16,    // 街を歩く NPC 歩行者の数 (0..maxPedestrians)
     "simSpeed": 1.0,          // 実時間に対する倍率 (0.25..8.0)
     "learningRate": 3e-4,
