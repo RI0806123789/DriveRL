@@ -412,6 +412,7 @@ def coerce_bool(value: Any) -> bool | None:
 class SimParams:
     """docs/protocol.md 2.5 の params に対応。"""
 
+    #: 通常運転では標準シナリオの予約枠。クライアントからの変更は拒否する。
     vehicle_count: int = 4
     pedestrian_count: int = 16
     sim_speed: float = 1.0

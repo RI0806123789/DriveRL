@@ -78,7 +78,6 @@ function sameRows(a: VehicleRow[], b: VehicleRow[]): boolean {
 const INTERACTIONS: Array<{ id: InteractionMode; label: string; icon: React.ReactNode }> = [
   { id: 'none', label: '操作なし', icon: <TargetIcon size={16} /> },
   { id: 'obstacle', label: '障害物を置く', icon: <ConeIcon size={16} /> },
-  { id: 'vehicle', label: '車両を追加', icon: <CarIcon size={16} /> },
 ]
 
 export function SimulationTab() {
@@ -179,17 +178,10 @@ export function SimulationTab() {
       </Card>
 
       <Card title="パラメータ" icon={<TuneIcon size={16} />}>
-        <Slider
-          label="車両数"
-          hint="台"
-          value={params.vehicleCount}
-          min={1}
-          max={config.maxVehicles}
-          step={1}
-          format={(v) => `${v} 台`}
-          onChange={(v) => patchParamsLocal({ vehicleCount: v })}
-          onCommit={(v) => send({ type: 'set_params', params: { vehicleCount: v } })}
-        />
+        <div className="m3-note">
+          詳細物理・交通シナリオは常時有効です。
+          車両は最大 {params.vehicleCount} 台で、走行中の台数は時間帯に応じて変わります。
+        </div>
         <Slider
           label="歩行者"
           hint="人"

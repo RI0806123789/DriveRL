@@ -1047,7 +1047,7 @@ class SimulationEnv:
         kind = str(event.kind)
         payload = event.payload or {}
         if self.scenario is not None and kind in ("spawn_vehicle", "despawn_vehicle"):
-            return "シナリオ実行中の車両数は設定ファイルで指定してください"
+            return "車両数は交通シナリオが管理するため、追加・除去できません"
         try:
             if kind == "spawn_vehicle":
                 slot = self._free_slot()

@@ -30,7 +30,7 @@ export interface SimConfig {
 
 /** 実行時に変更できるパラメータ一式（2.5 params） */
 export interface SimParams {
-  /** アクティブにする車両数 (0..maxVehicles) */
+  /** 標準シナリオの予約枠。通常運転では変更できず、実際の走行台数は frame で確認する。 */
   vehicleCount: number
   /** 街を歩く NPC 歩行者の数 (0..maxPedestrians) */
   pedestrianCount: number
