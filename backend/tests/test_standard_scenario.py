@@ -42,8 +42,9 @@ def _assert_standard(instance: SimulationEngine) -> None:
     assert env.world.fleet.dynamics is not None
     assert env.world.signals.plan.mode == "adaptive"
     assert env.traffic is not None and env.traffic.mask.any()
-    assert env.fixed_vehicle_count == 4
-    assert env.params.vehicle_count == 4
+    assert env.fixed_vehicle_count == 8
+    assert env.params.vehicle_count == 8
+    assert env.scenario.learner_vehicles == env.scenario.background_vehicles == 4
 
 
 def test_startup_overrides_baseline_environment_and_stale_vehicle_count(engine) -> None:
@@ -51,7 +52,7 @@ def test_startup_overrides_baseline_environment_and_stale_vehicle_count(engine) 
     engine._params.vehicle_count = 0
     engine._install_map(build_map_index(synthetic_grid()), "new-grid", "次の地図")
     _assert_standard(engine)
-    assert engine.snapshot_params().vehicle_count == 4
+    assert engine.snapshot_params().vehicle_count == 8
     assert engine._env.active_mask[0]
 
 
@@ -85,10 +86,21 @@ def test_vehicle_count_patch_and_manual_spawn_cannot_change_reserved_fleet(engin
     params, patch = engine.update_params({"vehicleCount": 0, "simSpeed": 2})
     engine._drain_inbox()
     assert "vehicleCount" in patch.rejected
-    assert params.vehicle_count == 4 and params.sim_speed == 2
+    assert params.vehicle_count == 8 and params.sim_speed == 2
     np.testing.assert_array_equal(engine._env.active_mask, before)
     assert engine._env.apply_event(InterventionEvent("spawn_vehicle", {"x": 0, "y": 0}))
     assert engine._env.apply_event(InterventionEvent("despawn_vehicle", {"id": 0}))
+    _assert_standard(engine)
+
+
+def test_peak_hour_uses_all_eight_slots_without_changing_reserved_capacity(engine) -> None:
+    env = engine._env
+    assert env.active_mask.sum() == 7
+    env.world.sim_time = 6 * 3600 - config.DT
+    actions = np.zeros((config.MAX_VEHICLES, config.ACTION_DIM))
+    env.step(actions)
+    env.step(actions)
+    assert env.active_mask.sum() == 8
     _assert_standard(engine)
 
 

@@ -114,7 +114,7 @@ export interface ErrorEntry {
 }
 
 const DEFAULT_PARAMS: SimParams = {
-  vehicleCount: 3,
+  vehicleCount: 8,
   pedestrianCount: 16,
   simSpeed: 1,
   learningRate: 3e-4,
