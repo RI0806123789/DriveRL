@@ -11,6 +11,7 @@ import {
   useConcierge,
 } from '../store/concierge'
 import type { ConciergeAction, ConciergeEntry } from '../store/concierge'
+import { useSimStore } from '../store/simStore'
 import type { TaxiDriveMode } from '../types/protocol'
 import { CloseIcon, SendIcon, SparkleIcon } from '../ui/Icons'
 
@@ -20,6 +21,8 @@ export interface TaxiAiViewBodyProps {
   on: boolean
   /** null はまだ確かめていない */
   available: boolean | null
+  /** モック接続中なら問い合わせず、使えない理由を出す */
+  mock?: boolean
   pending: boolean
   entries: ConciergeEntry[]
   driveMode: TaxiDriveMode
@@ -46,13 +49,16 @@ export function latestExchange(entries: ConciergeEntry[]): { said: string | null
 }
 
 export function TaxiAiViewBody(props: TaxiAiViewBodyProps) {
-  const { on, available, pending, entries, driveMode, draft } = props
-  const usable = available === true
+  const { on, available, mock = false, pending, entries, driveMode, draft } = props
+  const usable = !mock && available === true
   const { said, reply } = latestExchange(entries)
 
   let cardText = CONCIERGE_GREETING
   let cardRole: ConciergeEntry['role'] = 'ai'
-  if (available === false) {
+  if (mock) {
+    cardText = 'モック接続中は AI コンシェルジュを使えません。実際のバックエンドに繋いでください'
+    cardRole = 'error'
+  } else if (available === false) {
     cardText = 'GEMINI_API_KEY が設定されていないため、AI コンシェルジュは使えません（.env.example を参照）'
     cardRole = 'error'
   } else if (pending) {
@@ -144,17 +150,19 @@ export function TaxiAiView({ on, driveMode, onClose }: TaxiAiViewProps) {
   const entries = useConcierge((s) => s.entries)
   const ask = useConcierge((s) => s.ask)
   const checkAvailability = useConcierge((s) => s.checkAvailability)
+  const usingMock = useSimStore((s) => s.usingMock)
   const [draft, setDraft] = useState('')
 
-  // キーはサーバーの起動時に読むので、開いたときに確かめれば足りる
+  // キーはサーバーの起動時に読むので、開いたときに確かめれば足りる。モックでは本物のサーバーへ問い合わせない
   useEffect(() => {
-    if (on) void checkAvailability()
-  }, [on, checkAvailability])
+    if (on && !usingMock) void checkAvailability()
+  }, [on, usingMock, checkAvailability])
 
   return (
     <TaxiAiViewBody
       on={on}
       available={available}
+      mock={usingMock}
       pending={pending}
       entries={entries}
       driveMode={driveMode}
