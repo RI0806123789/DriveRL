@@ -8,6 +8,7 @@ import numpy as np
 
 from app import config
 from app.contracts import MapSignal
+from app.sim.signal_plan import SignalPlan
 
 __all__ = [
     "SignalController",
@@ -49,7 +50,14 @@ class SignalController:
         yellow_sec: float = DEFAULT_YELLOW_SEC,
         all_red_sec: float = DEFAULT_ALL_RED_SEC,
         green_min_sec: float = DEFAULT_GREEN_MIN_SEC,
+        plan: SignalPlan | None = None,
     ) -> None:
+        self.plan = plan
+        if plan is not None:
+            green_sec = plan.green_sec
+            yellow_sec = plan.yellow_sec
+            all_red_sec = plan.all_red_sec
+            green_min_sec = plan.green_min_sec
         self.green = float(green_sec)
         self.yellow = float(yellow_sec)
         self.all_red = float(all_red_sec)
@@ -82,6 +90,35 @@ class SignalController:
         self._offsets = _scatter01(keys) * self._cycles
 
         self._buffer = np.full(self._count, RED, dtype=np.uint8)
+        if plan is not None and self._count:
+            self._init_plan(keys, groups.astype(np.int64), phase_count)
+
+    def _init_plan(
+        self, keys: np.ndarray, groups: np.ndarray, phase_count: dict[int, int]
+    ) -> None:
+        unique, self._head_key = np.unique(keys, return_inverse=True)
+        self._key_counts = np.array([max(2, phase_count[int(key)]) for key in unique])
+        self._key_slot_base = np.cumsum(self._key_counts) - self._key_counts
+        self._slot_key = np.repeat(np.arange(len(unique)), self._key_counts)
+        self._slot_group = np.arange(self._slot_key.size) - self._key_slot_base[self._slot_key]
+        self._head_slot = self._key_slot_base[self._head_key] + groups
+        self._key_cycles = np.maximum(
+            self.cycle, self._key_counts * (self.green_min + self.yellow + self.all_red)
+        )
+        self._key_offsets = _scatter01(unique) * self._key_cycles
+        self._active_cycle = np.full(len(unique), np.nan)
+        self._slot_green = np.zeros(self._slot_key.size)
+        self._slot_start = np.zeros(self._slot_key.size)
+        self._last_time: float | None = None
+        plan = self.plan
+        assert plan is not None
+        self._period_hours = np.array([period.start_hour for period in plan.time_of_day])
+        patterns = (plan.group_weights,) + tuple(period.group_weights for period in plan.time_of_day)
+        self._pattern_weights = np.ones((len(patterns), self.max_groups))
+        for row, weights in enumerate(patterns):
+            length = min(len(weights), self.max_groups)
+            self._pattern_weights[row, :length] = weights[:length]
+        self._pattern_weights /= np.maximum(1.0, self._pattern_weights.max(axis=1))[:, None]
 
     def __len__(self) -> int:
         return self._count
@@ -90,10 +127,13 @@ class SignalController:
     def count(self) -> int:
         return self._count
 
-    def phases(self, sim_time: float) -> list[int]:
+    def phases(self, sim_time: float, demand: np.ndarray | None = None) -> list[int]:
         """各信号の灯色を返す。並びは `MapData.signals` と同じ。"""
         if self._count == 0:
             return []
+
+        if self.plan is not None:
+            return self._planned_phases(float(sim_time), demand)
 
         local = (float(sim_time) + self._offsets + self._shift) % self._cycles
 
@@ -103,10 +143,74 @@ class SignalController:
         np.putmask(out, (local >= self._green) & (local < self._yellow_end), YELLOW)
         return out.tolist()
 
+    def _planned_phases(self, sim_time: float, demand: np.ndarray | None) -> list[int]:
+        plan = self.plan
+        assert plan is not None
+        if not np.isfinite(sim_time):
+            raise ValueError("信号の時刻は有限の値で指定してください")
+        cycle = np.floor((sim_time + self._key_offsets) / self._key_cycles)
+        if self._last_time is not None and sim_time < self._last_time:
+            self._active_cycle.fill(np.nan)
+        changed = cycle != self._active_cycle
+        if changed.any():
+            boundary = cycle * self._key_cycles - self._key_offsets
+            hour = (plan.start_hour + boundary / 3600.0) % 24.0
+            if self._period_hours.size:
+                pattern = np.searchsorted(self._period_hours, hour, side="right")
+                pattern[pattern == 0] = self._period_hours.size
+            else:
+                pattern = np.zeros(cycle.size, dtype=np.int64)
+            weights = self._pattern_weights[pattern[self._slot_key], self._slot_group].copy()
+            if plan.mode == "adaptive" and demand is not None:
+                counts = np.asarray(demand, dtype=np.float64)
+                if counts.shape != (self._count,) or not np.isfinite(counts).all() or (counts < 0.0).any():
+                    raise ValueError("信号の需要は灯器順の有限の非負配列で指定してください")
+                grouped = np.bincount(
+                    self._head_slot,
+                    weights=np.minimum(counts, plan.demand_cap) / plan.demand_cap,
+                    minlength=weights.size,
+                )
+                grouped = np.minimum(grouped, 1.0) * plan.demand_cap
+                weights *= 1.0 + np.minimum(grouped, plan.demand_cap) * plan.demand_gain
+            scale = np.maximum.reduceat(weights, self._key_slot_base)
+            weights /= np.maximum(1.0, scale[self._slot_key])
+            total = np.bincount(self._slot_key, weights=weights, minlength=cycle.size)
+            uniform = total[self._slot_key] == 0.0
+            weights[uniform] = 1.0
+            total[total == 0.0] = self._key_counts[total == 0.0]
+            spare = self._key_cycles - self._key_counts * (self.green_min + self.yellow + self.all_red)
+            green = self.green_min + spare[self._slot_key] * weights / total[self._slot_key]
+            slots = green + self.yellow + self.all_red
+            end = np.cumsum(slots)
+            key_ends = np.cumsum(self._key_counts) - 1
+            key_origin = np.zeros(cycle.size)
+            key_origin[1:] = end[key_ends[:-1]]
+            start = end - slots - key_origin[self._slot_key]
+            slot_changed = changed[self._slot_key]
+            self._slot_green[slot_changed] = green[slot_changed]
+            self._slot_start[slot_changed] = start[slot_changed]
+            self._active_cycle[changed] = cycle[changed]
+        self._last_time = sim_time
+        local = (sim_time + self._key_offsets[self._head_key]) % self._key_cycles[self._head_key]
+        elapsed = local - self._slot_start[self._head_slot]
+        green = self._slot_green[self._head_slot]
+        out = self._buffer
+        out.fill(RED)
+        out[(elapsed >= 0.0) & (elapsed < green)] = GREEN
+        np.putmask(out, (elapsed >= green) & (elapsed < green + self.yellow), YELLOW)
+        return out.tolist()
+
     def describe(self) -> str:
         """ログ用の説明。"""
         if self._count == 0:
             return "信号 0 基"
+        if self.plan is not None:
+            mode = "需要応答" if self.plan.mode == "adaptive" else "固定"
+            return (
+                f"信号 {self._count} 基 / {mode}プラン / サイクル {self.cycle:.0f} 秒"
+                f"（現示は最大 {self.max_groups} 通り・最短青 {self.green_min:.0f}"
+                f" + 黄 {self.yellow:.0f} + 全赤 {self.all_red:.0f}）"
+            )
         return (
             f"信号 {self._count} 基 / サイクル {self.cycle:.0f} 秒"
             f"（現示は最大 {self.max_groups} 通り・青 {self._green.min():.0f}〜"

@@ -1,0 +1,13 @@
+{
+  "name": "wet-road",
+  "model": "dynamic",
+  "physics": {
+    "friction": 0.35,
+    "throttle_tau": 0.25,
+    "brake_tau": 0.2,
+    "steering_tau": 0.2
+  },
+  "learner_vehicles": 1,
+  "background_vehicles": 3,
+  "driver_spread": 0.2
+}

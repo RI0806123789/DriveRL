@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import time
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any, Callable
 
 import numpy as np
@@ -50,6 +52,7 @@ from app.sim.safety import SafetyCommand, SafetySupervisor
 from app.sim.signals import GREEN, RED, STOP_MARGIN_M, constrain_accel, stop_speed_limit
 from app.sim.v2x import V2XMessageRouter
 from app.sim.world import SPAWN_CLEARANCE_M2, World
+from app.sim.scenario import Scenario, ScenarioTraffic, load_scenario
 
 #: 1 ステップで再スポーンに使ってよい時間 [秒]。1 台ぶんは必ず処理するので、
 #: これを超えたら残りは次のステップへ回す（金沢は 1 台 9.9ms、銀座は 1.6ms）
@@ -141,11 +144,21 @@ class SimulationEnv:
         seed: int = 0,
         *,
         compute_observations: bool = True,
+        scenario: Scenario | None = None,
     ) -> None:
         self.map_index = map_index
         self.params = replace(params)
         self.rng = np.random.default_rng(seed)
-        self.world = World(map_index, self.rng)
+        scenario_path = os.getenv("DRIVERL_SCENARIO", "").strip()
+        if scenario_path and not Path(scenario_path).is_absolute():
+            scenario_path = str(config.PROJECT_DIR / scenario_path)
+        self.scenario = scenario if scenario is not None else (load_scenario(scenario_path) if scenario_path else None)
+        self.world = World(
+            map_index, self.rng,
+            dynamics=self.scenario.dynamics if self.scenario else None,
+            signal_plan=self.scenario.signals if self.scenario else None,
+        )
+        self.traffic: ScenarioTraffic | None = None
 
         n = config.MAX_VEHICLES
         self._obs = np.zeros((n, config.OBS_DIM), dtype=np.float32)
@@ -206,8 +219,15 @@ class SimulationEnv:
         self._detector_failed = False
         self._ground_truth_failed = False
 
-        self.world.set_active_count(int(self.params.vehicle_count))
+        initial_count = int(self.params.vehicle_count)
+        if self.scenario is not None:
+            initial_count = self.scenario.learner_vehicles + self.scenario.background_vehicles
+            self.params.vehicle_count = initial_count
+        self.world.set_active_count(self.scenario.learner_vehicles if self.scenario else initial_count)
         self.world.set_pedestrian_count(int(self.params.pedestrian_count))
+        if self.scenario is not None:
+            self.traffic = ScenarioTraffic(self.scenario, seed, self)
+            self.traffic.prepare(self, initial=True)
         self.world.project_all()
         self._obs = self._compute_observations()
 
@@ -232,6 +252,13 @@ class SimulationEnv:
     def vehicle_count(self) -> int:
         """走っている台数。再スポーン待ちの車も数える（次のステップで起き上がるため）。"""
         return int(self.world.active_count) + len(self._respawn_queue)
+
+    @property
+    def fixed_vehicle_count(self) -> int | None:
+        """シナリオ中の予約台数。通常の環境なら None。"""
+        if self.scenario is None:
+            return None
+        return self.scenario.learner_vehicles + self.scenario.background_vehicles
 
     def _drop_from_respawn_queue(self, slot: int) -> bool:
         """再スポーン待ちから外す。積まれていたかを返す。"""
@@ -318,11 +345,17 @@ class SimulationEnv:
         """そのスロットの経路追従の走り方。配車中の車だけが `drive_style` に従う。"""
         if int(slot) == int(self.commandeered_slot):
             return DRIVE_STYLES.get(self.drive_style, DRIVE_STYLES[TAXI_DRIVE_NORMAL])
+        if self.traffic is not None and int(slot) in self.traffic.drivers:
+            driver = self.traffic.drivers[int(slot)]
+            return DriveStyle(driver.speed_ratio, AUTOPILOT_SPEED_GAIN, AUTOPILOT_PRESS_RATE, 0.0, 0.0)
         return DRIVE_STYLES[TAXI_DRIVE_NORMAL]
 
     def _headway_margin(self, slot: int) -> float:
         """前走車の手前で止める余裕 [m]（車体の中心から）。"""
-        return config.VEHICLE_LENGTH + AUTOPILOT_HEADWAY_M + self._style(slot).extra_headway_m
+        margin = config.VEHICLE_LENGTH + AUTOPILOT_HEADWAY_M + self._style(slot).extra_headway_m
+        if self.traffic is not None and int(slot) in self.traffic.drivers:
+            margin += abs(float(self.world.fleet.speed[slot])) * self.traffic.drivers[int(slot)].headway_sec
+        return margin
 
     def _pedestrian_margin(self, slot: int) -> float:
         """歩行者の手前で止める余裕 [m]（車体の中心から歩行者の中心まで）。"""
@@ -332,10 +365,11 @@ class SimulationEnv:
         """経路追従で走らせるスロット。実用モードでは全車、それ以外は徴用した 1 台だけ。"""
         if self.autopilot_all:
             return np.flatnonzero(active)
+        background = np.flatnonzero(active & self.traffic.mask) if self.traffic is not None else np.zeros(0, dtype=np.int64)
         held = int(self.commandeered_slot)
         if 0 <= held < config.MAX_VEHICLES and active[held]:
-            return np.array([held], dtype=np.int64)
-        return np.zeros(0, dtype=np.int64)
+            return np.union1d(background, [held]).astype(np.int64)
+        return background
 
     def _assisted_slots(self, active: np.ndarray) -> np.ndarray:
         """安全ギミックを掛けるスロット。経路追従の車と、`safety_assist` のときは学習中の車も。"""
@@ -452,6 +486,7 @@ class SimulationEnv:
             lead_speed=lead_speed,
             action_delta_sq=(delta_sq * active).astype(np.float64),
             jerk=(jerk * active).astype(np.float64),
+            ground_speed=np.hypot(fleet.speed.astype(np.float64), fleet.lateral_speed.astype(np.float64)),
         )
 
     def _pedestrian_gap(self, slot: int) -> float:
@@ -553,14 +588,19 @@ class SimulationEnv:
         self._respawn_queue.clear()
         for slot in range(config.MAX_VEHICLES):
             if self.world.fleet.active[slot]:
-                self.world.respawn(slot)
-            elif slot in waiting and not self.world.activate(slot):
-                logger.warning(
-                    "スロット %d の再スポーンに失敗しました（経路を作れず）。"
-                    "このスロットを非アクティブにします",
-                    slot,
-                )
-        self.params.vehicle_count = self.vehicle_count
+                if self.traffic is not None and self.traffic.mask[slot]:
+                    self.traffic.spawn(self, slot)
+                else:
+                    self.world.respawn(slot)
+            elif slot in waiting:
+                placed = self.traffic.spawn(self, slot) if self.traffic is not None and self.traffic.mask[slot] else self.world.activate(slot)
+                if not placed:
+                    logger.warning("スロット %d の再スポーンに失敗しました。非アクティブにします", slot)
+        if self.scenario is None:
+            self.params.vehicle_count = self.vehicle_count
+        else:
+            self.params.vehicle_count = self.scenario.learner_vehicles + self.scenario.background_vehicles
+            self.traffic.prepare(self, initial=True)
         if relocate_walkers:
             self.world.relocate_pedestrians()
         self.curriculum.reset_incidents()
@@ -601,14 +641,18 @@ class SimulationEnv:
         started = time.perf_counter()
         while self._respawn_queue:
             slot = self._respawn_queue.pop(0)
-            if not self.world.activate(slot):
-                self.params.vehicle_count = self.vehicle_count
+            if self.traffic is not None and self.traffic.mask[slot] and slot - self.scenario.learner_vehicles >= self.scenario.traffic_count(self.sim_time):
+                continue
+            placed = self.traffic.spawn(self, slot) if self.traffic is not None and self.traffic.mask[slot] else self.world.activate(slot)
+            if not placed:
+                if self.scenario is None:
+                    self.params.vehicle_count = self.vehicle_count
                 logger.warning(
                     "スロット %d の再スポーンに失敗しました（経路を作れず）。"
                     "このスロットを非アクティブにします",
                     slot,
                 )
-            if time.perf_counter() - started >= RESPAWN_BUDGET_SEC:
+            if self.scenario is not None or time.perf_counter() - started >= RESPAWN_BUDGET_SEC:
                 break
 
     def step(self, actions: np.ndarray, expert: np.ndarray | None = None) -> StepResult:
@@ -692,6 +736,8 @@ class SimulationEnv:
             accel_cmd[s], steer_cmd[s] = self._autopilot(
                 s, min(float(limit[s]), max_speed), offset
             )
+            if self.traffic is not None and s in self.traffic.drivers and not commands[s].override:
+                accel_cmd[s], steer_cmd[s] = self.traffic.adjust_commands(s, float(accel_cmd[s]), float(steer_cmd[s]))
             if s in piloted:
                 self.autopilot_actions[s, 0] = accel_cmd[s]
                 self.autopilot_actions[s, 1] = steer_cmd[s]
@@ -814,6 +860,9 @@ class SimulationEnv:
         self.world.set_event_flags(collided, reached)
         self._update_incidents(collided | offroad, dones, expert_mask, piloted)
 
+        if self.traffic is not None:
+            self.traffic.prepare(self)
+            episodes = [episode for episode in episodes if not self.traffic.mask[episode.slot]]
         self._obs = self._compute_observations()
         self._obs_stale = False
         return StepResult(
@@ -824,7 +873,7 @@ class SimulationEnv:
             truncated=truncated,
             final_obs=final_obs,
             episodes=episodes,
-            learn=active_before & ~overridden & ~forced_brake,
+            learn=active_before & ~overridden & ~forced_brake & ~(self.traffic.mask if self.traffic is not None else np.zeros(n, dtype=bool)),
             assisted=expert_mask,
             expert_actions=expert_actions,
             expert_options=expert_options,
@@ -952,7 +1001,9 @@ class SimulationEnv:
     def apply_params(self, params: SimParams) -> None:
         """パラメータの実行時変更を反映する。学習は止めない。"""
         new_count = int(np.clip(int(params.vehicle_count), 0, config.MAX_VEHICLES))
-        count_changed = new_count != self.vehicle_count
+        if self.scenario is not None:
+            new_count = self.scenario.learner_vehicles + self.scenario.background_vehicles
+        count_changed = new_count != (int(self.params.vehicle_count) if self.scenario is not None else self.vehicle_count)
         walkers = int(np.clip(int(params.pedestrian_count), 0, config.MAX_PEDESTRIANS))
         self.params = replace(params)
         self.params.vehicle_count = new_count
@@ -964,6 +1015,8 @@ class SimulationEnv:
             self._respawn_queue.clear()
             active_before = self.world.fleet.active.copy()
             self.world.set_active_count(new_count)
+            if self.traffic is not None:
+                self.traffic.prepare(self)
             self._reset_stats_for_changed(active_before)
             self.world.project_all()
             self._obs_stale = True
@@ -981,6 +1034,8 @@ class SimulationEnv:
         """ユーザー介入を適用する。失敗理由の文字列、成功なら None を返す。"""
         kind = str(event.kind)
         payload = event.payload or {}
+        if self.scenario is not None and kind in ("spawn_vehicle", "despawn_vehicle"):
+            return "シナリオ実行中の車両数は設定ファイルで指定してください"
         try:
             if kind == "spawn_vehicle":
                 slot = self._free_slot()
@@ -1058,7 +1113,7 @@ class SimulationEnv:
             if vehicle.active:
                 vehicle.assist = self.safety.assist(vehicle.id)
                 vehicle.v2x_links = list(self.v2x_links.get(vehicle.id, ()))
-                if self.current_options is not None and not self.autopilot_all:
+                if self.current_options is not None and not self.autopilot_all and not (self.traffic is not None and self.traffic.mask[vehicle.id]):
                     option = int(self.current_options[vehicle.id])
                     if 0 <= option < len(config.HRL_OPTIONS):
                         vehicle.current_option = config.HRL_OPTIONS[option]
