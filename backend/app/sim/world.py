@@ -29,6 +29,8 @@ from app.sim.signals import (
     stop_speed_limit,
 )
 from app.sim.vehicle import VehicleFleet
+from app.sim.dynamics import VehicleDynamics
+from app.sim.signal_plan import SignalPlan
 from app.warn import warn_once
 
 __all__ = ["ObstacleState", "Route", "SlotState", "World"]
@@ -173,10 +175,13 @@ logger = logging.getLogger("autoware_sim")
 class World:
     """マップ上の車両群・障害物・衝突判定を保持する。"""
 
-    def __init__(self, map_index: MapIndex, rng: np.random.Generator) -> None:
+    def __init__(
+        self, map_index: MapIndex, rng: np.random.Generator, *,
+        dynamics: VehicleDynamics | None = None, signal_plan: SignalPlan | None = None,
+    ) -> None:
         self.map_index = map_index
         self.rng = rng
-        self.fleet = VehicleFleet(config.MAX_VEHICLES)
+        self.fleet = VehicleFleet(config.MAX_VEHICLES, dynamics=dynamics)
         self.crowd = PedestrianCrowd(map_index, rng)
         #: 実用モードの徒歩キャラ (0, 2) か (1, 2)。**NPC 群衆とは別に持つ**
         self._player_xy = _NO_PLAYER
@@ -192,7 +197,8 @@ class World:
         self._speed_limits_on_route_failed = False
         n = config.MAX_VEHICLES
 
-        self.signals = SignalController(map_index.data.signals)
+        self.signals = SignalController(map_index.data.signals, plan=signal_plan)
+        self._adaptive_signals = signal_plan is not None and signal_plan.mode == "adaptive"
         self.sim_time = 0.0
         self.signal_phases: list[int] = self.signals.phases(0.0)
 
@@ -432,7 +438,16 @@ class World:
     def advance_time(self, dt: float) -> None:
         """シミュレーション内時刻を進め、信号の現示と歩行者を更新する。"""
         self.sim_time += float(dt)
-        self.signal_phases = self.signals.phases(self.sim_time)
+        demand = None
+        if self._adaptive_signals:
+            demand = np.zeros(len(self.signals), dtype=np.float64)
+            for slot in np.flatnonzero(self.fleet.active):
+                state = self.slots[int(slot)]
+                current = float(self.arc[slot])
+                ahead = int(np.searchsorted(state.signal_arcs, current, side="left"))
+                if ahead < state.signal_arcs.size and float(state.signal_arcs[ahead]) - current <= 60.0:
+                    demand[int(state.signal_ids[ahead])] += 1.0
+        self.signal_phases = self.signals.phases(self.sim_time, demand=demand)
         # 現示を作り直した**あと**に渡すこと。1 ステップ古い色で渡らせない
         self.crowd.step(float(dt), self.signal_phases)
         if self.sim_time - self._recycled_at >= PEDESTRIAN_RECYCLE_SEC:
@@ -977,18 +992,18 @@ class World:
         return True
 
     def activate_at(
-        self, slot: int, at: tuple[float, float], *, clearance_m: float
+        self, slot: int, at: tuple[float, float], *, clearance_m: float, heading: float | None = None
     ) -> str | None:
         """スロットを指定地点の道路から起動する。出せなければ理由を返し、別の場所へは出さない。"""
         slot = int(slot)
         if not (0 <= slot < config.MAX_VEHICLES):
             return f"車両 ID が範囲外です: {slot}"
-        why = self._place_at(slot, (float(at[0]), float(at[1])), float(clearance_m))
+        why = self._place_at(slot, (float(at[0]), float(at[1])), float(clearance_m), heading=heading)
         self.fleet.active[slot] = why is None
         return why
 
-    def _place_at(self, slot: int, at: tuple[float, float], clearance_m: float) -> str | None:
-        lead = self._road_lead(at[0], at[1], None, 0.0)
+    def _place_at(self, slot: int, at: tuple[float, float], clearance_m: float, *, heading: float | None = None) -> str | None:
+        lead = self._road_lead(at[0], at[1], heading, 0.0)
         if lead is None or not lead.polylines or not lead.polylines[0]:
             return "指定地点の近くに道路が見つかりませんでした"
         sx, sy = lead.polylines[0][0]
@@ -1011,6 +1026,7 @@ class World:
         self.fleet.speed[slot] = np.float32(0.0)
         self.fleet.steer[slot] = np.float32(0.0)
         self.fleet.gear[slot] = np.int8(1)
+        self.fleet._reset_dynamics(slot)
         self.collided_flags[slot] = False
         self.reached_flags[slot] = False
         self.stop_arc[slot] = np.inf

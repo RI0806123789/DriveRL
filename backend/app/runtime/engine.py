@@ -263,11 +263,17 @@ class SimulationEngine:
             if self._autotune_running:
                 # 探索中の値は試行が決める。途中で変えると、その試行の成績が別の設定のものになる
                 patch = {k: v for k, v in patch.items() if k not in TUNED_WIRE_KEYS}
+            fixed_count = self._env.fixed_vehicle_count if self._env is not None else None
+            rejected_count = fixed_count is not None and "vehicleCount" in patch
+            if rejected_count:
+                patch = {k: v for k, v in patch.items() if k != "vehicleCount"}
             result = self._params.apply_wire(
                 patch,
                 max_vehicles=config.MAX_VEHICLES,
                 max_pedestrians=config.MAX_PEDESTRIANS,
             )
+            if rejected_count:
+                result.rejected.append("vehicleCount")
             snapshot = SimParams(**vars(self._params))
         # 探索中に通るのは探索の対象でないキーだけなので、試行の途中の値は控えに入らない
         self._persist_params(patch, snapshot)
@@ -899,7 +905,8 @@ class SimulationEngine:
         """world の実台数を asyncio 側のパラメータへ映す（再スポーン待ちの車も数える）。"""
         if self._env is None:
             return
-        count = int(self._env.vehicle_count)
+        fixed_count = self._env.fixed_vehicle_count
+        count = int(self._env.vehicle_count if fixed_count is None else fixed_count)
         with self._lock:
             if int(self._params.vehicle_count) == count:
                 return

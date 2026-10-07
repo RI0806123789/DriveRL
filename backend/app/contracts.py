@@ -131,6 +131,7 @@ class MapSignal:
     phase_key: int
     #: この灯器が規制する進入路（`MapEdge.id`）。歩行者用の現示もここから引く
     edge_id: int
+    source: str = "unknown"
 
 
 @dataclass
@@ -199,6 +200,7 @@ class MapData:
                     "heading": round(s.heading, 4),
                     "group": s.group,
                     "roadWidth": round(s.road_width, 2),
+                    "source": s.source,
                 }
                 for s in self.signals
             ],
@@ -772,7 +774,7 @@ class StepResult:
     #: 打ち切り（timeout）が起きたステップだけ、再スポーン前の観測が入る
     final_obs: np.ndarray | None = None
     episodes: list[EpisodeResult] = field(default_factory=list)
-    #: 学習に使ってよいスロット。`active` から、安全ギミックが操作を丸ごと引き受けた車を除いたもの
+    #: 学習に使ってよいスロット。`active` から、背景車・安全ギミックが操作を丸ごと引き受けた車を除いたもの
     #: （方策が出していない操作を方策の経験として積まない）。None なら `active` と同じ
     learn: np.ndarray | None = None
     #: エキスパート（経路追従）が運転したスロット（`step(expert=...)`）と、実際に出した操作
@@ -797,6 +799,7 @@ class DriveState:
     action_delta_sq: np.ndarray
     #: 実際の加速度の変化 [m/s^3]（加加速度）。エピソードの最初は 0
     jerk: np.ndarray
+    ground_speed: np.ndarray | None = None
 
 
 @dataclass(slots=True)

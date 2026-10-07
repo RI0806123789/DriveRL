@@ -33,7 +33,7 @@ class MapLoadError(RuntimeError):
     """OSM の取得・正規化に失敗したときに投げる。"""
 
 
-CACHE_VERSION = 10
+CACHE_VERSION = 11
 
 _DEFAULT_LANES: dict[str, int] = {
     "motorway": 3,
@@ -457,6 +457,7 @@ def _build_signals(
         )
 
     signals: list[MapSignal] = []
+    tagged_nodes = {remap[o] for o in signal_osmids if o in remap}
     for node_id in candidates:
         around = incident.get(node_id, [])
         if not around:
@@ -498,6 +499,7 @@ def _build_signals(
                     road_width=width,
                     phase_key=node_id,
                     edge_id=edge_id,
+                    source="osm" if node_id in tagged_nodes else "synthetic",
                 )
             )
 
@@ -990,6 +992,7 @@ def _to_cache_dict(data: MapData) -> dict[str, Any]:
                 round(sg.road_width, 2),
                 sg.phase_key,
                 sg.edge_id,
+                sg.source,
             ]
             for sg in data.signals
         ],
@@ -1056,6 +1059,7 @@ def _from_cache_dict(payload: dict[str, Any], preset: MapPreset) -> MapData:
             road_width=float(sg[6]),
             phase_key=int(sg[7]),
             edge_id=int(sg[8]),
+            source=str(sg[9]) if len(sg) > 9 else "unknown",
         )
         for sg in payload.get("signals", [])
     ]
