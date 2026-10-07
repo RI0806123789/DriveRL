@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from itertools import chain
 from typing import Sequence
 
 import numpy as np
@@ -45,13 +46,8 @@ class SidewalkNetwork:
         if self.count:
             self.start[1:] = np.cumsum(counts)[:-1]
         self.point_count = counts
-        self.points = (
-            np.asarray(
-                [v for e in edges for pt in e.polyline for v in pt], dtype=np.float64
-            ).reshape(-1, 2)
-            if self.count
-            else np.zeros((0, 2), dtype=np.float64)
-        )
+        coords = chain.from_iterable(chain.from_iterable(e.polyline for e in edges))
+        self.points = np.fromiter(coords, dtype=np.float64, count=2 * int(counts.sum())).reshape(-1, 2)
 
         total_points = int(self.points.shape[0])
         cum = np.zeros(total_points, dtype=np.float64)

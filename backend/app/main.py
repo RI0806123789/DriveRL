@@ -656,6 +656,10 @@ async def export_model_endpoint(kind: str):
         except ExportError:
             logger.exception("Keras を読み込めませんでした")
             return JSONResponse({"error": KERAS_MISSING_MESSAGE}, status_code=500)
+    elif kind == "pt2":
+        from app.rl.export import preload_torch_export
+
+        await asyncio.to_thread(preload_torch_export)
 
     ticket = engine.request_export(kind)
     finished = await asyncio.to_thread(ticket.done.wait, EXPORT_TIMEOUT_SEC)

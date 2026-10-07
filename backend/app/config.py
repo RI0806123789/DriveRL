@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 
@@ -35,8 +36,25 @@ CHECKPOINT_PATH = CHECKPOINT_DIR / "shared_policy.pt"
 #: 自動探索の最良の試行の重み。本番の `CHECKPOINT_PATH` とは分けて置く（探索中に本番を上書きしない）
 BEST_TUNED_POLICY_PATH = CHECKPOINT_DIR / "best_tuned_policy.pt"
 
+def _env_port(name: str, default: int) -> int:
+    """環境変数のポート番号。空なら既定値、整数でない・1〜65535 の外なら既定値に戻して警告する。"""
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        port = int(raw)
+    except ValueError:
+        port = 0
+    if 1 <= port <= 65535:
+        return port
+    logging.getLogger(__name__).warning(
+        "%s=%r はポート番号として使えません（1〜65535 の整数）。%d で起動します", name, raw, default
+    )
+    return default
+
+
 HOST = os.getenv("DRIVERL_HOST", "127.0.0.1")
-PORT = int(os.getenv("DRIVERL_PORT", "8000"))
+PORT = _env_port("DRIVERL_PORT", 8000)
 
 #: 実用モードの AI コンシェルジュ（`runtime/concierge.py`）が使う Gemini の API キー。空なら使えない（画面のボタンも押せない）
 GEMINI_API_KEY_PLACEHOLDER = "your_gemini_api_key_here"

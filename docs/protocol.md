@@ -1123,34 +1123,42 @@ WebSocket に載せないものはここに置く。バイナリの受け渡し�
 
 ### `GET /api/export/{kind}` — 学習済みモデルの書き出し
 
-`kind` は `checkpoint` / `torchscript` / `keras`。
+`kind` は `checkpoint` / `torchscript` / `pt2` / `keras`。
 
 | kind | 中身 | 用途 |
 |---|---|---|
 | `checkpoint` | 重み＋オプティマイザ状態＋メタデータ（`torch.save` 形式） | このアプリに読み戻して**続きから学習**する。バックアップ |
-| `torchscript` | 推論だけを切り出した TorchScript（`metadata.json` を同梱） | このリポジトリのコード無しで `torch.jit.load()` するだけで動く |
+| `torchscript` | 推論だけを切り出した TorchScript（`metadata.json` を同梱） | このリポジトリのコード無しで `torch.jit.load()` するだけで動く。PyTorch が非推奨にした形式（後継は `pt2`）|
+| `pt2` | 推論だけを切り出した `torch.export` の ExportedProgram（`.pt2`。`metadata.json` を同梱） | このリポジトリのコード無しで `torch.export.load()` するだけで動く |
 | `keras` | 同じネットワークを Keras 3 のモデルとして組み直したもの（`.keras`）| Keras / TensorFlow 系のツールで扱う |
 
 - 成功時: `200`、`Content-Disposition: attachment; filename="autoware-sim_<preset>_upd<更新回数>_<日時>.pt"`
+  （拡張子は形式ごとに `.pt` / `.torchscript.pt` / `.pt2` / `.keras`）
   - 補助ヘッダ `X-Export-Kind` と `X-Export-Size`（バイト数）も返す
-- 未知の `kind`: `400` — `{"error": "...", "supported": ["checkpoint", "torchscript", "keras"]}`
+- 未知の `kind`: `400` — `{"error": "...", "supported": ["checkpoint", "torchscript", "pt2", "keras"]}`
 - 書き出し失敗: `500` — `{"error": "..."}`
 - 時間内に完了しない: `504` — `{"error": "..."}`
 
 書き出しは**シミュレーションスレッドのステップ境界**で行う。asyncio 側から直接
 `state_dict()` を取ると `optimizer.step()` の途中の中途半端な重みを掴む可能性があるため。
-学習は止まらず、1 ステップ分だけ余分に時間がかかるだけである。
+学習は止まらず、ほとんどの形式は 1 ステップ分だけ余分に時間がかかるだけである。
+**`pt2` だけはモデルをトレースするので、その間（1 秒足らず）シミュレーションが止まる。**
 
 生成したファイルはサーバー上の `backend/data/exports/` にも残る（ダウンロードに失敗しても
 手元に残るようにするため）。
 
-TorchScript の入出力：
+TorchScript 版と torch.export 版の入出力（どちらも同じ）：
 
 ```
 forward(obs: float32[B, 87]) -> (action: float32[B, 2], value: float32[B])
 ```
 
 観測の次元（87）は `config.OBS_DIM` が出典で、書き出したメタデータの `model.obsDim` にも入る。
+
+torch.export 版は `torch.export.load(path, extra_files={"metadata.json": ""}).module()` で呼べる形になる
+（`extra_files` に渡した辞書へメタデータの文字列が入る）。バッチ数 `B` は 1 以上の任意の値で呼べ、
+観測の次元が違う入力は弾く。`.pt2` も zip で、torch を使わずにメタデータだけ読むなら
+`archive/extra/metadata.json` にある。
 
 `action` は方策分布の平均（学習時と同じく `tanh` で `[-1, 1]` に収めたもの）で、決定論的な行動。
 学習時と同じ確率的な行動が欲しい場合は、同梱の buffer `log_std` を使って
@@ -1176,13 +1184,13 @@ model(obs: float32[B, 87]) -> [action: float32[B, 2], value: float32[B]]
 エントリしか読まないため、追記しても読み込みには影響しない）。
 `log_std` は Keras の層として表せないので、このメタデータの `policy.logStd` に入れている。
 
-**`torchscript` と `keras` は推論専用で、オプティマイザ状態を持たないため
+**`torchscript`・`pt2`・`keras` は推論専用で、オプティマイザ状態を持たないため
 `POST /api/import` では学習を再開できない。** 取り違えたときは形式を判定して案内する。
 
 ### `POST /api/import` — 書き出したモデルから学習を再開
 
 `multipart/form-data` で `file` に **`checkpoint` 形式の `.pt`** を送る。
-TorchScript や Keras 形式を渡した場合は、その旨を説明する `400` を返す。
+TorchScript・torch.export（`.pt2`）・Keras 形式を渡した場合は、その旨を説明する `400` を返す。
 
 成功時（`200`）:
 

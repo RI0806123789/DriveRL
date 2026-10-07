@@ -2,7 +2,15 @@
 
 import { create } from 'zustand'
 
-export type ExportKind = 'checkpoint' | 'torchscript' | 'keras'
+export type ExportKind = 'checkpoint' | 'torchscript' | 'pt2' | 'keras'
+
+/** サーバーがファイル名を返さなかったときの名前 */
+const FALLBACK_FILENAME: Record<ExportKind, string> = {
+  checkpoint: 'autoware-sim.pt',
+  torchscript: 'autoware-sim.torchscript.pt',
+  pt2: 'autoware-sim.pt2',
+  keras: 'autoware-sim.keras',
+}
 
 export interface ExportOutcome {
   ok: boolean
@@ -63,13 +71,10 @@ export async function downloadModel(kind: ExportKind): Promise<ExportOutcome> {
     return { ok: false, error: message }
   }
 
-  const fallback =
-    kind === 'checkpoint'
-      ? 'autoware-sim.pt'
-      : kind === 'keras'
-        ? 'autoware-sim.keras'
-        : 'autoware-sim.torchscript.pt'
-  const filename = filenameFromHeader(response.headers.get('Content-Disposition'), fallback)
+  const filename = filenameFromHeader(
+    response.headers.get('Content-Disposition'),
+    FALLBACK_FILENAME[kind],
+  )
 
   let blob: Blob
   try {

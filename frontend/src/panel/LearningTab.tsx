@@ -578,6 +578,27 @@ export function LearningTab() {
           block
           icon={<DownloadIcon size={16} />}
           disabled={exportDisabled || exporting !== null}
+          onClick={() => void handleExport('pt2')}
+        >
+          {exporting === 'pt2' ? '書き出し中…' : 'torch.export（.pt2）'}
+        </Button>
+        <div className="m3-note">
+          推論だけを切り出した自己完結の形式で、PyTorch が TorchScript の後継として勧めているものです。
+          このプロジェクトのコードが無くても
+          <code className="m3-mono"> torch.export.load() </code>
+          だけで読めます。観測ベクトルの構成や行動のスケールは
+          <code className="m3-mono"> metadata.json </code>
+          として同梱されるので、受け取った側だけで使えます。モデルをトレースする間（1 秒足らず）、
+          シミュレーションが一瞬止まります。
+        </div>
+
+        <hr className="m3-divider" />
+
+        <Button
+          variant="tonal"
+          block
+          icon={<DownloadIcon size={16} />}
+          disabled={exportDisabled || exporting !== null}
           onClick={() => void handleExport('torchscript')}
         >
           {exporting === 'torchscript' ? '書き出し中…' : 'TorchScript（.torchscript.pt）'}
@@ -585,9 +606,8 @@ export function LearningTab() {
         <div className="m3-note">
           推論だけを切り出した自己完結の形式です。このプロジェクトのコードが無くても
           <code className="m3-mono"> torch.jit.load() </code>
-          だけで読めます。観測ベクトルの構成や行動のスケールは
-          <code className="m3-mono"> metadata.json </code>
-          として同梱されるので、受け取った側だけで使えます。
+          だけで読めます（メタデータの同梱は上と同じ）。PyTorch は TorchScript を非推奨にしているので、
+          新しく使うなら torch.export（.pt2）を選んでください。
         </div>
 
         <hr className="m3-divider" />
@@ -680,8 +700,8 @@ export function LearningTab() {
           <code className="m3-mono"> backend/data/exports/ </code>
           へ自動でバックアップされます。間違ったファイルを選んでも学習成果は失われません。
           <br />
-          TorchScript 版（<code className="m3-mono">.torchscript.pt</code>）は推論専用なので、
-          学習の再開には使えません。
+          torch.export 版（<code className="m3-mono">.pt2</code>）と TorchScript 版（
+          <code className="m3-mono">.torchscript.pt</code>）は推論専用なので、学習の再開には使えません。
         </div>
 
         {importResult && (
