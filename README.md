@@ -161,6 +161,53 @@ DriveRL/
 | **自動運転タクシー** | 実用モードで街に降り立ち、スマホ画面からタクシーを呼んで乗る。AI コンシェルジュ（Gemini）に走り方を頼める |
 | **PWA** | ブラウザからインストールして、全画面のアプリとして起動できる |
 
+### 学習・認識パイプラインの分離評価（#102）
+
+`backend/benchmark_pipeline.py` で、学習速度、認識器、運転方策を同じ条件で比較できます。
+サーバーや画面は起動せず、学習中の重みはメモリ内だけで更新し、本番の重みを保存しません。
+`backend/` から実行します。`grid` は合成地図、実地図は現行キャッシュが必要です。古いキャッシュを自動で再取得しません。
+
+```powershell
+# 銀座・金沢の統一比較。実地図のキャッシュは先に app.map.prefetch で更新する
+.venv\Scripts\python.exe benchmark_pipeline.py --presets ginza kanazawa --vehicles 1 4 8 --weather clear rain fog --output data/evaluations/pipeline.json
+
+# 外部通信のない短い学習速度確認。CNN や学習済み方策を用意する前でも使える
+.venv\Scripts\python.exe benchmark_pipeline.py --tasks speed --modes oracle --presets grid --vehicles 1 4 8 --weather clear --steps 256 --output data/evaluations/speed.json
+
+# 認識器の出力が方策へ与える影響を、同じ重みと乱数種で比較する
+.venv\Scripts\python.exe benchmark_pipeline.py --tasks policy --presets ginza --vehicles 8 --weather clear fog --seeds 0 1 --policy-steps 4000 --evaluate-unconstrained --output data/evaluations/driving.json
+
+# 外部 RGB データだけを採点する（地図・運転方策は読み込まない）
+.venv\Scripts\python.exe benchmark_pipeline.py --tasks images --external-only --external data/external/manifest.json --output data/evaluations/external.json
+```
+
+- 速度は方策・物理・擬似カメラ・CNN・PPO 更新の内訳、中央値/p95/p99、50ms 超過率、秒あたりのステップを記録します。
+  既定は画面向け配信データの作成も省きます。`--publish-frame` でその作成時間も含められますが、ブラウザの描画は測りません。
+  CNN の観測用画像は常に作ります。`--device keras` / `cpu` / `auto` で既存の推論先を比較できます。
+  `--inference-only` は学習更新を省きます。台数の上限は `backend/app/config.py` の `MAX_VEHICLES` です。
+- 方策は `oracle`（正解認識）・`cnn`（画像認識）・`noisy`（正解検出の欠落/距離/灯色に雑音）を同じ撮影予算で比較します。
+  方策評価では学習と介入を止め、再スポーンの処理時間に状態列が左右されないようにします。速度計測は通常の再スポーン予算を使い、
+  `--deterministic-respawn` 指定時だけ外します。CNN の読み込みや推論の失敗時は採点を中止します。
+- 到達・衝突・逸脱・信号違反の率は終了したエピソードが分母で、終了ゼロ件は `null`。
+  平均到達時間と全終了理由の平均時間を分け、未完了分を含む違反件数と車両時間も記録します。
+  既定では真値の信号・規制速度制限が有効です。`--evaluate-unconstrained` は方策評価だけこの制限を外します。
+- 認識器は天候と、明るさ・雑音・解像度・中心画角の変更ごとに precision/recall、誤検出の割合、灯色/規制速度の正解率、
+  走行可能距離の誤差を出します。画角変更は中心切り抜きによる近似で、箱の教師を合わせ、走行可能距離の教師は除きます。
+  出力にはモデル・地図・画像と教師の指紋も入り、どの認識器と方策を比較したか追跡できます。
+
+外部画像は RGB の `uint8` 配列を `.npy` で保存し、同じディレクトリ内の manifest に並べます。
+PNG/JPEG のデコードや新しい画像ライブラリは追加していません。画像は認識器の入力寸法へ合わせます。
+箱は画像全体を 0〜1 とする座標、灯色は 0=青/1=黄/2=赤、距離・規制速度は m・m/s です。
+
+```json
+{"samples":[{"image":"frame.npy","condition":"rain","detections":[{"cls":"TRAFFIC_LIGHT","box":[0.4,0.2,0.5,0.3],"phase":2}]}]}
+```
+
+画像をまとめた NPZ も使えます。`images` は `(N,H,W,3)` の uint8、任意の `labels` は各画像の detections 配列を
+JSON にした Unicode 配列です。任意の `freespace` は `(N,OBS_FREESPACE_DIM)` の距離で、次元の出典は `config.py`。
+object 配列や pickle は読みません。教師省略/null は精度未評価、`[]` は物体が無いという正解です。
+外部画像で測るのは認識器の性能で、運転成績はシミュレータ内の結果です。実環境での運転性能を示すものではありません。
+
 ### 交通・車両物理のシナリオ（#101）
 
 既定の運転・物理はそのままです。`.env` に `DRIVERL_SCENARIO=backend/scenarios/wet-road.json` を指定して
