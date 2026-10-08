@@ -99,10 +99,14 @@ class HostOriginGuard:
             return
         origin = _header(scope, b"origin")
         needs_origin = kind == "websocket" or str(scope.get("method", "")).upper() in UNSAFE_METHODS
-        # Origin を付けないのはブラウザ以外（curl やスクリプト）だけなので通す。ブラウザは必ず付ける
-        if needs_origin and origin is not None and not origin_allowed(origin, host, self.allowed_origins):
-            await self._reject(scope, receive, send, "Origin", origin)
-            return
+        if needs_origin:
+            if origin is not None and not origin_allowed(origin, host, self.allowed_origins):
+                await self._reject(scope, receive, send, "Origin", origin)
+                return
+            fetch_site = (_header(scope, b"sec-fetch-site") or "").strip().lower()
+            if origin is None and fetch_site == "cross-site":
+                await self._reject(scope, receive, send, "Sec-Fetch-Site", fetch_site)
+                return
         await self.app(scope, receive, send)
 
     async def _reject(self, scope: Scope, receive: Receive, send: Send, what: str, value: str) -> None:

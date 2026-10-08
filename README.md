@@ -526,7 +526,10 @@ TorchScript 版なら `policy = torch.jit.load("<書き出したファイル>.to
 - torch.export 版・TorchScript 版・Keras 版は推論専用で、学習の再開には使えません
 - torch.export 版はモデルをトレースするので、書き出す間（1 秒足らず）シミュレーションが止まります
 - `.pt` は必ず `weights_only=True` で解析し、テンソルと素の値以外が入っていれば読み込みを止めます（詳しくは `SECURITY.md`）
-- コマンドラインからは `curl.exe -OJ http://127.0.0.1:8000/api/export/checkpoint`（`pt2` / `torchscript` / `keras`）で取れます
+- 読み込みはファイル 1 つ、256MiB までです（出典: `backend/app/model_upload.py`）。受信中に容量を検査し、超過した部分ファイルも片付けます
+- 書き出しは JSON の POST です。以前の GET では生成しません
+- 容量検査は HTTP 側で行います。2026-10-09 の新旧比較でファイル内容は一致し、2MiB の解析は中央値 13.9 → 14.5ms でした（計測条件は `CLAUDE.md`「モデルの入出力」）
+- コマンドラインからは `curl.exe -OJ -H "Content-Type: application/json" -d "{}" http://127.0.0.1:8000/api/export/checkpoint`（`pt2` / `torchscript` / `keras`）で取れます
 
 ---
 

@@ -2858,6 +2858,22 @@ Optuna（TPE）で PPO と報酬の重みのハイパーパラメータを探し
 
 ### モデルの入出力
 
+- **書き出しは `POST /api/export/{kind}` と `Content-Type: application/json` の組み合わせでのみ開始する**（#113）。
+  GET / HEAD で生成やトレースを始めると、Origin の無い別サイト由来のリンクや画像からもエンジンを止められる。
+  正規 UI は JSON の `{}` を送り、開発用 Vite は許可済み Origin を使う。HTTP の変更に合わせて `protocolVersion` は 3 とした。
+  書き出し形式は `contracts.MODEL_EXPORT_KINDS` / `protocol.ts` の `ExportKind` が契約。
+- **アップロードを `File(...)` に戻さないこと**（#112）。FastAPI はハンドラの前に multipart を解析するため、
+  保存時の容量検査だけでは一時ディスクの消費を止められない。`model_upload.read_model_upload` は本文全体を
+  解析へ渡す前に制限し、ファイル単体も解析中に制限する。上限の唯一の出典は同モジュールの定数で、
+  `rl/importer.py` は `MAX_UPLOAD_BYTES` を再公開する。受け付けるのは `file` 欄 1 つだけ。
+  解析器のコールバックを拡張しているため、Starlette 更新時も `tests/test_model_transfer_http.py` で
+  容量超過・複数ファイル・不正本文・切断・キャンセル時の後片付けを検査する。
+  2026-10-09 のスクラッチ実測（64KiB 分割、各 21 回の中央値）では、旧 `Request.form()` と新解析で
+  ファイル名・サイズ・SHA-256 が一致。8KiB は 0.068 → 0.070ms、256KiB は 0.942 → 0.875ms、
+  2MiB は 13.939 → 14.535ms。Host/Origin 検査は既存の許可条件で判定が一致し、新しい拒否条件だけ変わる。
+  2 万要求を 5 回測った中央値は 1 要求 2.8〜4.7µs。いずれも HTTP 側で行い、地図の大きさや
+  金沢の索引を読む処理、50ms のエンジンループには追加していない。
+
 - **チェックポイントは必ず `weights_only=True` で読む。フォールバックしない。**
   `rl/importer.py` がこれを宣言しており、`SECURITY.md` にも書いてあります。
 - 書き出し（`.pt` / `.pt2` / TorchScript / `.keras`）には観測レイアウトと行動スケールを
@@ -2977,7 +2993,8 @@ OSM キャッシュ・チェックポイント・認識器と教師データ・�
 - **開発中の Vite（`-Dev`）は `changeOrigin: true` で `Host` を `127.0.0.1:8000` に書き換えて転送し、`Origin` は
   `http://localhost:5173` のまま**なので、`CORS_ORIGINS` に 5173 番が入っている限り通ります。Vite の待ち受けを LAN へ開く・
   ポートを変えるときは `CORS_ORIGINS` も直すこと（Vite 自身の `Host` の確認は Vite 8 の既定に任せている）
-- `Origin` の無い接続（curl・スクリプト）は通します。ブラウザは WebSocket と POST に必ず付けるので、ブラウザ越しの攻撃はこれで止まる。
+- `Origin` の無い接続も `Sec-Fetch-Site: cross-site` があれば断ります。両方のヘッダが無い curl・スクリプトは通します。
+  モデル書き出しには JSON ヘッダも必須とし、Origin の無いフォームや GET からの生成を防ぎます（#113）。
   **同じマシンのプログラムからの操作は止めません**（認証が無いという前提は `SECURITY.md` のとおり）
 - 検査は `backend/tests/test_host_guard.py`（名前・IP・IPv6 の `Host`、同じオリジン・開発用・別のサイトの `Origin`、
   WebSocket を 1008 で閉じるか、GET と `Origin` の無い接続を通すか）

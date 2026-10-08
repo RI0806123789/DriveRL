@@ -2,7 +2,9 @@
 
 import { create } from 'zustand'
 
-export type ExportKind = 'checkpoint' | 'torchscript' | 'pt2' | 'keras'
+import type { ExportKind } from '../types/protocol'
+
+export type { ExportKind } from '../types/protocol'
 
 /** サーバーがファイル名を返さなかったときの名前 */
 const FALLBACK_FILENAME: Record<ExportKind, string> = {
@@ -51,8 +53,9 @@ export async function downloadModel(kind: ExportKind): Promise<ExportOutcome> {
   let response: Response
   try {
     response = await fetch(`/api/export/${kind}`, {
-      method: 'GET',
-      headers: { Accept: 'application/octet-stream' },
+      method: 'POST',
+      headers: { Accept: 'application/octet-stream', 'Content-Type': 'application/json' },
+      body: '{}',
     })
   } catch (e) {
     return {

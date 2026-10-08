@@ -13,7 +13,7 @@ from pathlib import PurePath
 from typing import Any
 
 import orjson
-from fastapi import FastAPI, File, Request, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
@@ -21,6 +21,7 @@ from app import config
 from app.contracts import InterventionEvent
 from app.contracts import coerce_bool, validate_hidden_sizes
 from app.host_guard import HostOriginGuard
+from app.model_upload import MAX_UPLOAD_BYTES, UPLOAD_ERROR_MESSAGES, UploadRejected, read_model_upload
 from app.runtime.autotune import TUNED_WIRE_KEYS
 from app.runtime.engine import SimulationEngine
 from app.runtime.param_store import ParamStore
@@ -637,9 +638,13 @@ async def health() -> JSONResponse:
     )
 
 
-@app.get("/api/export/{kind}")
-async def export_model_endpoint(kind: str):
+@app.post("/api/export/{kind}")
+async def export_model_endpoint(kind: str, request: Request):
     """学習済みモデルを書き出してダウンロードさせる。"""
+    media_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if media_type != "application/json":
+        return JSONResponse({"error": "Content-Type は application/json にしてください"}, status_code=415)
+
     from app.rl.export import EXPORT_KINDS
 
     if kind not in EXPORT_KINDS:
@@ -687,9 +692,18 @@ async def export_model_endpoint(kind: str):
 
 
 @app.post("/api/import")
-async def import_model_endpoint(file: UploadFile = File(...)):
+async def import_model_endpoint(request: Request):
     """書き出したモデルを受け取り、その状態から学習を再開する。"""
-    from app.rl.importer import MAX_UPLOAD_BYTES
+    try:
+        async with read_model_upload(request) as file:
+            return await _import_model_file(file)
+    except UploadRejected as exc:
+        status_code = exc.status_code
+    return JSONResponse({"ok": False, "error": UPLOAD_ERROR_MESSAGES[status_code]}, status_code=status_code)
+
+
+async def _import_model_file(file: UploadFile):
+    """受信済みのモデルを保存し、エンジンへ渡す。"""
 
     stamp = time.strftime("%Y%m%d-%H%M%S")
     safe_name = _safe_upload_name(file.filename)

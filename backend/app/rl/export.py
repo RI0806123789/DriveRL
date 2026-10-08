@@ -19,6 +19,7 @@ import torch
 import torch.nn as nn
 
 from app import config
+from app.contracts import MODEL_EXPORT_KINDS
 from app.rl.policy import ActorCritic
 from app.rl.ppo import CHECKPOINT_FORMAT
 from app.warn import warn_once
@@ -38,7 +39,7 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-EXPORT_KINDS = ("checkpoint", "torchscript", "pt2", "keras")
+EXPORT_KINDS = MODEL_EXPORT_KINDS
 
 #: torch.export の初回に読み込まれる重いモジュール。HTTP 側で先に読み、エンジンスレッドでの初回の書き出しを軽くする
 PT2_PRELOAD_MODULES = (

@@ -91,5 +91,46 @@ class TestMiddleware:
         assert run({"type": "http", "method": "GET", "path": "/", "headers": headers(host="127.0.0.1:8000", origin="https://evil.example")})[1]
         assert run({"type": "http", "method": "POST", "path": "/api/import", "headers": headers(host="127.0.0.1:8000")})[1]
 
+    @pytest.mark.parametrize("method", ["POST", "PUT", "PATCH", "DELETE"])
+    @pytest.mark.parametrize("path", ["/api/import", "/api/export/checkpoint"])
+    def test_cross_site_without_origin_is_rejected(self, method: str, path: str) -> None:
+        sent, reached = run({
+            "type": "http", "method": method, "path": path,
+            "headers": headers(host="127.0.0.1:8000", **{"sec-fetch-site": "cross-site"}),
+        })
+        assert not reached and sent[0]["status"] == 403
+
+    def test_cross_site_websocket_without_origin_is_closed(self) -> None:
+        sent, reached = run({
+            "type": "websocket", "path": "/ws",
+            "headers": headers(host="127.0.0.1:8000", **{"sec-fetch-site": "cross-site"}),
+        })
+        assert not reached
+        assert sent == [{"type": "websocket.close", "code": 1008}]
+
+    @pytest.mark.parametrize("origin", ORIGINS + ["http://127.0.0.1:8000"])
+    def test_allowed_origin_passes_even_with_cross_site_metadata(self, origin: str) -> None:
+        _, reached = run({
+            "type": "http", "method": "POST", "path": "/api/export/checkpoint",
+            "headers": headers(host="127.0.0.1:8000", origin=origin, **{"sec-fetch-site": "cross-site"}),
+        })
+        assert reached
+
+    @pytest.mark.parametrize("fetch_site", ["same-origin", "same-site", "none"])
+    def test_non_cross_site_without_origin_passes(self, fetch_site: str) -> None:
+        _, reached = run({
+            "type": "http", "method": "POST", "path": "/api/export/checkpoint",
+            "headers": headers(host="127.0.0.1:8000", **{"sec-fetch-site": fetch_site}),
+        })
+        assert reached
+
+    @pytest.mark.parametrize("method", ["GET", "HEAD", "OPTIONS"])
+    def test_read_only_cross_site_requests_pass(self, method: str) -> None:
+        _, reached = run({
+            "type": "http", "method": method, "path": "/",
+            "headers": headers(host="127.0.0.1:8000", **{"sec-fetch-site": "cross-site"}),
+        })
+        assert reached
+
     def test_lifespan_is_untouched(self) -> None:
         assert run({"type": "lifespan"})[1]

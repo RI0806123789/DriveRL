@@ -1,4 +1,4 @@
-# WebSocket プロトコル仕様 v2
+# WebSocket プロトコル仕様 v3
 
 バックエンド（FastAPI）とフロントエンド（React/Three.js）の間の**唯一の契約**。
 両側の実装はこの文書に厳密に従うこと。破壊的変更を行う場合は `protocolVersion` を上げる。
@@ -53,7 +53,7 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
 ```jsonc
 {
   "type": "init",
-  "protocolVersion": 2,
+  "protocolVersion": 3,
   "presets": [
     {
       "id": "ginza",
@@ -1103,7 +1103,9 @@ Optuna が入っていない・いまの重みに NaN / Inf がある、のど�
   片方だけにすると、「迎えには来るが目の前で止まらない」か
   「止まるが迎えに行く先が決まらない」のどちらかになる。
 
-`protocolVersion` は **2** である。`taxi` を足したときは 1 のままでよかった
+`protocolVersion` は **3** である。モデル書き出しを GET から JSON の POST へ変更したため上げた（#113）。
+
+2 へ上げた経緯: `taxi` を足したときは 1 のままでよかった
 （新しいメッセージ型と増えたキーは、クライアントが無視できる）が、NPC 歩行者の導入で
 **`detections.cls` の値域が 0〜4 から 0〜5 に広がった**ため上げた。古いクライアントは
 `cls: 5` を既定の「障害物」として描いてしまい、黙って間違った画面になる。
@@ -1145,22 +1147,27 @@ WebSocket に載せないものはここに置く。バイナリの受け渡し�
 
 - `Host` が IP アドレスそのもの・`localhost`・`DRIVERL_ALLOWED_HOSTS` の名前でなければ `403`（DNS リバインディング対策）
 - `/ws` と、状態を変える HTTP（POST / PUT / PATCH / DELETE）は、`Origin` が同じオリジン（`Origin` の `ホスト:ポート` が `Host` と同じ）か
-  `config.CORS_ORIGINS`（開発用の Vite）でなければ断る（WebSocket は接続を 1008 で閉じる、HTTP は `403`）。`Origin` が無い接続は通す
+  `config.CORS_ORIGINS`（開発用の Vite）でなければ断る（WebSocket は接続を 1008 で閉じる、HTTP は `403`）。
+  `Origin` が無い場合も `Sec-Fetch-Site: cross-site` は断る。両方のヘッダが無い curl・スクリプトは通す
 
 ### `GET /api/health`
 
 ```jsonc
 {
   "status": "ok",
-  "protocolVersion": 2,
+  "protocolVersion": 3,
   "connections": 1,
   "engine": { /* 2.4 の status ペイロードと同じ形 */ }
 }
 ```
 
-### `GET /api/export/{kind}` — 学習済みモデルの書き出し
+### `POST /api/export/{kind}` — 学習済みモデルの書き出し
 
-`kind` は `checkpoint` / `torchscript` / `pt2` / `keras`。
+`kind` は `checkpoint` / `torchscript` / `pt2` / `keras`（`contracts.MODEL_EXPORT_KINDS` / `protocol.ts` の `ExportKind`）。
+`Content-Type: application/json` を必須とし、画面は本文 `{}` を送る。JSON ヘッダが無ければ `415`。
+GET / HEAD では生成・トレース・世代削除を行わない。以前の GET を使うクライアントは POST へ変更すること。
+ブラウザの単純なフォーム送信では JSON ヘッダを付けられず、別オリジンからの JSON 要求には CORS のプリフライトが必要になる。
+許可した Vite の Origin は利用できる。
 
 | kind | 中身 | 用途 |
 |---|---|---|
@@ -1226,7 +1233,13 @@ model(obs: float32[B, 111]) -> [action: float32[B, 2], value: float32[B]]
 
 ### `POST /api/import` — 書き出したモデルから学習を再開
 
-`multipart/form-data` で `file` に **`checkpoint` 形式の `.pt`** を送る。
+`multipart/form-data` で `file` に **`checkpoint` 形式の `.pt`** を 1 つだけ送る。
+ほかのファイル欄・通常のフォーム欄は受け付けない（`400`）。Content-Type が違う場合は `415`。
+ファイル単体は `model_upload.MAX_UPLOAD_BYTES`（256MiB）、本文全体はそれに
+`MAX_MULTIPART_OVERHEAD_BYTES`（64KiB）を足した `MAX_IMPORT_BODY_BYTES` が上限。
+Content-Length が上限を超えていれば受信前に `413` とし、無い・小さく申告された場合も
+受信した累積バイト数を multipart 解析へ渡す前に検査する。ファイル単体の超過も解析中、書き込み前に `413` にする。
+解析中に拒否・切断・中断した場合は、そこまでの一時ファイルを閉じる。
 TorchScript・torch.export（`.pt2`）・Keras 形式を渡した場合は、その旨を説明する `400` を返す。
 
 成功時（`200`）:

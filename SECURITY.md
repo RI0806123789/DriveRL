@@ -39,7 +39,11 @@ PyTorch の `torch.load` は既定で pickle を実行するため、細工さ�
   `torch.jit.load()` を呼んでおり、**上の宣言の唯一の例外**になっていました。
 - ファイル名はディレクトリ区切りや `..` を取り除いてから保存します
   （`backend/app/main.py` の `_safe_upload_name`）。保存先を抜け出すことはできません。
-- アップロードサイズの上限は 256MB です。超えた時点で書き込みを打ち切ります。
+- アップロードは `file` 欄の 1 ファイルだけを受け付けます。ファイルは 256MiB、本文全体は付帯情報用の 64KiB を加えた容量までです
+  （唯一の出典: `backend/app/model_upload.py` の `MAX_UPLOAD_BYTES` / `MAX_MULTIPART_OVERHEAD_BYTES` / `MAX_IMPORT_BODY_BYTES`）。
+  Content-Length の事前検査と、受信中の累積検査を multipart 解析より先に行い、超過時は `413` で打ち切ります。
+  ファイル単体の上限も解析中に書き込み前に検査し、複数ファイル・余分なフォーム欄は拒否します。
+  途中で拒否・切断・中断した場合も解析用の一時ファイルを閉じます。
 
 それでも、**出所の分からないモデルファイルは読み込まないでください。**
 読み込むのは自分が書き出したファイルか、信頼できる相手から受け取ったものだけにしてください。
@@ -132,8 +136,11 @@ GET 以外のリクエストも素通しします。WebSocket（`/ws`）も Serv
 | 別のサイトがフォームで `POST /api/import` などを送る | 状態を変える HTTP（POST / PUT / PATCH / DELETE）も同じ条件で `Origin` を確かめ、違えば 403 |
 | DNS リバインディング（攻撃者のドメイン名を 127.0.0.1 に向け直し、同じオリジンに見せかける）| `Host` が IP アドレスそのもの・`localhost`・`DRIVERL_ALLOWED_HOSTS` に書いた名前でなければ、HTTP も WebSocket も 403 |
 
-`Origin` を付けない接続（curl やスクリプト）は通します。ブラウザは WebSocket と POST に必ず `Origin` を付けるので、
-ブラウザ越しの攻撃はこれで止まります。**同じマシン・同じネットワークで動くプログラムからの操作は止められません**
+`Origin` が無い場合も `Sec-Fetch-Site: cross-site` があれば拒否します。
+どちらのヘッダも無い curl やスクリプトは通します。
+モデル書き出しは `POST /api/export/{kind}` とし、`Content-Type: application/json` を必須にしています。
+GET / HEAD からはモデル生成・トレース・古い世代の削除を起動できません。Origin の無いフォーム送信も JSON ヘッダの検査で拒否し、
+別オリジンからの JSON 要求は CORS のプリフライトと Origin の検査を通る必要があります。**同じマシン・同じネットワークで動くプログラムからの操作は止められません**
 （認証が無いのは上の前提のとおりです）。
 
 認識器の再学習（`start_detector_training`）は**数分間 CPU を占有し、完了して検証に

@@ -12,13 +12,12 @@ import zipfile
 import torch
 
 from app import config
+from app.model_upload import MAX_UPLOAD_BYTES
 from app.rl.ppo import KNOWN_CHECKPOINT_FORMATS
 
 __all__ = ["CheckpointImportError", "CheckpointInfo", "inspect_checkpoint", "MAX_UPLOAD_BYTES"]
 
 logger = logging.getLogger(__name__)
-
-MAX_UPLOAD_BYTES = 256 * 1024 * 1024
 
 
 class CheckpointImportError(RuntimeError):

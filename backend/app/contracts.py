@@ -10,6 +10,8 @@ import numpy as np
 
 from app import config
 
+MODEL_EXPORT_KINDS = ("checkpoint", "torchscript", "pt2", "keras")
+
 
 @dataclass(frozen=True)
 class MapPreset:
