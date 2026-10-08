@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import logging
+import re
 import time
 from pathlib import Path
 from dataclasses import replace
@@ -33,7 +34,16 @@ class MapLoadError(RuntimeError):
     """OSM の取得・正規化に失敗したときに投げる。"""
 
 
-CACHE_VERSION = 11
+CACHE_VERSION = 12
+
+_SIGN_TAGS = (
+    "traffic_sign", "traffic_sign:forward", "traffic_sign:backward",
+    "traffic_sign:direction", "direction", "crossing", "stop", "stop:direction",
+)
+_PARKING_SIGN_TAGS = tuple(
+    f"parking:{side}:restriction" for side in ("left", "right", "both")
+) + tuple(f"parking:condition:{side}" for side in ("left", "right", "both"))
+SIGN_BOARD_SPACING_M = 1.0
 
 _DEFAULT_LANES: dict[str, int] = {
     "motorway": 3,
@@ -126,6 +136,8 @@ def _fetch_and_normalize(preset: MapPreset) -> MapData:
 
     ox.settings.use_cache = True
     ox.settings.cache_folder = str(config.OSMNX_CACHE_DIR)
+    ox.settings.useful_tags_node = list(dict.fromkeys(ox.settings.useful_tags_node + list(_SIGN_TAGS)))
+    ox.settings.useful_tags_way = list(dict.fromkeys(ox.settings.useful_tags_way + list(_SIGN_TAGS) + list(_PARKING_SIGN_TAGS)))
 
     center = (preset.center_lat, preset.center_lon)
     dist = float(preset.radius_m)
@@ -135,7 +147,7 @@ def _fetch_and_normalize(preset: MapPreset) -> MapData:
             center,
             dist=dist,
             network_type="drive",
-            simplify=True,
+            simplify=False,
             truncate_by_edge=False,
             retain_all=False,
         )
@@ -145,6 +157,14 @@ def _fetch_and_normalize(preset: MapPreset) -> MapData:
         ) from exc
 
     try:
+        for _node_id, attrs in graph.nodes(data=True):
+            if _node_has_sign(attrs):
+                attrs["driverl_sign"] = True
+        graph = ox.simplify_graph(
+            graph,
+            node_attrs_include=["driverl_sign"],
+            edge_attrs_differ=["traffic_sign", "traffic_sign:forward", "traffic_sign:backward", "traffic_sign:direction", "stop:direction", "direction", *_PARKING_SIGN_TAGS],
+        )
         projected = ox.project_graph(graph)
         crs = projected.graph["crs"]
         nodes_gdf, edges_gdf = ox.graph_to_gdfs(projected)
@@ -201,6 +221,7 @@ def _fetch_and_normalize(preset: MapPreset) -> MapData:
         at_all_intersections=preset.signals_at_all_intersections,
     )
     signs = _build_speed_signs(edges)
+    signs.extend(_build_traffic_signs(nodes_gdf, raw_edges, remap, edges, start_id=len(signs), existing_signs=signs))
 
     bounds = _compute_bounds(nodes, edges, buildings)
 
@@ -278,6 +299,8 @@ def _collect_edges(
             "speed_limit": float(speed_limit),
             "polyline": polyline,
             "length": float(length),
+            "sign_tags": {tag: row.get(tag) for tag in _SIGN_TAGS + _PARKING_SIGN_TAGS},
+            "reversed": _tag_is_reversed(row.get("reversed")),
         }
 
     return best
@@ -648,6 +671,197 @@ def _build_speed_signs(edges: Sequence[MapEdge]) -> list[MapSign]:
     return signs
 
 
+def _sign_tokens(value: Any) -> set[str]:
+    """国別コードの接頭辞を補い、複数の標識タグを分ける。"""
+    tokens: set[str] = set()
+    for item in _iter_tag_values(value):
+        country = ""
+        for token in re.split(r"[;,]", str(item).strip().lower()):
+            token = token.strip().split("[", 1)[0]
+            if ":" in token:
+                country = token.split(":", 1)[0]
+            elif country and token[:1].isdigit():
+                token = f"{country}:{token}"
+            if token:
+                tokens.add(token)
+    return tokens
+
+
+def _tag_is_reversed(value: Any) -> bool:
+    return any(str(item).strip().lower() == "true" for item in _iter_tag_values(value))
+
+
+def _node_has_sign(tags: Any) -> bool:
+    return bool(_sign_tokens(tags.get("highway")) & {"stop", "crossing"}) or any(
+        _sign_tokens(tags.get(key)) for key in ("traffic_sign", "traffic_sign:forward", "traffic_sign:backward")
+    )
+
+
+def _sign_specs(tags: Any, forward: bool, *, node: bool = False) -> list[tuple[str, str]]:
+    """OSM タグを標識の種類と矢印方向へ正規化する。"""
+    values = _sign_tokens(tags.get("traffic_sign")) | _sign_tokens(
+        tags.get("traffic_sign:forward" if forward else "traffic_sign:backward")
+    )
+    directional_signs = any(_sign_tokens(tags.get(key)) for key in ("traffic_sign:forward", "traffic_sign:backward"))
+    if node and not directional_signs:
+        if "stop" in _sign_tokens(tags.get("highway")):
+            values.add("stop")
+        if "crossing" in _sign_tokens(tags.get("highway")) and "no" not in _sign_tokens(tags.get("crossing")):
+            values.add("crosswalk")
+    aliases = {
+        "stop": "stop", "jp:330": "stop", "jp:330-a": "stop", "jp:330-b": "stop",
+        "crosswalk": "crosswalk", "pedestrian_crossing": "crosswalk", "jp:407-a": "crosswalk", "jp:407-b": "crosswalk",
+        "one_way": "one_way", "oneway": "one_way", "jp:326": "one_way", "jp:326-a": "one_way", "jp:326-b": "one_way",
+        "no_parking": "no_parking", "jp:316": "no_parking",
+        "no_stopping": "no_stopping", "jp:315": "no_stopping",
+    }
+    arrows = {
+        "only_straight_on": "straight", "straight_only": "straight",
+        "only_left_turn": "left", "mandatory_left": "left",
+        "only_right_turn": "right", "mandatory_right": "right",
+        "left_or_straight": "left_or_straight", "right_or_straight": "right_or_straight",
+        "left_or_right": "left_or_right",
+    }
+    specs = {(aliases[value], "straight") for value in values if value in aliases}
+    specs.update(("mandatory_direction", arrows[value]) for value in values if value in arrows)
+    if any(value.startswith("jp:311") for value in values) and not any(kind == "mandatory_direction" for kind, _direction in specs):
+        warn_once("map.mandatory_direction", "指定方向外進行禁止の矢印が不明な OSM タグは配置を省略します")
+    return sorted(specs)
+
+
+def _sign_applies(tags: Any, forward: bool, heading: float) -> bool:
+    """道路の順方向・逆方向または標識の正面方位で対象の進入路を選ぶ。"""
+    values = set()
+    for key in ("traffic_sign:direction", "stop:direction", "direction"):
+        values = _sign_tokens(tags.get(key))
+        if values:
+            break
+    if not values or "both" in values:
+        return True
+    if "forward" in values or "backward" in values:
+        return ("forward" in values and forward) or ("backward" in values and not forward)
+    cardinal = {"n": 0, "ne": 45, "e": 90, "se": 135, "s": 180, "sw": 225, "w": 270, "nw": 315}
+    for value in values:
+        try:
+            degrees = float(cardinal[value] if value in cardinal else value)
+        except ValueError:
+            continue
+        travel = math.pi / 2 - math.radians(degrees) + math.pi
+        if math.cos(travel - heading) > math.cos(math.pi / 4):
+            return True
+    return False
+
+
+def _build_traffic_signs(
+    nodes_gdf: Any,
+    raw_edges: dict[tuple[int, int], dict[str, Any]],
+    remap: dict[int, int],
+    edges: Sequence[MapEdge],
+    *,
+    start_id: int = 0,
+    existing_signs: Sequence[MapSign] = (),
+) -> list[MapSign]:
+    """OSM の道路・ノードの標識を進入方向ごとに生成し、同じ位置の重複を除く。"""
+    raw_by_hop = {(remap[u], remap[v]): attrs for (u, v), attrs in raw_edges.items()}
+    incoming: dict[int, dict[int, tuple[MapEdge, list[tuple[float, float]], bool]]] = {}
+    outgoing: dict[int, dict[int, tuple[MapEdge, list[tuple[float, float]], bool]]] = {}
+    directed = []
+    for edge in edges:
+        if edge.u == edge.v or len(edge.polyline) < 2:
+            continue
+        attrs = raw_by_hop.get((edge.u, edge.v), {})
+        for forward in (True,) if edge.oneway else (True, False):
+            entry, exit_node = (edge.u, edge.v) if forward else (edge.v, edge.u)
+            points = list(edge.polyline) if forward else list(reversed(edge.polyline))
+            way_forward = forward != bool(attrs.get("reversed", False))
+            item = (edge, points, way_forward)
+            incoming.setdefault(exit_node, {}).setdefault(entry, item)
+            outgoing.setdefault(entry, {}).setdefault(exit_node, item)
+            directed.append((entry, exit_node, item, attrs.get("sign_tags", {})))
+
+    signs: list[MapSign] = []
+    seen: set[tuple] = set()
+    occupied: dict[tuple[int, int], list[tuple[float, float, float]]] = {}
+
+    def reserve(px, py, heading):
+        occupied.setdefault((math.floor(px), math.floor(py)), []).append((px, py, heading))
+
+    def overlaps(px, py, heading):
+        col, row = math.floor(px), math.floor(py)
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for sx, sy, sh in occupied.get((col + dx, row + dy), ()):
+                    if (px - sx) ** 2 + (py - sy) ** 2 < (SIGN_BOARD_SPACING_M - 1e-6) ** 2 and math.cos(heading - sh) > 0.95:
+                        return True
+        return False
+
+    for sign in existing_signs:
+        reserve(sign.x, sign.y, sign.heading)
+
+    def add(edge, points, node_id, kind, direction, *, at_exit=False, side=1):
+        path = list(reversed(points)) if at_exit else points
+        setback = 3.0 if at_exit else config.SPEED_SIGN_SETBACK_M
+        (px, py), heading = _point_after_start(path, min(setback, edge.length / 2))
+        if at_exit:
+            heading = math.atan2(-math.sin(heading), -math.cos(heading))
+        offset = side * (edge.width / 2 + config.SPEED_SIGN_SIDE_MARGIN)
+        px -= math.sin(heading) * offset
+        py += math.cos(heading) * offset
+        key = (round(px, 3), round(py, 3), round(heading, 3), kind, direction)
+        if key in seen:
+            return
+        seen.add(key)
+        while overlaps(px, py, heading):
+            px -= side * math.sin(heading) * SIGN_BOARD_SPACING_M
+            py += side * math.cos(heading) * SIGN_BOARD_SPACING_M
+        reserve(px, py, heading)
+        signs.append(MapSign(start_id + len(signs), node_id, edge.id, px, py, heading, kind=kind, direction=direction))
+
+    for entry, exit_node, (edge, points, forward), tags in directed:
+        specs = _sign_specs(tags, forward)
+        if edge.oneway:
+            add(edge, points, entry, "one_way", "straight")
+        for kind, direction in specs:
+            at_exit = kind in {"stop", "crosswalk", "mandatory_direction"}
+            path = list(reversed(points)) if at_exit else points
+            _, heading = _point_after_start(path, min(3.0, edge.length / 2))
+            if at_exit:
+                heading += math.pi
+            if _sign_applies(tags, forward, heading):
+                add(edge, points, exit_node if at_exit else entry, kind, direction, at_exit=at_exit)
+        for side in ("left", "right", "both"):
+            restrictions = _sign_tokens(tags.get(f"parking:{side}:restriction")) | _sign_tokens(tags.get(f"parking:condition:{side}"))
+            for kind in sorted(restrictions & {"no_parking", "no_stopping"}):
+                relative_side = 1 if side == "both" or (side == "left") == forward else -1
+                add(edge, points, entry, kind, "straight", side=relative_side)
+
+    for osmid, tags in nodes_gdf.iterrows():
+        node_id = remap.get(int(osmid))
+        if node_id is None or not _node_has_sign(tags):
+            continue
+        approaches = incoming.get(node_id, {})
+        has_direction = any(_sign_tokens(tags.get(key)) for key in ("direction", "stop:direction", "traffic_sign:direction", "traffic_sign:forward", "traffic_sign:backward"))
+        for edge, points, forward in approaches.values():
+            _, heading = _point_after_start(list(reversed(points)), min(3.0, edge.length / 2))
+            heading += math.pi
+            if not _sign_applies(tags, forward, heading):
+                continue
+            for kind, direction in _sign_specs(tags, forward, node=True):
+                if kind == "one_way":
+                    continue
+                if kind == "stop" and not has_direction and "all" not in _sign_tokens(tags.get("stop")) and len(approaches) > 1:
+                    warn_once("map.stop_direction", "一時停止標識の進入方向が不明な OSM ノードは配置を省略します")
+                    continue
+                add(edge, points, node_id, kind, direction, at_exit=True)
+        for edge, points, forward in outgoing.get(node_id, {}).values():
+            for kind, direction in _sign_specs(tags, forward, node=True):
+                if kind == "one_way":
+                    _, heading = _point_after_start(points, min(3.0, edge.length / 2))
+                    if _sign_applies(tags, forward, heading):
+                        add(edge, points, node_id, kind, direction)
+    return signs
+
+
 def _collect_buildings(
     buildings_gdf: Any, origin_x: float, origin_y: float
 ) -> list[MapBuilding]:
@@ -1005,6 +1219,8 @@ def _to_cache_dict(data: MapData) -> dict[str, Any]:
                 round(sn.y, 3),
                 round(sn.heading, 4),
                 round(sn.speed_limit, 3),
+                sn.kind,
+                sn.direction,
             ]
             for sn in data.signs
         ],
@@ -1073,6 +1289,8 @@ def _from_cache_dict(payload: dict[str, Any], preset: MapPreset) -> MapData:
             y=float(sn[4]),
             heading=float(sn[5]),
             speed_limit=float(sn[6]),
+            kind=str(sn[7]) if len(sn) > 7 else "speed_limit",
+            direction=str(sn[8]) if len(sn) > 8 else "straight",
         )
         for sn in payload.get("signs", [])
     ]

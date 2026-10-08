@@ -13,7 +13,7 @@ import numpy as np
 
 from app import config
 from app.percep.evaluate import _attribute_ok, _match
-from app.percep.types import DEFAULT_CAMERA, DetClass, Detection, PerceptionResult
+from app.percep.types import DEFAULT_CAMERA, SIGN_DIRECTIONS, DetClass, Detection, PerceptionResult
 
 
 @dataclass(frozen=True)
@@ -85,6 +85,8 @@ def _validate_detection(detection: Detection) -> None:
     if detection.phase is not None:
         if isinstance(detection.phase, bool) or _number(detection.phase, "phase") not in (0, 1, 2):
             raise ValueError("灯色は 0・1・2 にしてください")
+    if detection.direction is not None and detection.direction not in SIGN_DIRECTIONS:
+        raise ValueError("標識の矢印は所定の方向にしてください")
     for key in ("speed_limit", "distance", "lateral"):
         value = getattr(detection, key)
         if value is not None and (_number(value, key) < 0 and key != "lateral"):
@@ -150,7 +152,7 @@ def _label(value: Any) -> PerceptionResult | None:
         raise ValueError("detections はリストにしてください。教師が無い場合は null にしてください")
     detections = []
     for item in value:
-        if not isinstance(item, dict) or set(item) - {"cls", "box", "conf", "phase", "speedLimit", "distance", "lateral", "lanePoints"}:
+        if not isinstance(item, dict) or set(item) - {"cls", "box", "conf", "phase", "speedLimit", "direction", "distance", "lateral", "lanePoints"}:
             raise ValueError("検出の教師に未知の欄があります")
         cls = item.get("cls")
         if isinstance(cls, bool) or not isinstance(cls, (int, str)):
@@ -162,7 +164,7 @@ def _label(value: Any) -> PerceptionResult | None:
         box = item.get("box")
         if not isinstance(box, list) or len(box) != 4:
             raise ValueError("box は 4 個の正規化座標にしてください")
-        detection = Detection(cls, *box, item.get("conf", 1.0), phase=item.get("phase"), speed_limit=item.get("speedLimit"), distance=item.get("distance"), lateral=item.get("lateral"), lane_points=item.get("lanePoints"))
+        detection = Detection(cls, *box, item.get("conf", 1.0), phase=item.get("phase"), speed_limit=item.get("speedLimit"), direction=item.get("direction"), distance=item.get("distance"), lateral=item.get("lateral"), lane_points=item.get("lanePoints"))
         _validate_detection(detection)
         detections.append(detection)
     return PerceptionResult(0, detections)
@@ -269,6 +271,7 @@ def _sample_digest(sample: ImageSample) -> str:
                 "confidence": float(detection.confidence),
                 "phase": None if detection.phase is None else int(detection.phase),
                 "speedLimit": None if detection.speed_limit is None else float(detection.speed_limit),
+                "direction": detection.direction,
                 "distance": None if detection.distance is None else float(detection.distance),
                 "lateral": None if detection.lateral is None else float(detection.lateral),
                 "lanePoints": None if detection.lane_points is None else [[float(x), float(y)] for x, y in detection.lane_points],

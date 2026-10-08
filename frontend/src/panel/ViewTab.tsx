@@ -141,11 +141,11 @@ export function ViewTab() {
           onChange={() => toggleView('signals')}
         />
         <Switch
-          label="最高速度標識"
+          label="交通標識"
           description={
             map?.signs?.length
-              ? `${map.signs.length} 基。規制速度が変わる進入口に立っています`
-              : '規制標識「最高速度」（白地の円に赤縁・直径 60cm、下端は路面から 1.8m）'
+              ? `${map.signs.length} 基。速度・一時停止・横断歩道・通行方向・駐車や停車の禁止を表示します`
+              : '最高速度・一時停止・横断歩道・一方通行・指定方向・駐車禁止・駐停車禁止'
           }
           checked={view.showSigns}
           onChange={() => toggleView('showSigns')}

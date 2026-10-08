@@ -8,6 +8,7 @@ import type {
   MapPreset,
   MapSign,
   MapSignal,
+  SignKind,
   Vec2,
 } from '../../types/protocol.ts'
 import { SIGNAL_GREEN, SIGNAL_RED, SIGNAL_YELLOW } from '../../types/protocol.ts'
@@ -161,6 +162,12 @@ export function buildMockMap(presetId: string, name: string): MapMessage {
     }
   }
 
+  const signs = buildMockSpeedSigns(nodes, edges)
+  const signKinds: SignKind[] = ['stop', 'crosswalk', 'one_way', 'mandatory_direction', 'no_parking', 'no_stopping']
+  for (const [i, kind] of signKinds.entries()) {
+    const source = signs[i * Math.max(1, Math.floor(signs.length / signKinds.length))]
+    if (source) signs.push({ ...source, id: signs.length, x: source.x + 1, kind, speedLimit: 0, direction: kind === 'mandatory_direction' ? 'left_or_straight' : 'straight' })
+  }
   return {
     type: 'map',
     presetId,
@@ -175,7 +182,7 @@ export function buildMockMap(presetId: string, name: string): MapMessage {
     edges,
     buildings,
     signals: buildMockSignals(nodes, edges),
-    signs: buildMockSpeedSigns(nodes, edges),
+    signs,
   }
 }
 
@@ -334,6 +341,7 @@ export class MockSignals {
     this.timing = []
     this.limits.clear()
     for (const sg of map.signs ?? []) {
+      if (sg.kind && sg.kind !== 'speed_limit') continue
       const gx = sg.nodeId % GRID_N
       const gy = Math.floor(sg.nodeId / GRID_N)
       const tx = gx + Math.round(Math.cos(sg.heading))

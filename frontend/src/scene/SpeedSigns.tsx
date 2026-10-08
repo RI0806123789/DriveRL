@@ -14,6 +14,7 @@ import {
   signSpeedKph,
 } from './signGeometry'
 import { usePalette } from './usePalette'
+import { TrafficSigns } from './TrafficSigns'
 
 /** 数字を焼くキャンバスの一辺 [px]。標示板は画面上で小さいのでこれで足りる */
 const TEXTURE_SIZE = 256
@@ -84,7 +85,8 @@ export function SpeedSigns() {
   const showSigns = useSimStore((s) => s.view.showSigns)
   const castShadow = useSimStore((s) => s.view.shadows)
 
-  const placed = showSigns ? signs : EMPTY_SIGNS
+  const visible = showSigns ? signs : EMPTY_SIGNS
+  const placed = useMemo(() => visible.filter((sign) => !sign.kind || sign.kind === 'speed_limit'), [visible])
 
   const groups = useMemo<SignGroup[]>(() => {
     if (placed.length === 0) return []
@@ -211,10 +213,11 @@ export function SpeedSigns() {
     boards.computeBoundingSphere()
   }, [placed, poleGeometry, poleMaterial, boardGeometry, boardMaterial])
 
-  if (placed.length === 0) return null
+  if (visible.length === 0) return null
 
   return (
     <group>
+      <TrafficSigns signs={visible} castShadow={castShadow} />
       <instancedMesh
         ref={poleRef}
         args={[poleGeometry, poleMaterial, placed.length]}

@@ -25,7 +25,7 @@ from app.percep.types import (
     PEDESTRIAN_HALF_WIDTH,
     PEDESTRIAN_HEIGHT,
     SIGN_BOARD_Z,
-    SIGN_RADIUS,
+    SIGN_CLASSES,
     SIGNAL_BEYOND_MARGIN,
     SIGNAL_HEAD_Z,
     SIGNAL_HOUSING_H,
@@ -37,6 +37,7 @@ from app.percep.types import (
     facing_viewer,
     pack_by_class_quota,
     signal_ahead_of_stop,
+    sign_half_extents,
 )
 from app.percep.weather import CLEAR, Weather
 from app.warn import warn_once
@@ -127,6 +128,9 @@ class _StaticScene:
     sign_across: np.ndarray
     sign_heading: np.ndarray
     sign_limit: np.ndarray
+    sign_class: np.ndarray
+    sign_half: np.ndarray
+    sign_direction: tuple[str, ...]
     #: 車ごとに候補を引く索引。金沢は標識 15,719 基・灯器 2,528 基あり、全部をなめると 4 視点で重い
     signal_grid: NeighborIndex
     sign_grid: NeighborIndex
@@ -171,6 +175,9 @@ def _build_static_scene(map_index) -> _StaticScene:
     across_sgn = np.zeros((len(signs), 2), dtype=np.float64)
     heading_sgn = np.zeros(len(signs), dtype=np.float64)
     limit = np.zeros(len(signs), dtype=np.float64)
+    classes = np.zeros(len(signs), dtype=np.int32)
+    half = np.zeros((len(signs), 2), dtype=np.float64)
+    directions = []
     for i, sgn in enumerate(signs):
         cos_h = math.cos(float(sgn.heading))
         sin_h = math.sin(float(sgn.heading))
@@ -178,6 +185,10 @@ def _build_static_scene(map_index) -> _StaticScene:
         across_sgn[i] = (-sin_h, cos_h)
         heading_sgn[i] = float(sgn.heading)
         limit[i] = float(sgn.speed_limit)
+        kind = getattr(sgn, "kind", "speed_limit")
+        classes[i] = int(SIGN_CLASSES[kind])
+        half[i] = sign_half_extents(kind)
+        directions.append(getattr(sgn, "direction", "straight"))
 
     return _StaticScene(
         signal_head=head,
@@ -188,6 +199,9 @@ def _build_static_scene(map_index) -> _StaticScene:
         sign_across=across_sgn,
         sign_heading=heading_sgn,
         sign_limit=limit,
+        sign_class=classes,
+        sign_half=half,
+        sign_direction=tuple(directions),
         # 灯器の頭と停止線は道幅の半分 + 2m ほど離れているので、その分だけ半径を足す
         signal_grid=NeighborIndex(head[:, 0], head[:, 1], STATIC_QUERY_RADIUS_M + 20.0),
         sign_grid=NeighborIndex(board[:, 0], board[:, 1], STATIC_QUERY_RADIUS_M),
@@ -362,7 +376,7 @@ def _detect_signals(
     return out
 
 
-def _detect_speed_signs(
+def _detect_signs(
     world: "World",
     spec: CameraSpec,
     pose: CameraPose,
@@ -371,7 +385,7 @@ def _detect_speed_signs(
     candidates: np.ndarray,
     max_distance: float,
 ) -> list[tuple[float, Detection]]:
-    """写っている最高速度標識。規制速度は `MapSign.speed_limit` の真値。"""
+    """写っている標識を、板の共通寸法と種類で教師ラベルにする。"""
     out: list[tuple[float, Detection]] = []
     if candidates.size == 0:
         return out
@@ -392,12 +406,13 @@ def _detect_speed_signs(
         i = int(candidates[k])
         center = scene.sign_board[i]
         across = scene.sign_across[i]
+        half_w, half_h = scene.sign_half[i]
         corners = np.array(
             [
-                [center[0] - across[0] * SIGN_RADIUS, center[1] - across[1] * SIGN_RADIUS, center[2] - SIGN_RADIUS],
-                [center[0] + across[0] * SIGN_RADIUS, center[1] + across[1] * SIGN_RADIUS, center[2] - SIGN_RADIUS],
-                [center[0] - across[0] * SIGN_RADIUS, center[1] - across[1] * SIGN_RADIUS, center[2] + SIGN_RADIUS],
-                [center[0] + across[0] * SIGN_RADIUS, center[1] + across[1] * SIGN_RADIUS, center[2] + SIGN_RADIUS],
+                [center[0] - across[0] * half_w, center[1] - across[1] * half_w, center[2] - half_h],
+                [center[0] + across[0] * half_w, center[1] + across[1] * half_w, center[2] - half_h],
+                [center[0] - across[0] * half_w, center[1] - across[1] * half_w, center[2] + half_h],
+                [center[0] + across[0] * half_w, center[1] + across[1] * half_w, center[2] + half_h],
             ],
             dtype=np.float64,
         )
@@ -408,10 +423,11 @@ def _detect_speed_signs(
             (
                 float(dist[k]),
                 Detection(
-                    cls=DetClass.SPEED_SIGN,
+                    cls=DetClass(int(scene.sign_class[i])),
                     x0=box[0], y0=box[1], x1=box[2], y1=box[3],
                     confidence=1.0,
-                    speed_limit=float(scene.sign_limit[i]),
+                    speed_limit=float(scene.sign_limit[i]) if scene.sign_class[i] == int(DetClass.SPEED_SIGN) else None,
+                    direction=scene.sign_direction[i] if scene.sign_class[i] in (int(DetClass.ONE_WAY_SIGN), int(DetClass.MANDATORY_DIRECTION_SIGN)) else None,
                     distance=float(dist[k]),
                 ),
             )
@@ -737,14 +753,12 @@ def detect_ground_truth_views(
                 DetClass.TRAFFIC_LIGHT,
                 _detect_signals(world, spec, pose, look, scene, signal_candidates, reach),
             ),
-            (
-                DetClass.SPEED_SIGN,
-                _detect_speed_signs(world, spec, pose, look, scene, sign_candidates, reach),
-            ),
             (DetClass.VEHICLE, _detect_vehicles(world, slot, spec, pose, look, reach)),
             (DetClass.OBSTACLE, _detect_obstacles(world, slot, spec, pose, look, reach)),
             (DetClass.PEDESTRIAN, _detect_pedestrians(world, slot, spec, pose, look, reach)),
         ]
+        sign_items = _detect_signs(world, spec, pose, look, scene, sign_candidates, reach)
+        buckets.extend((cls, [item for item in sign_items if item[1].cls == cls]) for cls in SIGN_CLASSES.values())
         if spec.yaw_deg == 0.0:
             lane = _detect_lane(world, slot, spec, pose, reach)
             if lane is not None:

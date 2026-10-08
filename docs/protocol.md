@@ -68,7 +68,7 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
     "maxVehicles": 8,       // 事前確保するエージェントスロット数
     "maxPedestrians": 64,   // 街を歩く NPC 歩行者の上限
     "simHz": 20,            // 物理・学習ステップの周波数
-    "obsDim": 87,
+    "obsDim": 111,
     "actionDim": 2
   },
   "weatherPresets": [       // 天候の選択肢。**(rain, fog) の数値はここが唯一の出典**
@@ -135,7 +135,9 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
       "edgeId": 4,             // この標識が規制する道路（edges[].id）への参照
       "x": 270.673, "y": -122.142, // 支柱の位置。進行方向の左側の路端
       "heading": -0.7141,      // 規制する側の進行方向 [rad]。標示板は heading + PI を向く
-      "speedLimit": 8.333      // 規制速度 [m/s]（= 30 km/h）
+      "speedLimit": 8.333,     // 最高速度標識の規制速度 [m/s]。ほかの種類は 0
+      "kind": "speed_limit", // 省略時は speed_limit
+      "direction": "straight" // 矢印が示す許可方向。省略時は straight
     }
   ]
 }
@@ -190,6 +192,27 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
   （道路標識、区画線及び道路標示に関する命令）。数字は **km/h の整数**で、
   `Math.round(speedLimit * 3.6)` で求める。この寸法と向きは
   `frontend/scripts/verify-sign-geometry.ts` で数値検証している
+
+**道路標識の種類と矢印**
+
+- `kind` は `speed_limit`（最高速度）/ `stop`（一時停止）/ `crosswalk`（横断歩道）/
+  `one_way`（一方通行）/ `mandatory_direction`（指定方向外進行禁止）/
+  `no_parking`（駐車禁止）/ `no_stopping`（駐停車禁止）。省略時は従来の最高速度標識。
+  `speedLimit` は最高速度標識だけで使い、ほかの種類では 0 を送る。
+- `direction` は標示板の矢印が許可する方向。`straight` / `left` / `right` /
+  `left_or_straight` / `right_or_straight` / `left_or_right`。省略時は `straight`。
+  `heading` が ENU 上の進行方位を示すのに対し、こちらは運転者から見た方向を表す。
+- 追加の標識は OSM の `highway=stop` / `highway=crossing`、`traffic_sign` とその方向別タグ、
+  一方通行の道路、および `parking:<left|right|both>:restriction`（旧形式の `parking:condition:*` も）から作る。
+  一時停止ノードの方向が不明で複数の進入路がある場合は、初回に警告して配置を省略する。
+  指定方向外進行禁止は `only_left_turn` / `only_right_turn` / `only_straight_on` 等の矢印タグを扱い、
+  矢印の判別できない `JP:311-*` は警告して省略する。
+  `stop=all` は全進入路に作る。駐車規制の左右は OSM の道路の向きに合わせ、右側の標識も配置できる。
+- 標識ノードは道路の簡略化で落とさず残す。キャッシュの版が古いマップには追加の標識が無いため、
+  再取得後に OSM のタグが反映される。標識の追加は経路の最高速度には影響せず、速度の区切りは
+  `kind=speed_limit` の標識だけから引く。
+- 同じ位置で同じ向きを向く異種の標識板は、既存の最高速度標識の位置を保ち、追加の標識を
+  路端方向へ 1m ずつずらす。板が完全に重なって描画と教師ラベルの種類が食い違うことを防ぐ。
 
 ### 2.3 `frame` — 走行状態（等倍で 20Hz、最大 60Hz）
 
@@ -365,8 +388,8 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
 - 非アクティブな車両はキーに含まれない。1 台もアクティブな車両がいない、または
   認識パイプラインが結果を返せなかったフレームでは `detections` 自体が省略される
 - 配列内はクラスごとの枠を守った優先度つきラウンドロビン順
-  （車線 → 信号 → 標識 → 歩行者 → 車両 → 障害物）。
-  `config.PERCEP_MAX_DETECTIONS`（15 件）で切り詰めても内訳が欠けないようにするため
+  （車線 → 信号 → 速度標識 → 歩行者 → 車両 → 障害物 → 新標識）。
+  上限は `config.PERCEP_MAX_DETECTIONS` が出典。新標識を足しても旧クラスの割り当てを保つ
 - **各クラス内は距離の昇順**（手前が先）。車線だけは面なので信頼度の降順。
   並びの出典は `backend/app/percep/types.py` の `pack_by_class_quota` 1 か所で、
   真値（`groundtruth`）と CNN（`detector`）のどちらから来ても同じ約束になる
@@ -385,11 +408,12 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
 
 | フィールド | 型 | 単位・値域 | 説明 |
 |---|---|---|---|
-| `cls` | number | 0〜5 | 検出クラス。`0`=信号機 / `1`=速度標識 / `2`=車両 / `3`=障害物 / `4`=車線 / `5`=歩行者 |
+| `cls` | number | 0〜11 | 検出クラス。`0`=信号機 / `1`=速度標識 / `2`=車両 / `3`=障害物 / `4`=車線 / `5`=歩行者 / `6`=一時停止 / `7`=横断歩道 / `8`=一方通行 / `9`=指定方向外進行禁止 / `10`=駐車禁止 / `11`=駐停車禁止 |
 | `box` | `[number, number, number, number]` | 正規化座標 0.0〜1.0 | `[x0, y0, x1, y1]`。左上が `(0,0)`、右下が `(1,1)` |
 | `conf` | number | 0.0〜1.0 | 信頼度 |
 | `phase` | number（省略可） | 0〜2 | **信号機のみ**。0=青 / 1=黄 / 2=赤。他クラスでは省略される |
 | `speedLimit` | number（省略可） | m/s | **速度標識のみ**。規制速度。表示は km/h に換算する（`Math.round(speedLimit * 3.6)`） |
+| `direction` | string（省略可） | `signs[].direction` と同じ値域 | **指定方向外進行禁止のみ**。カメラ画像から認識した矢印の許可方向 |
 | `distance` | number（省略可） | m | 推定距離。検出できなかった場合は省略される |
 | `lateral` | number（省略可） | m | **車線のみ**。車線中心からの横方向偏差（左が正） |
 | `lanePoints` | `[number, number][]`（省略可） | **自車座標系** `[前方+x, 左+y]`、単位 m | **車線のみ**。認識した車線中心線の点列（6 点）。起点は自車の真横（前方 0m）でそこから前方へ伸びる。車線幅は中心線から左右 1.6m（計 3.2m）相当。路面へ直接重ねて描くために使う（`frontend/src/scene/LaneDetectionOverlay.tsx`） |
@@ -433,7 +457,7 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
 - `shadows` の `dynamic` は検出した**車両**の陰（枠の左右の端の方位から、推定距離 `near` より奥）。パイロンと人は
   背後の車や人を隠さないので陰を作らない。`static` は走行可能距離の先（建物の陰か、霧で視程の外）。走行可能距離の
   当たりが検出した物体で説明できる方位（物体の距離と 3m 以内）は `static` にしない
-- `los` は左右のカメラの**見通し距離**（そのカメラの `seen` の奥行きの最大）。観測の末尾 8 次元（`OBS_LAYOUT` の
+- `los` は左右のカメラの**見通し距離**（そのカメラの `seen` の奥行きの最大）。観測の死角の 8 次元（`OBS_LAYOUT` の
   `occlusion`）と同じ値から作るので、画面と学習が食い違わない
 
 **`assist`（安全ギミックの介入）**
@@ -650,14 +674,14 @@ true のときの学習中の車だけ。判断は検出枠と推定距離から
 {
   "type": "network",
   "updates": 1234,
-  "obsDim": 87,
+  "obsDim": 111,
   "actionDim": 2,
   "hiddenSizes": [128, 128],
   "layers": [
     {
       "name": "policy_trunk.0",   // パラメータ名から `.weight` を除いたもの
       "role": "policy",           // "policy" | "value"
-      "inDim": 87,
+      "inDim": 111,
       "outDim": 128,
       "weightAbsMean": 0.0421,    // |w| の平均。学習が進むと動く
       "weightStd": 0.0688,
@@ -1104,6 +1128,9 @@ Optuna が入っていない・いまの重みに NaN / Inf がある、のど�
 見通しと死角（`frame.occlusion` / `watch_occlusion` / `assist` の `creep`）を足したときも 2 のまま据え置いた。
 古いクライアントは `occlusion` を無視し、`creep` は知らない介入として表示しないだけ。`config.obsDim` は 79 から 87 へ
 増えたが、欄を末尾に足したので **66・75・79 次元の重みも 0 で足して読み込める**（`config.OBS_WIDENABLE_DIMS`）。
+道路標識の種類と指定方向の認識（`map.signs[].kind` / `direction`、検出クラス 6〜11）を足したときも 2 のまま据え置いた。
+`config.obsDim` は 87 から 111 へ増えた。既存の 87 次元を保ち、末尾に新しい標識クラスの距離・方位・信頼度と、
+指定方向の認識を足す。**66・75・79・87 次元の重みは入力を 0 で足して読み込める**。
 
 不正なメッセージには `error` (`INVALID_MESSAGE`) を返し、接続は維持する。
 
@@ -1160,10 +1187,10 @@ WebSocket に載せないものはここに置く。バイナリの受け渡し�
 TorchScript 版と torch.export 版の入出力（どちらも同じ）：
 
 ```
-forward(obs: float32[B, 87]) -> (action: float32[B, 2], value: float32[B])
+forward(obs: float32[B, 111]) -> (action: float32[B, 2], value: float32[B])
 ```
 
-観測の次元（87）は `config.OBS_DIM` が出典で、書き出したメタデータの `model.obsDim` にも入る。
+観測の次元（111）は `config.OBS_DIM` が出典で、書き出したメタデータの `model.obsDim` にも入る。
 
 torch.export 版は `torch.export.load(path, extra_files={"metadata.json": ""}).module()` で呼べる形になる
 （`extra_files` に渡した辞書へメタデータの文字列が入る）。バッチ数 `B` は 1 以上の任意の値で呼べ、
@@ -1180,7 +1207,7 @@ torch.export 版は `torch.export.load(path, extra_files={"metadata.json": ""}).
 Keras 版の入出力：
 
 ```
-model(obs: float32[B, 87]) -> [action: float32[B, 2], value: float32[B]]
+model(obs: float32[B, 111]) -> [action: float32[B, 2], value: float32[B]]
 ```
 
 `value` の Dense(1) 出力は素のままだと `[B, 1]` になるが、TorchScript 版
@@ -1211,7 +1238,7 @@ TorchScript・torch.export（`.pt2`）・Keras 形式を渡した場合は、そ
   "sizeBytes": 578601,
   "checkpoint": {
     "updates": 585,
-    "obsDim": 87,
+    "obsDim": 111,
     "actionDim": 2,
     "hiddenSizes": [128, 128],
     "hasOptimizer": true,          // false だと学習の立ち上がりが鈍る

@@ -19,7 +19,8 @@ from app import config
 from app.contracts import SimParams
 from app.percep import detector as det
 from app.percep import openvino_backend as ovb
-from app.percep.types import CAMERAS_BY_KEY, DEFAULT_CAMERA, CameraSpec, DetClass
+from app.percep.evaluate import _attribute_ok, _match
+from app.percep.types import CAMERAS_BY_KEY, DEFAULT_CAMERA, SIGN_CLASSES, SIGN_DIRECTIONS, SIGN_LABELS, CameraSpec, DetClass
 from app.percep.weather import PRESETS, Weather
 from app.warn import warn_once
 
@@ -30,7 +31,7 @@ if TYPE_CHECKING:
 
 DATASET_FILE = "detector_dataset.npz"
 
-DATASET_VERSION = 4
+DATASET_VERSION = 5
 
 VALIDATION_SPLIT = 0.1
 
@@ -256,9 +257,9 @@ def _signal_approaches(env: "SimulationEnv") -> tuple[np.ndarray, np.ndarray]:
     return xy, heading
 
 
-def _sign_approaches(env: "SimulationEnv") -> tuple[np.ndarray, np.ndarray]:
-    """最高速度標識の座標と、そこへ向かう進行方向。"""
-    signs = env.world.map_index.data.signs
+def _sign_approaches(env: "SimulationEnv", cls: DetClass = DetClass.SPEED_SIGN) -> tuple[np.ndarray, np.ndarray]:
+    """指定した種類の標識の座標と、そこへ向かう進行方向。"""
+    signs = [s for s in env.world.map_index.data.signs if SIGN_CLASSES.get(getattr(s, "kind", "speed_limit")) == cls]
     if not signs:
         return np.zeros((0, 2), dtype=np.float64), np.zeros(0, dtype=np.float64)
     xy = np.array([(s.x, s.y) for s in signs], dtype=np.float64)
@@ -272,8 +273,8 @@ def arrange_scene(
     """狙うクラスに応じて車両とパイロンを置き直す。"""
     if focus is DetClass.TRAFFIC_LIGHT:
         _place_facing(env, rng, *_signal_approaches(env))
-    elif focus is DetClass.SPEED_SIGN:
-        _place_facing(env, rng, *_sign_approaches(env))
+    elif focus in SIGN_CLASSES.values():
+        _place_facing(env, rng, *_sign_approaches(env, focus))
     else:
         cluster_vehicles(env, rng, tight=focus is DetClass.VEHICLE)
     scatter_props(env, rng, focus=focus)
@@ -517,6 +518,7 @@ def make_detection_loss(keras, pos_weight: float = 20.0):
         cls_loss = masked_ce(y_true, y_pred, off_cls, n_cls, mask)
         phase_loss = masked_ce(y_true, y_pred, off_phase, n_phase, mask)
         speed_loss = masked_ce(y_true, y_pred, off_speed, n_speed, mask)
+        direction_loss = masked_ce(y_true, y_pred, det.OFF_DIRECTION, det.NUM_DIRECTIONS, mask)
 
         dist_loss = ops.square(
             y_true[..., off_dist : off_dist + 1] - y_pred[..., off_dist : off_dist + 1]
@@ -531,6 +533,7 @@ def make_detection_loss(keras, pos_weight: float = 20.0):
             + cls_loss
             + phase_loss
             + speed_loss
+            + direction_loss
             + 2.0 * dist_loss
             + lat_loss
         )
@@ -722,12 +725,48 @@ def _verify_saved(
     loaded = det.Detector.load(path, spec, accelerate=False)
     if loaded is None:
         return "保存したモデルを Detector.load() が受け付けませんでした"
-    sample = data["images"][: min(4, len(data["images"]))]
-    results = loaded.detect(sample, list(range(len(sample))))
-    result.verify_counts = [len(r.detections) for r in results]
+    class_targets = data["detections"][..., det.OFF_CLS : det.OFF_CLS + det.NUM_CLASSES]
+    class_present = class_targets.sum(axis=(1, 2)) > 0
+    indices = set(range(min(4, len(data["images"]))))
+    for cls in DetClass:
+        indices.update(np.flatnonzero(class_present[:, int(cls)])[:4].tolist())
+    required_directions: set[tuple[DetClass, str]] = set()
+    for cls in (DetClass.MANDATORY_DIRECTION_SIGN, DetClass.ONE_WAY_SIGN):
+        class_mask = class_targets[..., int(cls)] > 0
+        for i, direction in enumerate(SIGN_DIRECTIONS):
+            present = np.any(class_mask & (data["detections"][..., det.OFF_DIRECTION + i] > 0), axis=(1, 2))
+            if present.any():
+                required_directions.add((cls, direction))
+                indices.update(np.flatnonzero(present)[:4].tolist())
+    seen: set[DetClass] = set()
+    matched_signs: set[DetClass] = set()
+    matched_directions: set[tuple[DetClass, str]] = set()
+    result.verify_counts = []
+    order = sorted(indices)
+    for start in range(0, len(order), 4):
+        selected = order[start : start + 4]
+        results = loaded.detect(data["images"][selected], selected)
+        truths = det.decode_detections(data["detections"][selected], selected, spec)
+        result.verify_counts.extend(len(r.detections) for r in results)
+        for truth, perception in zip(truths, results):
+            seen.update(d.cls for d in perception.detections)
+            for cls in SIGN_LABELS:
+                pairs = _match(truth.by_class(cls), perception.by_class(cls))
+                if pairs:
+                    matched_signs.add(cls)
+                for expected, predicted in pairs:
+                    if _attribute_ok(cls, expected, predicted) is True:
+                        matched_directions.add((cls, expected.direction))
     if not any(result.verify_counts):
         return (
             "読み直せましたが何も検出しませんでした。エポック数かサンプル数を増やすか、"
             "収集時のクラス内訳が偏っていないか確認してください"
         )
+    missing = [cls.name for cls in DetClass if np.any(class_present[:, int(cls)]) and cls not in (matched_signs if cls in SIGN_LABELS else seen)]
+    if missing:
+        return f"教師データにあるクラスを検出できませんでした: {', '.join(missing)}。エポック数かサンプル数を増やしてください"
+    missing_directions = required_directions - matched_directions
+    if missing_directions:
+        names = ", ".join(f"{cls.name}:{direction}" for cls, direction in sorted(missing_directions))
+        return f"教師データにある標識の矢印を正しく認識できませんでした: {names}。エポック数かサンプル数を増やしてください"
     return ""

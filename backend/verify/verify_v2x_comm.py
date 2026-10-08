@@ -148,8 +148,8 @@ section("3. 観測の V2X の 4 次元（合成の碁盤の目）")
 base = OBS_OFFSETS["v2x"]
 tail = base + V
 check(
-    f"V2X の欄は観測の 75〜78 で、後ろには死角の欄だけが続く（観測は {config.OBS_DIM} 次元）",
-    base == 75 and tail == OBS_OFFSETS["occlusion"] and tail + config.OBS_OCCLUSION_DIM == config.OBS_DIM,
+    f"V2X の欄は観測の 75〜78 で、後ろには死角と新標識の欄が続く（観測は {config.OBS_DIM} 次元）",
+    base == 75 and tail == OBS_OFFSETS["occlusion"] and tail + config.OBS_OCCLUSION_DIM == OBS_OFFSETS["traffic_signs"],
     f"欄の先頭 {base}",
 )
 env = make_env(N, walkers=16)

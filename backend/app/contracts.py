@@ -136,7 +136,7 @@ class MapSignal:
 
 @dataclass
 class MapSign:
-    """最高速度標識（規制標識「最高速度」）。"""
+    """種類と規制方向を持つ道路標識。"""
 
     id: int
     node_id: int
@@ -144,7 +144,9 @@ class MapSign:
     x: float
     y: float
     heading: float
-    speed_limit: float
+    speed_limit: float = 0.0
+    kind: str = "speed_limit"
+    direction: str = "straight"
 
 
 @dataclass
@@ -213,6 +215,8 @@ class MapData:
                     "y": round(sg.y, 3),
                     "heading": round(sg.heading, 4),
                     "speedLimit": round(sg.speed_limit, 3),
+                    "kind": sg.kind,
+                    "direction": sg.direction,
                 }
                 for sg in self.signs
             ],

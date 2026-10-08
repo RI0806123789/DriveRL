@@ -230,12 +230,12 @@ def test_evaluate_is_fast_enough() -> None:
 
 class TestObservation:
     def test_layout_appends_eight_dims(self) -> None:
-        assert config.OBS_DIM == 87
-        assert config.OBS_LAYOUT[-1] == ("occlusion", 8)
+        assert config.OBS_DIM_BEFORE_TRAFFIC_SIGNS == 87
+        assert ("occlusion", 8) in config.OBS_LAYOUT
         assert OBS_OFFSETS["occlusion"] == 79
         assert 79 in config.OBS_WIDENABLE_DIMS
 
-    @pytest.mark.parametrize("old_dim", [66, 75, 79])
+    @pytest.mark.parametrize("old_dim", [66, 75, 79, 87])
     def test_old_checkpoint_loads_with_zero_padding(self, old_dim: int, tmp_path: Path) -> None:
         params = SimParams()
         old = PPOTrainer(old_dim, config.ACTION_DIM, params, config.MAX_VEHICLES, seed=3)
@@ -250,6 +250,10 @@ class TestObservation:
         with torch.no_grad():
             d_old, v_old = old.policy.forward(torch.from_numpy(x_old))
             d_new, v_new = new.policy.forward(torch.from_numpy(x_new))
+            m_old, mv_old = old.policy.meta(torch.from_numpy(x_old))
+            m_new, mv_new = new.policy.meta(torch.from_numpy(x_new))
         # 足した入力の重みは 0。行列積の足し算の順序が入力の幅で変わるので、float32 の丸めの差だけは残る
         assert float((d_old.mean - d_new.mean).abs().max()) <= 1e-6
         assert float((v_old - v_new).abs().max()) <= 1e-6
+        assert float((m_old.probs - m_new.probs).abs().max()) <= 1e-6
+        assert float((mv_old - mv_new).abs().max()) <= 1e-6

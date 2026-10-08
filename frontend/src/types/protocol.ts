@@ -187,7 +187,10 @@ export interface MapSignal {
   source?: 'osm' | 'synthetic' | 'unknown'
 }
 
-/** 最高速度標識（規制標識「最高速度」）。 */
+export type SignKind = 'speed_limit' | 'stop' | 'crosswalk' | 'one_way' | 'mandatory_direction' | 'no_parking' | 'no_stopping'
+export type SignDirection = 'straight' | 'left' | 'right' | 'left_or_straight' | 'right_or_straight' | 'left_or_right'
+
+/** 種類と規制方向を持つ道路標識。 */
 export interface MapSign {
   id: number
   /** 標識が立つ交差点ノード（MapNode.id）への参照 */
@@ -199,8 +202,12 @@ export interface MapSign {
   y: number
   /** *その標識が規制する側の進行方向** [rad]。標示板は heading + PI を向く */
   heading: number
-  /** 規制速度 [m/s] */
+  /** 最高速度標識の規制速度 [m/s]。ほかの種類は 0 */
   speedLimit: number
+  /** 省略時は speed_limit */
+  kind?: SignKind
+  /** 標識の矢印が示す許可方向。省略時は straight */
+  direction?: SignDirection
 }
 
 /** 2.2 map — マップ読込完了時（サイズが大きい・低頻度） */
@@ -214,7 +221,7 @@ export interface MapMessage {
   buildings: MapBuilding[]
   /** 信号機。古いサーバーだと入っていないことがある */
   signals?: MapSignal[]
-  /** 最高速度標識。古いサーバーだと入っていないことがある */
+  /** 道路標識。古いサーバーだと入っていないことがある */
   signs?: MapSign[]
 }
 
@@ -361,6 +368,12 @@ export const DET_VEHICLE = 2
 export const DET_OBSTACLE = 3
 export const DET_LANE = 4
 export const DET_PEDESTRIAN = 5
+export const DET_STOP_SIGN = 6
+export const DET_CROSSWALK_SIGN = 7
+export const DET_ONE_WAY_SIGN = 8
+export const DET_MANDATORY_DIRECTION_SIGN = 9
+export const DET_NO_PARKING_SIGN = 10
+export const DET_NO_STOPPING_SIGN = 11
 
 /** 擬似カメラ画像から認識器が見つけた物体 1 個（protocol.md 2.3）。 */
 export interface Detection {
@@ -372,8 +385,10 @@ export interface Detection {
   conf: number
   /** 信号のみ: 0=青 / 1=黄 / 2=赤 */
   phase?: number
-  /** 標識のみ: 規制速度 [m/s]。表示は km/h に直す */
+  /** 最高速度標識のみ: 規制速度 [m/s]。表示は km/h に直す */
   speedLimit?: number
+  /** 指定方向外進行禁止の標識のみ: 認識した許可方向 */
+  direction?: SignDirection
   /** 推定距離 [m] */
   distance?: number
   /** 車線のみ: 車線中心からの横方向偏差 [m] */

@@ -160,7 +160,7 @@ world（真値）
   │      ↓ 検出結果 (percep/types.py)
   ├─ percep/occlusion.py  検出と走行可能距離（4 台）から見通しと死角（下の「見通しと死角」）
   │      ↓ 死角の 8 次元
-  ├─ percep/encoder.py    → 観測 87 次元（66〜74 が周囲カメラ、75〜78 が V2X（sim/v2x.py）、末尾 8 次元が死角）
+  ├─ percep/encoder.py    → 観測（config.OBS_LAYOUT。66〜74 が周囲カメラ、75〜78 が V2X、79〜86 が死角、87〜110 が新標識）
   │      ↓ 同じ検出結果・左右の見通し距離
   ├─ sim/safety.py        検出枠と推定距離に連動する安全ギミック（経路追従の車だけ。下の「安全ギミック」）
   └─ percep/groundtruth.py  真値から作る「理想の検出結果」
@@ -262,6 +262,38 @@ CNN では信号の 14.3%・歩行者の 31.6% で先頭が最近傍ではなく
   （銀座・8 台で 24 本 → 8 本）。**寄せ直しとパイロンを
   別々の周期に任せない**という上の約束は、狙うクラスについても同じです。
 
+### 新標識の認識と観測（#109）
+
+`MapSign.kind` は最高速度のほか、一時停止・横断歩道・一方通行・指定方向外進行禁止・駐車禁止・駐停車禁止を区別します。
+`direction` は指定方向の矢印を表し、CNN の方向ヘッドで認識します。標識の寸法は `percep/types.py` の `sign_half_extents` が出典です。
+OSM の `traffic_sign`・`highway=stop/crossing`・`oneway`・駐車規制タグを抽出し、標識を持つ道路途中のノードを簡略化で消さないようにします。
+一時停止の方向が曖昧なら `warn_once` して省略します。最高速度の経路索引には `kind == speed_limit` の標識だけを入れます。
+タグの出典は [OSM traffic_sign](https://wiki.openstreetmap.org/wiki/Key:traffic_sign) と [OSM stop](https://wiki.openstreetmap.org/wiki/Tag:highway%3Dstop)、
+標識の区別は [国土交通省の標識一覧](https://www.mlit.go.jp/road/sign/sign/douro/ichiran.pdf) で確認しています。
+
+観測は 111 次元（唯一の出典は `config.OBS_LAYOUT`、変更時は README の観測表・AGENTS の観測規約・protocol の例も更新）。
+既存の 87 次元の後ろへ、新しいクラスごとの最近傍の距離・方位・信頼度と、指定方向の one-hot を足します。
+入力はカメラの検出だけで、地図の真値を混ぜません。旧観測のオフセットを変えず、66・75・79・87 次元の PPO を
+`widen_observation` でゼロ詰めし、意図の one-hot の重みを後ろへ移します。追加欄のないときはすべて 0 です。
+検出の上限は `config.PERCEP_MAX_DETECTIONS` を、旧クラスの割り当てと新クラスを両方収める値へ広げます。
+上限を旧値に戻すと、新標識が既存の車両・歩行者・障害物を押し出して旧観測まで変えてしまいます。
+
+CNN のクラス ID は末尾へ追加し、教師データの版を上げます。旧 CNN は出力の形の検証で拒否し、初回だけ記録して既存の真値フォールバックへ戻ります。
+学習の差し替え前には、収集データに含まれる各クラスと矢印方向の代表画像を再推論します（選び方の出典は `trainer._verify_saved`）。
+新標識は教師との位置一致、教師にある矢印方向は最低 1 例の正答を要求し、欠ける場合は前の認識器を保ちます。
+地図に存在しないクラスまで学習できたとは扱いません。標識不足の地図では、その標識を含む別の地図でも収集が必要です。
+新標識の自動停止や違反報酬は加えていません。今回は視覚・クラスの区別・PPO への入力をつなぐ変更です。
+
+2026-10-08 のスクラッチ比較では、銀座と金沢の旧標識だけの画像に画素差はなく、既存 87 次元の観測の最大差も 0 でした。
+金沢の手元の版 10 キャッシュをメモリ上で現行形式へ変換し、ローダーから一方通行標識を追加した規模検証では、
+8 台・歩行者 16 人・seed 109・PPO 更新と配信を除いた全ステップを測りました。キャッシュと本番モデルは差し替えていません。
+速度標識だけの真値モードは中央値 26.29ms／p95 48.23ms、新標識追加後は 27.01ms／54.72ms（50ms 超過 18/128 ステップ）でした。
+幅 1.0 の未学習 CNN を使った新標識追加後の Keras CPU は中央値 95.16ms／p95 178.21ms、
+OpenVINO NPU（Intel AI Boost、バッチ 4/8/12）は 49.70ms／61.56ms（超過 29/64 ステップ）でした。
+認識精度の測定ではなく、学習済みモデルと更新・配信を含む運転でも 50ms 以内になることは未確認です。
+旧標識だけの同一世界での擬似カメラの中央値は旧 15.32ms／新 19.46ms、エンコーダーは旧 0.68ms／新 0.62msでした。
+測定条件と集計の出典は作業時のスクラッチ `memo/issue109_benchmark.py` とその JSON（Git 管理外）です。
+
 ### 学習・認識パイプラインの分離評価（#102）
 
 `backend/benchmark_pipeline.py` は、サーバーとブラウザを起動せずに速度・運転方策・認識器を測り、
@@ -311,8 +343,8 @@ CNN のステップ中央値は銀座 37.64 → 35.59ms、金沢 37.30 → 37.74
 
 `openvino` が入っていれば、`Detector.load()` は認識器を OpenVINO の IR にして NPU（無ければ OpenVINO の CPU）で
 動かします。入っていない・設定で切った・どこかで失敗した、のどれでも従来の Keras（torch）の CPU に戻ります。
-**`openvino` は `requirements.txt` に入れていません**（依存を足さない約束。コメントで任意と書いてあるだけで、
-使う人が別に `pip install openvino` する）。学習（`model.fit`）は CPU の Keras のままです（NPU は推論専用）。
+**`openvino` は利用者の指定で `requirements.txt` に含めています**。版の唯一の出典は同ファイルで、
+標準セットアップから NPU / OpenVINO の CPU を利用できます。学習（`model.fit`）は CPU の Keras のままです（NPU は推論専用）。
 
 | 動かし先 | 選ばれるとき | 出力 |
 |---|---|---|
@@ -1472,7 +1504,7 @@ HTTP 側の `finally` で消すと、504 を返した後にエンジンが
 
 4 台のカメラ（前方・後方・左・右）の**検出と走行可能距離だけ**から、自車まわりの「見えている所」と「死角」を BEV
 （真上から見た平面）で作ります。**地図の建物は直接見ません**（真値で走るときは、走行可能距離の真値が建物を見る）。
-結果は 3 か所へ渡ります: 観測の末尾 8 次元（`OBS_LAYOUT` の `occlusion`。観測は 79 → 87 次元）・安全ギミックの
+結果は 3 か所へ渡ります: 観測の死角の 8 次元（`OBS_LAYOUT` の `occlusion`。追加時は 79 → 87 次元）・安全ギミックの
 顔出し（クリープ）・frame の `occlusion`（`watch_occlusion` で頼まれた車だけ。`docs/protocol.md` 2.3）。
 
 **作り方（1 台・1 カメラごと。`_camera`）**:
@@ -2675,8 +2707,8 @@ UV の v をずらして「その車の段」だけを貼ります（`vehicleMat
 
 | 部品 | 入力 → 出力 | 名前（state_dict）|
 |---|---|---|
-| 上位の方策 / 価値 | 観測 87 → 意図のロジット 4 / 価値 | `meta_trunk` + `meta_head` / `meta_value_trunk` + `meta_value_head` |
-| 下位の方策 / 価値 | 観測 87 + 意図の one-hot 4 = 91 → 操作の平均 2 / 価値 | `policy_trunk` + `mu_head` + `option_bias` / `value_trunk` + `value_head` |
+| 上位の方策 / 価値 | 観測（`config.OBS_DIM`）→ 意図のロジット 4 / 価値 | `meta_trunk` + `meta_head` / `meta_value_trunk` + `meta_value_head` |
+| 下位の方策 / 価値 | 観測（`config.OBS_DIM`）+ 意図の one-hot 4 → 操作の平均 2 / 価値 | `policy_trunk` + `mu_head` + `option_bias` / `value_trunk` + `value_head` |
 
 - ★ **意図は `config.HRL_OPTION_STEPS`（20 ステップ = 1 秒）ごとにだけ選び直す**（`OptionScheduler`。スロットごと）。
   エピソードが終わった車（`PPOTrainer.store` と、学習しない間は `runtime/learning_step.py` の `learning_step` が `end_options(dones)` を呼ぶ）と、
@@ -2829,7 +2861,7 @@ Optuna（TPE）で PPO と報酬の重みのハイパーパラメータを探し
 - **チェックポイントは必ず `weights_only=True` で読む。フォールバックしない。**
   `rl/importer.py` がこれを宣言しており、`SECURITY.md` にも書いてあります。
 - 書き出し（`.pt` / `.pt2` / TorchScript / `.keras`）には観測レイアウトと行動スケールを
-  メタデータとして必ず埋めます。無いと受け取った側が 87 次元（`config.OBS_DIM`）に何を入れるか分かりません。
+  メタデータとして必ず埋めます。無いと受け取った側が観測（`config.OBS_DIM`）に何を入れるか分かりません。
 - ★ **推論専用の書き出しは `torch.export`（`pt2`。`.pt2`）が本命で、TorchScript は互換のために残している**（#93）。
   PyTorch 2.14 は `torch.jit.script` / `save` / `load` に FutureWarning を出します。TorchScript を消すのは、
   PyTorch が `torch.jit` を外したときか利用者が要らないと決めたとき。`tests/test_export.py` は TorchScript の試験でだけ
@@ -2854,7 +2886,7 @@ Optuna（TPE）で PPO と報酬の重みのハイパーパラメータを探し
   `trainer.load()` と `trainer.save(CHECKPOINT_PATH)` で上書きしていました。画面は `backup` が無いと何も
   出さないので、利用者は退避されたと思ったままになります（`SECURITY.md` の「取り戻せます」が成り立たない）
 - 観測次元を変えると過去のモデルは読み込めなくなります（50 → 54 → 56 → 57 → 66 → 75 → 79 → 87 の履歴あり。
-  66 は歩行者の欄、75 は周囲カメラの欄、79 は V2X の欄、87 は死角の欄を足したとき）。**66・75・79 だけは例外で、入力を 0 で足して
+  66 は歩行者の欄、75 は周囲カメラの欄、79 は V2X の欄、87 は死角の欄を足したとき。新標識で 111 次元へ拡張）。**66・75・79・87 は例外で、入力を 0 で足して
   読み込めます**（`config.OBS_WIDENABLE_DIMS`。欄を末尾に足したからできる）。
 - ★ **書き出した推論モデルも、方策の平均と同じ `tanh` を通すこと**（`rl/export.py` の
   `InferencePolicy.forward` と、Keras の `action` 層の活性）。`policy._distribution` に `tanh` を
@@ -3007,6 +3039,9 @@ OSM キャッシュ・チェックポイント・認識器と教師データ・�
   命名は既存に合わせて `feat/...` / `fix/...`（例: `feat/detector-training-tab-and-pwa`）
 - コミットメッセージは `feat:` / `fix:` + **日本語**の要約。本文には
   **「なぜそうしたか」と「★ 壊れやすい点」**を書く（既存のログが手本）
+- **Codex が作成するコミットの Author / Committer は `Codex <codex@openai.com>` にする。**
+  `git -c user.name=Codex -c user.email=codex@openai.com commit ...` で、そのコミットだけ名義を指定する。
+  手動コミットの名義を保つため、共通の `git config user.name` / `user.email` は変更しない。
 - 利用者が作業完了（機能の実装やバグ修正の完了）を報告したら、
   **プライバシーの確認**（個人情報・鍵・ローカルの絶対パスはプレースホルダーへ）をしたうえで
   プルリクエストを出す。既存ブランチの再利用でかまわない

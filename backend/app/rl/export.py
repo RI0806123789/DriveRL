@@ -195,6 +195,12 @@ def _layout_notes() -> dict[str, tuple[str, str]]:
             "max(0, 1 - d/30), 交差点（信号の無い交差点の入口か次の停止線）への近さ max(0, 1 - d/30)]。"
             "近くに車がいないか、v2xComm を切ったときは 4 つとも 0",
         ),
+        "traffic_signs": (
+            "camera",
+            "前方カメラが認識した一時停止・横断歩道・一方通行・指定方向外進行禁止・駐車禁止・駐停車禁止の順に "
+            f"[距離 / {config.OBS_SIGNAL_RANGE}m, 方位 / (pi/2), 信頼度]。未検出は 0。"
+            f"末尾は指定方向の one-hot（{', '.join(config.OBS_SIGN_DIRECTIONS)}）。地図の真値は使わない",
+        ),
         "occlusion": (
             "camera",
             f"4 台のカメラの検出と走行可能距離だけから作った見通しと死角（半径 {config.OBS_FREESPACE_MAX_DISTANCE:.0f}m）。"

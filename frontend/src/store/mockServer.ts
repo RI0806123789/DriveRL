@@ -41,7 +41,7 @@ const MOCK_CONFIG: SimConfig = {
   maxVehicles: 8,
   maxPedestrians: 64,
   simHz: SIM_HZ,
-  obsDim: 87,
+  obsDim: 111,
   actionDim: 2,
 }
 

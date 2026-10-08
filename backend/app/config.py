@@ -148,6 +148,11 @@ OBS_V2X_DIM = 4
 # 4 台のカメラだけから作った見通しと死角（左右の見通し距離・前方の遮蔽率・角までの距離・前後左右の見えている割合）。percep/occlusion.py
 OBS_OCCLUSION_DIM = 8
 
+OBS_TRAFFIC_SIGN_COUNT = 6
+OBS_TRAFFIC_SIGN_FIELDS = 3
+OBS_SIGN_DIRECTIONS = ("left", "right", "straight", "left_or_straight", "right_or_straight", "left_or_right")
+OBS_TRAFFIC_SIGN_DIM = OBS_TRAFFIC_SIGN_COUNT * OBS_TRAFFIC_SIGN_FIELDS + len(OBS_SIGN_DIRECTIONS)
+
 # 観測ベクトルの連結順と区画の大きさ。percep/encoder.py の添字と書き出しのメタデータはここから導く
 # 後から足した欄は必ず末尾に置く（旧い重みを 0 埋めで読み込めるのはこのため。rl/ppo.py）
 OBS_LAYOUT: tuple[tuple[str, int], ...] = (
@@ -164,11 +169,13 @@ OBS_LAYOUT: tuple[tuple[str, int], ...] = (
     ("surround", OBS_SURROUND_DIM),
     ("v2x", OBS_V2X_DIM),
     ("occlusion", OBS_OCCLUSION_DIM),
+    ("traffic_signs", OBS_TRAFFIC_SIGN_DIM),
 )
 
 OBS_DIM = sum(size for _name, size in OBS_LAYOUT)
-#: 周囲カメラの欄を足す前（66）・V2X の欄を足す前（75）・死角の欄を足す前（79）の観測の次元
-OBS_DIM_BEFORE_OCCLUSION = OBS_DIM - OBS_OCCLUSION_DIM
+#: 末尾へ追加した欄より前の観測の次元（66・75・79・87）。
+OBS_DIM_BEFORE_TRAFFIC_SIGNS = OBS_DIM - OBS_TRAFFIC_SIGN_DIM
+OBS_DIM_BEFORE_OCCLUSION = OBS_DIM_BEFORE_TRAFFIC_SIGNS - OBS_OCCLUSION_DIM
 OBS_DIM_BEFORE_V2X = OBS_DIM_BEFORE_OCCLUSION - OBS_V2X_DIM
 OBS_DIM_BEFORE_SURROUND = OBS_DIM_BEFORE_V2X - OBS_SURROUND_DIM
 #: この次元のチェックポイントは、入力の末尾に 0 の列を足して読み込める
@@ -176,6 +183,7 @@ OBS_WIDENABLE_DIMS: tuple[int, ...] = (
     OBS_DIM_BEFORE_SURROUND,
     OBS_DIM_BEFORE_V2X,
     OBS_DIM_BEFORE_OCCLUSION,
+    OBS_DIM_BEFORE_TRAFFIC_SIGNS,
 )
 
 ACTION_DIM = 2
@@ -211,7 +219,7 @@ PERCEP_DEVICE = os.getenv("DRIVERL_PERCEP_DEVICE", "auto").strip().lower() or "a
 #: 1 回の推論に通す画像の最大枚数（前方は全車 + 周囲カメラの予算）。NPU の形の固定（バケット）の上限になる
 PERCEP_MAX_BATCH = MAX_VEHICLES + SURROUND_CNN_IMAGES_PER_STEP
 
-PERCEP_MAX_DETECTIONS = 15
+PERCEP_MAX_DETECTIONS = 21
 
 PERCEP_CONF_THRESHOLD = 0.35
 

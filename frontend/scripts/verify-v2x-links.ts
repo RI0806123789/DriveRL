@@ -99,13 +99,12 @@ check('V2X_RANGE_M がバックエンドと一致する', pyNumber('V2X_RANGE_M'
 check('V2X_MAX_PEERS がバックエンドと一致する', pyNumber('V2X_MAX_PEERS') === V2X_MAX_PEERS, `backend ${pyNumber('V2X_MAX_PEERS')}`)
 const layout = /OBS_LAYOUT[^=]*= \(([\s\S]*?)\n\)/.exec(configPy)?.[1] ?? ''
 const names = [...layout.matchAll(/\("(\w+)",/g)].map((m) => m[1])
-// 後から足した欄は末尾に置く約束なので、V2X は周囲カメラの直後で、その後ろは死角の欄だけ
 check(
-  '観測の V2X の欄は周囲カメラの直後で、後ろには死角の欄だけが続く',
-  names.indexOf('v2x') === names.indexOf('surround') + 1 && names.slice(names.indexOf('v2x') + 1).join() === 'occlusion',
+  '観測の V2X・死角・新標識の欄は周囲カメラの直後へ順に続く',
+  names.indexOf('v2x') === names.indexOf('surround') + 1 && names.slice(names.indexOf('v2x') + 1).join() === 'occlusion,traffic_signs',
   names.join(', '),
 )
-const obsDim = 87
+const obsDim = 111
 check(`モックと既定の設定の obsDim が ${obsDim}`, simStore.includes(`obsDim: ${obsDim},`) && mock.includes(`obsDim: ${obsDim},`))
 const pyDefault = /^\s+v2x_comm: bool = (True|False)/m.exec(contractsPy)?.[1]
 const tsDefault = /v2xComm: (true|false),/.exec(simStore)?.[1]

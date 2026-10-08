@@ -7,9 +7,15 @@ import {
   DET_SPEED_SIGN,
   DET_TRAFFIC_LIGHT,
   DET_VEHICLE,
+  DET_STOP_SIGN,
+  DET_CROSSWALK_SIGN,
+  DET_ONE_WAY_SIGN,
+  DET_MANDATORY_DIRECTION_SIGN,
+  DET_NO_PARKING_SIGN,
+  DET_NO_STOPPING_SIGN,
   type Detection,
-} from '../types/protocol'
-import { SIGNAL_LAMP_COLORS } from './palette'
+} from '../types/protocol.ts'
+import { SIGNAL_LAMP_COLORS } from './palette.ts'
 
 /** 信号の灯色名。backend の `SIGNAL_PHASE_NAMES` と同じ並び（0=青 / 1=黄 / 2=赤） */
 const SIGNAL_PHASE_NAMES = ['青', '黄', '赤'] as const
@@ -41,6 +47,18 @@ export function detectionLabel(det: Detection): string {
       return '歩行者'
     case DET_OBSTACLE:
       return '障害物'
+    case DET_STOP_SIGN:
+      return '一時停止'
+    case DET_CROSSWALK_SIGN:
+      return '横断歩道'
+    case DET_ONE_WAY_SIGN:
+      return '一方通行'
+    case DET_MANDATORY_DIRECTION_SIGN:
+      return '指定方向外進行禁止'
+    case DET_NO_PARKING_SIGN:
+      return '駐車禁止'
+    case DET_NO_STOPPING_SIGN:
+      return '駐停車禁止'
     default:
       return '障害物'
   }
@@ -66,6 +84,12 @@ export function detectionColor(det: Detection): string {
   }
   switch (det.cls) {
     case DET_SPEED_SIGN:
+    case DET_STOP_SIGN:
+    case DET_CROSSWALK_SIGN:
+    case DET_ONE_WAY_SIGN:
+    case DET_MANDATORY_DIRECTION_SIGN:
+    case DET_NO_PARKING_SIGN:
+    case DET_NO_STOPPING_SIGN:
       return '#a479e8'
     case DET_VEHICLE:
       return '#4f9dff'

@@ -50,6 +50,7 @@ _OFF_FREESPACE = OBS_OFFSETS["freespace"]
 _OFF_SURROUND = OBS_OFFSETS["surround"]
 _OFF_V2X = OBS_OFFSETS["v2x"]
 _OFF_OCCLUSION = OBS_OFFSETS["occlusion"]
+_OFF_TRAFFIC_SIGNS = OBS_OFFSETS["traffic_signs"]
 assert len(SURROUND_CAMERAS) == config.OBS_SURROUND_CAMERAS, "周囲カメラの台数と観測の欄が合わない"
 
 _ROUTE_OFFSETS = np.arange(1, config.OBS_ROUTE_POINTS + 1, dtype=np.float32) * np.float32(
@@ -275,6 +276,27 @@ def _encode_surround(row: np.ndarray, results: dict[str, PerceptionResult] | Non
         row[base + 2] = best[3]
 
 
+def _encode_traffic_signs(row: np.ndarray, result: PerceptionResult | None, spec: CameraSpec) -> None:
+    """前方カメラが認識した新標識の距離・方位・信頼度と指定方向だけを末尾に載せる。"""
+    if result is None:
+        return
+    classes = (
+        DetClass.STOP_SIGN, DetClass.CROSSWALK_SIGN, DetClass.ONE_WAY_SIGN,
+        DetClass.MANDATORY_DIRECTION_SIGN, DetClass.NO_PARKING_SIGN, DetClass.NO_STOPPING_SIGN,
+    )
+    for i, cls in enumerate(classes):
+        det = _nearest(result, cls, spec)
+        if det is None or _distance(det, spec) > config.OBS_SIGNAL_RANGE:
+            continue
+        base = _OFF_TRAFFIC_SIGNS + i * config.OBS_TRAFFIC_SIGN_FIELDS
+        row[base] = min(_distance(det, spec) / config.OBS_SIGNAL_RANGE, 1.0)
+        row[base + 1] = min(max(_bearing(det, spec) / (math.pi / 2), -1.0), 1.0)
+        row[base + 2] = _confidence(det)
+        if cls == DetClass.MANDATORY_DIRECTION_SIGN and det.direction in config.OBS_SIGN_DIRECTIONS:
+            offset = _OFF_TRAFFIC_SIGNS + config.OBS_TRAFFIC_SIGN_COUNT * config.OBS_TRAFFIC_SIGN_FIELDS
+            row[offset + config.OBS_SIGN_DIRECTIONS.index(det.direction)] = 1.0
+
+
 def encode_observations(
     world: "World",
     params: SimParams,
@@ -342,6 +364,7 @@ def encode_observations(
         )
         if surround is not None:
             _encode_surround(obs[slot], surround.get(slot))
+        _encode_traffic_signs(obs[slot], perceptions.get(slot), spec)
 
     if v2x is not None:
         obs[sel, _OFF_V2X : _OFF_V2X + config.OBS_V2X_DIM] = np.asarray(v2x, dtype=np.float32)[sel]

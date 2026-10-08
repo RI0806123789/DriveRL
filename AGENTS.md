@@ -106,6 +106,9 @@ cd backend
   命名は既存に合わせて `feat/...` / `fix/...`（例: `feat/detector-training-tab-and-pwa`）
 - コミットメッセージは `feat:` / `fix:` + **日本語**の要約。本文には
   **「なぜそうしたか」と「★ 壊れやすい点」**を書く（既存のログが手本）
+- **Codex が作成するコミットの Author / Committer は `Codex <codex@openai.com>` にする。**
+  `git -c user.name=Codex -c user.email=codex@openai.com commit ...` で、そのコミットだけ名義を指定する。
+  手動コミットの名義を保つため、共通の `git config user.name` / `user.email` は変更しない。
 - 利用者が作業完了（機能の実装やバグ修正の完了）を報告したら、
   **プライバシーの確認**（個人情報・鍵・ローカルの絶対パスはプレースホルダーへ）をしたうえで
   プルリクエストを出す。既存ブランチの再利用でかまわない
@@ -178,7 +181,7 @@ cd backend
 - **V2X（`sim/v2x.py`）の「危険」は自車のカメラの検出から作る**（真値を混ぜると、CNN で走ったとき見えないはずの
   ものが観測に入る）。近くに車がいなければ観測の V2X の 4 次元（75〜78）は 0。検査は `backend/verify/verify_v2x_comm.py`
 - **見通しと死角（`percep/occlusion.py`）は 4 台のカメラの検出と走行可能距離だけから作る**（地図の建物を直接見ない）。
-  観測の末尾 8 次元（87 次元）。見通しの悪い交差点の顔出し（安全ギミックの `creep`）は、**交差道路がある側**
+  観測の 79〜86 の 8 次元。見通しの悪い交差点の顔出し（安全ギミックの `creep`）は、**交差道路がある側**
   （`map_index.branch_sides`）の見通しが 20m 未満の間だけ掛ける。検査は `backend/tests/test_occlusion.py` と
   `backend/verify/verify_occlusion.py`
 - **方策は階層型（`rl/hierarchical_policy.py`）。上位が 4 つの意図を 20 ステップごとに選び、下位が観測 + 意図の one-hot
@@ -244,9 +247,9 @@ cd backend
   `scene/cameraMath.ts` の `SURROUND_CAMERAS` と揃えないと、4 分割に出す検出枠が実物からずれる
   （`npm run verify:detections` が `types.py` を読んで照合する）。**前方カメラは 1 ビットも変えない**
   （観測の 66 次元までと学習済みの認識器がこれを前提にする）
-- **観測は 87 次元。周囲カメラの 9 次元、V2X の 4 次元、死角の 8 次元の順に末尾へ足してある**（`config.OBS_LAYOUT` の
-  `surround` / `v2x` / `occlusion`）。66・75・79 次元の重みは読み込み時にゼロ詰めで広げる（`rl/ppo.py` の `widen_observation`。
-  元の重みは `.obs66` / `.obs75` / `.obs79` へ控える）。**途中へ差し込むと、広げた重みが別の欄を読む**
+- **観測は 111 次元。周囲カメラの 9 次元、V2X の 4 次元、死角の 8 次元、新標識の 24 次元の順に末尾へ足してある**（次元と順序の出典は `config.OBS_LAYOUT`。変更時はここも更新）。
+  66・75・79・87 次元の重みは読み込み時にゼロ詰めで広げる（`rl/ppo.py` の `widen_observation`。
+  元の重みは `.obs66` / `.obs75` / `.obs79` / `.obs87` へ控える）。**途中へ差し込むと、広げた重みが別の欄を読む**
 - **安全ギミックが運転を奪ったステップは PPO の学習から外す**（`StepResult.learn`）。外さないと、
   方策が出していない操作の結果を方策の手柄として教えることになる（検査は `backend/verify/verify_safety_gimmicks.py`）。
   **外すのは損失のマスク（`RolloutBuffer.learn`）だけで、「生きているか」（`active`）とは分ける**。混ぜると

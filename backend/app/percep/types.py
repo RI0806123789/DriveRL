@@ -160,9 +160,34 @@ class DetClass(IntEnum):
     OBSTACLE = 3
     LANE = 4
     PEDESTRIAN = 5
+    STOP_SIGN = 6
+    CROSSWALK_SIGN = 7
+    ONE_WAY_SIGN = 8
+    MANDATORY_DIRECTION_SIGN = 9
+    NO_PARKING_SIGN = 10
+    NO_STOPPING_SIGN = 11
 
 
 NUM_CLASSES = len(DetClass)
+
+SIGN_CLASSES: dict[str, DetClass] = {
+    "speed_limit": DetClass.SPEED_SIGN,
+    "stop": DetClass.STOP_SIGN,
+    "crosswalk": DetClass.CROSSWALK_SIGN,
+    "one_way": DetClass.ONE_WAY_SIGN,
+    "mandatory_direction": DetClass.MANDATORY_DIRECTION_SIGN,
+    "no_parking": DetClass.NO_PARKING_SIGN,
+    "no_stopping": DetClass.NO_STOPPING_SIGN,
+}
+SIGN_DIRECTIONS = config.OBS_SIGN_DIRECTIONS
+SIGN_LABELS: dict[DetClass, str] = {
+    DetClass.STOP_SIGN: "一時停止",
+    DetClass.CROSSWALK_SIGN: "横断歩道",
+    DetClass.ONE_WAY_SIGN: "一方通行",
+    DetClass.MANDATORY_DIRECTION_SIGN: "指定方向外進行禁止",
+    DetClass.NO_PARKING_SIGN: "駐車禁止",
+    DetClass.NO_STOPPING_SIGN: "駐停車禁止",
+}
 
 SIGNAL_PHASE_NAMES = ("青", "黄", "赤")
 
@@ -189,6 +214,7 @@ class Detection:
 
     #: 安全ギミックが付ける危険度。1 = 注意（進路の近く）/ 2 = これで止めた。付けるのは `sim/safety.py` だけ
     hazard: int | None = None
+    direction: str | None = None
 
     @property
     def label(self) -> str:
@@ -207,6 +233,8 @@ class Detection:
             return "車両"
         if self.cls is DetClass.PEDESTRIAN:
             return "歩行者"
+        if self.cls in SIGN_LABELS:
+            return SIGN_LABELS[self.cls]
         return "障害物"
 
     def to_wire(self) -> dict[str, Any]:
@@ -225,6 +253,8 @@ class Detection:
             out["phase"] = int(self.phase)
         if self.speed_limit is not None:
             out["speedLimit"] = round(self.speed_limit, 2)
+        if self.direction is not None:
+            out["direction"] = self.direction
         if self.distance is not None:
             out["distance"] = round(self.distance, 1)
         if self.lateral is not None:
@@ -315,7 +345,7 @@ class OcclusionResult:
     corner_distance: float | None
     #: 前・後・左・右の 90 度ずつの扇（半径は見る距離）のうち、見えている面積の割合
     sectors: tuple[float, float, float, float]
-    #: 観測の末尾 8 次元（`config.OBS_LAYOUT` の occlusion）
+    #: 観測の死角の 8 次元（`config.OBS_LAYOUT` の occlusion）
     features: np.ndarray
     reach: float = 0.0
 
@@ -368,6 +398,14 @@ SIGN_RADIUS = config.SPEED_SIGN_DIAMETER * 0.5
 SIGN_BOTTOM_HEIGHT = config.SPEED_SIGN_BOTTOM_HEIGHT
 SIGN_BOARD_Z = SIGN_BOTTOM_HEIGHT + SIGN_RADIUS
 
+
+def sign_half_extents(kind: str) -> tuple[float, float]:
+    """標識の板の半幅・半高さ [m]（描画と教師の共通寸法）。"""
+    if kind == "one_way":
+        return SIGN_RADIUS, SIGN_RADIUS * 0.5
+    return SIGN_RADIUS, SIGN_RADIUS
+
+
 FACING_TOLERANCE = math.radians(75.0)
 
 
@@ -413,6 +451,7 @@ CLASS_QUOTA: dict[DetClass, int] = {
     DetClass.PEDESTRIAN: 3,
     DetClass.VEHICLE: 4,
     DetClass.OBSTACLE: 4,
+    **{cls: 1 for cls in SIGN_LABELS},
 }
 
 CLASS_PRIORITY: tuple[DetClass, ...] = (
@@ -422,6 +461,7 @@ CLASS_PRIORITY: tuple[DetClass, ...] = (
     DetClass.PEDESTRIAN,
     DetClass.VEHICLE,
     DetClass.OBSTACLE,
+    *SIGN_LABELS,
 )
 
 
@@ -433,6 +473,7 @@ DISTANCE_ORDERED: frozenset[DetClass] = frozenset(
         DetClass.VEHICLE,
         DetClass.OBSTACLE,
         DetClass.PEDESTRIAN,
+        *SIGN_LABELS,
     }
 )
 
@@ -442,6 +483,7 @@ _ASSUMED_WIDTH_M: dict[DetClass, float] = {
     DetClass.VEHICLE: float(config.VEHICLE_WIDTH),
     DetClass.OBSTACLE: float(config.OBSTACLE_RADIUS) * 2.0,
     DetClass.PEDESTRIAN: float(config.PEDESTRIAN_WIDTH),
+    **{cls: sign_half_extents(kind)[0] * 2.0 for kind, cls in SIGN_CLASSES.items() if cls in SIGN_LABELS},
 }
 
 
