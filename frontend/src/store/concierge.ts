@@ -53,11 +53,12 @@ interface ConciergeState {
   pending: boolean
   entries: ConciergeEntry[]
   checkAvailability(): Promise<void>
-  ask(request: { message: string } | { action: ConciergeAction }): Promise<void>
+  ask(request: ({ message: string } | { action: ConciergeAction }) & { rideId?: string | null }): Promise<void>
   clear(): void
 }
 
 let entrySeq = 0
+let requestGeneration = 0
 
 function push(entries: ConciergeEntry[], entry: Omit<ConciergeEntry, 'id'>): ConciergeEntry[] {
   entrySeq += 1
@@ -89,6 +90,7 @@ export const useConcierge = create<ConciergeState>((set, get) => ({
       said = request.action === 'normal' ? '標準の走り方に戻して' : QUICK_ACTION_LABELS[request.action]
     }
     const payload = 'message' in request ? { message: said } : { action: request.action }
+    const generation = requestGeneration
     set((s) => ({ pending: true, entries: push(s.entries, { role: 'user', text: said }) }))
 
     let entry: Omit<ConciergeEntry, 'id'>
@@ -96,7 +98,7 @@ export const useConcierge = create<ConciergeState>((set, get) => ({
       const response = await fetch('/api/taxi/concierge', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({ ...payload, rideId: request.rideId }),
       })
       let body: unknown = null
       try {
@@ -108,10 +110,13 @@ export const useConcierge = create<ConciergeState>((set, get) => ({
     } catch {
       entry = { role: 'error', text: 'サーバーに接続できませんでした' }
     }
-    set((s) => ({ pending: false, entries: push(s.entries, entry) }))
+    if (generation === requestGeneration) {
+      set((s) => ({ pending: false, entries: push(s.entries, entry) }))
+    }
   },
 
   clear() {
+    requestGeneration += 1
     set({ entries: [], pending: false })
   },
 }))

@@ -658,7 +658,7 @@ class SimulationEngine:
             with self._lock:
                 practical = self._practical_mode
             try:
-                situation: dict[str, Any] = {"phase": "idle", "stopReason": "idle"}
+                situation: dict[str, Any] = {"phase": "idle", "rideId": None, "stopReason": "idle"}
                 if self._env is not None:
                     situation = self._taxi.describe(self._env)
                 situation["practicalMode"] = practical
@@ -869,6 +869,12 @@ class SimulationEngine:
             practical = self._practical_mode
         if not practical:
             self._notify("実用モードでないため配車の操作を無視しました")
+            return
+
+        if "rideId" in args and (
+            not self._taxi.busy or args["rideId"] != self._taxi.status.ride_id
+        ):
+            self._notify("配車が変わったため、以前の AI 操作を無視しました")
             return
 
         problem: str | None = None

@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import math
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 import numpy as np
 
@@ -119,6 +120,7 @@ class TaxiService:
         self._reset_stall()
         self.status = TaxiStatus(
             phase=TAXI_PHASE_APPROACHING,
+            ride_id=uuid4().hex,
             vehicle_id=slot,
             pickup=pick,
             dropoff=drop,
@@ -213,6 +215,7 @@ class TaxiService:
         status = self.status
         situation: dict[str, object] = {
             "phase": status.phase,
+            "rideId": status.ride_id,
             "driveMode": status.drive_mode,
             "stopReason": "idle",
         }

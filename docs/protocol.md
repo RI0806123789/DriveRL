@@ -856,7 +856,8 @@ true のときの学習中の車だけ。判断は検出枠と推定距離から
   "etaSeconds": 42.5,       // 到着まで [秒]。毎ステップ引き直す
   "remainingDistanceM": 310.2,
   "message": "車両 #2 が迎えに向かっています",
-  "driveMode": "normal"     // 走り方。normal|hurry|comfort。配車が始まるたびに normal へ戻る（4 章の AI コンシェルジュ）
+  "driveMode": "normal",    // 走り方。normal|hurry|comfort。配車が始まるたびに normal へ戻る（4 章の AI コンシェルジュ）
+  "rideId": "9f04f733cc65456b97004c2e8540770e" // 配車固有の識別子。idle は null。迎車の引き継ぎでも維持する
 }
 ```
 
@@ -1303,9 +1304,9 @@ TorchScript・torch.export（`.pt2`）・Keras 形式を渡した場合は、そ
 乗客の発話（`message`）か、チップの操作（`action`）のどちらかを送る。
 
 ```jsonc
-{ "message": "少し急いでもらえますか" }
-{ "action": "hurry" }     // hurry|comfort|normal は Gemini を通さずに走り方を切り替える
-{ "action": "explain" }   // 停車理由。Gemini が言い換え、失敗したら決まった文で答える
+{ "message": "少し急いでもらえますか", "rideId": "9f04f733cc65456b97004c2e8540770e" }
+{ "action": "hurry", "rideId": "9f04f733cc65456b97004c2e8540770e" }     // hurry|comfort|normal は Gemini を通さずに走り方を切り替える
+{ "action": "explain", "rideId": "9f04f733cc65456b97004c2e8540770e" }   // 停車理由。Gemini が言い換え、失敗したら決まった文で答える
 ```
 
 成功時:
@@ -1316,8 +1317,8 @@ TorchScript・torch.export（`.pt2`）・Keras 形式を渡した場合は、そ
   "reply": "走り方を「少し急いで」にしました。制限速度の近くまで早めに加速します（信号と制限速度は守ります）。",
   "actions": [{ "name": "set_driving_mode", "args": { "mode": "hurry" } }],
   "driveMode": "hurry",     // この応答の後の走り方（反映は次のステップ。taxi.driveMode でも届く）
-  "situation": {            // Gemini に渡した状況（真値。配車していなければ phase と stopReason だけ）
-    "phase": "riding", "driveMode": "normal", "stopReason": "signal",
+  "situation": {            // Gemini に渡した状況（真値。配車していなければ rideId は null）
+    "phase": "riding", "rideId": "9f04f733cc65456b97004c2e8540770e", "driveMode": "normal", "stopReason": "signal",
     "speedKmh": 0.0, "etaSeconds": 95, "remainingDistanceM": 480,
     "nextSignalDistanceM": 3.2, "nextSignalColor": "red",
     "leadVehicleGapM": null, "pedestrianAheadM": null, "practicalMode": true
@@ -1329,6 +1330,9 @@ TorchScript・torch.export（`.pt2`）・Keras 形式を渡した場合は、そ
   `explain_status()`。信号・制限速度・車間を緩めるツールは無いので、「赤信号でも進んで」と頼まれても安全の判定
   （`constrain_accel`）は変わらない。走り方が変えるのは経路追従自身のアクセルと、前走車・歩行者の手前に**足す**余裕だけ
 - `stopReason`: `moving` / `signal` / `pedestrian` / `lead_vehicle` / `safety` / `boarding` / `arrived` / `stopped` / `idle`
+- `rideId` は `taxi.rideId` を送り、状況取得時に一致しなければ `409`。省略時は取得した状況の配車へ操作を束縛する。
+  操作の適用直前にも照合し、終了・新規配車・モード変更後の古い操作を捨てる。迎車の引き継ぎでは同じ ID を維持する。
+  フロントは配車 ID の変更・モード変更で会話と問い合わせ世代を初期化し、旧応答による履歴・pending の更新を捨てる。
 - Gemini への問い合わせは HTTP 側のスレッドで行い、エンジンスレッドは状況を 1 回埋めるだけ（待たせない）。同時に 1 件だけ
 - ★ **`Content-Type: application/json` でなければ `415` で断る**（別のサイトからのフォーム送信・`text/plain` の送信を通さない。
   JSON にするとブラウザがプリフライトを挟むので、CORS で許した画面からしか送れない）。本文は 8KB まで（超えたら `413`）
