@@ -215,3 +215,5 @@ export const VEHICLE_LIGHT_COLORS = ['#fff3d4', '#e8241c', '#ff9a1f'] as const
 
 /** 消えているときの灯体の色（黒い穴にならないよう、少し明るいグレー） */
 export const VEHICLE_LIGHT_OFF = '#4a4d55'
+
+export const TRAFFIC_SIGN_COLORS = { red: '#d82932', blue: '#1556ad', white: '#ffffff' } as const

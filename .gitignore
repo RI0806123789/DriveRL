@@ -5,6 +5,7 @@
 
 # -- AI Agent --
 .claude
+.codex
 
 # --- model weights files ---
 *.pt

@@ -383,7 +383,7 @@ def test_a_corrupt_ir_is_rebuilt_from_keras(monkeypatch: pytest.MonkeyPatch, ker
 
     detector = det.Detector.load(keras_model_path, DEFAULT_CAMERA)
     assert detector is not None and detector.backend.startswith("OpenVINO CPU")
-    assert detector._forward(_images(2))[0].shape == (2, 6, 8, 24)
+    assert detector._forward(_images(2))[0].shape == (2, det.GRID_ROWS, det.GRID_COLS, det.CHANNELS)
 
 
 @needs_openvino

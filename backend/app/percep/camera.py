@@ -27,6 +27,7 @@ from app.percep.types import (
     CameraSpec,
     facing_viewer,
     signal_ahead_of_stop,
+    sign_half_extents,
 )
 from app.percep.weather import CLEAR, Weather, apply_weather
 
@@ -57,6 +58,7 @@ LBL_SIGN_DIGIT = 15
 LBL_POLE = 16
 LBL_PEDESTRIAN = 17
 LBL_PEDESTRIAN_HEAD = 18
+LBL_SIGN_BLUE = 19
 
 LABELS = {
     "ground": LBL_GROUND,
@@ -78,6 +80,7 @@ LABELS = {
     "pole": LBL_POLE,
     "pedestrian": LBL_PEDESTRIAN,
     "pedestrian_head": LBL_PEDESTRIAN_HEAD,
+    "sign_blue": LBL_SIGN_BLUE,
 }
 
 PALETTE = np.array(
@@ -101,6 +104,7 @@ PALETTE = np.array(
         (150, 150, 152),
         (58, 104, 176),
         (216, 176, 140),
+        (32, 80, 188),
     ],
     dtype=np.uint8,
 )
@@ -640,7 +644,7 @@ class PseudoCamera:
         self._sig_grid = NeighborIndex(self._sig_x, self._sig_y, self._far)
 
     def _prepare_signs(self) -> None:
-        """最高速度標識の板の中心・向き・表示する数字を求めておく。"""
+        """標識の板の中心・向き・表示する数字と種類を求めておく。"""
         signs = self.map_index.data.signs
         n = len(signs)
         self._sign_count = n
@@ -656,6 +660,9 @@ class PseudoCamera:
         self._sign_ax = -sin_h
         self._sign_ay = cos_h
         self._sign_heading = heading
+        self._sign_kind = np.array([getattr(s, "kind", "speed_limit") for s in signs])
+        self._sign_direction = np.array([getattr(s, "direction", "straight") for s in signs])
+        self._sign_half = np.array([sign_half_extents(kind) for kind in self._sign_kind])
 
         kph = np.rint(
             np.array([s.speed_limit for s in signs], dtype=np.float64) * 3.6
@@ -665,6 +672,7 @@ class PseudoCamera:
         digits[:, 0] = np.where(kph >= 100, digits[:, 0], -1)
         digits[:, 1] = np.where(kph >= 10, digits[:, 1], -1)
         self._sign_digits = digits.astype(np.int8)
+        self._sign_digits[self._sign_kind != "speed_limit"] = -1
         self._sign_grid = NeighborIndex(self._sign_x, self._sign_y, self._far)
 
     def render(
@@ -1195,7 +1203,7 @@ class PseudoCamera:
         sin_h: np.ndarray,
         heading: np.ndarray,
     ):
-        """最高速度標識を「支柱 + 赤縁の円 + 白地 + 7 セグの数字」で描く。"""
+        """種類ごとの板と記号を、共通寸法・正対の条件で描く。"""
         if self._sign_count == 0:
             return None
         pair = self._pairs(self._sign_grid, eye_x, eye_y)
@@ -1224,13 +1232,14 @@ class PseudoCamera:
         sh = sin_h[cam]
         ax = self._sign_ax[sgn]
         ay = self._sign_ay[sgn]
+        half_w = self._sign_half[sgn, 0]
         zc_center = np.full(sx.shape, SIGN_BOARD_Z)
 
         u_l, v_c, zc = self._project(
-            sx + ax * SIGN_RADIUS, sy + ay * SIGN_RADIUS, zc_center, ex, ey, ch, sh
+            sx + ax * half_w, sy + ay * half_w, zc_center, ex, ey, ch, sh
         )
         u_r, _v, zc_r = self._project(
-            sx - ax * SIGN_RADIUS, sy - ay * SIGN_RADIUS, zc_center, ex, ey, ch, sh
+            sx - ax * half_w, sy - ay * half_w, zc_center, ex, ey, ch, sh
         )
         visible = (zc > self._near) & (zc_r > self._near) & (zc < self._far)
         if not visible.any():
@@ -1250,7 +1259,7 @@ class PseudoCamera:
         scale = self._focal / np.maximum(zc.astype(np.float64), 1e-3)
         board_cx = (u_l + u_r) * 0.5
         board_hw = np.maximum(np.abs(u_r - u_l) * 0.5, 0.1)
-        board_hh = SIGN_RADIUS * scale
+        board_hh = self._sign_half[sgn, 1] * scale
 
         _up, v_ground, _z2 = self._project(
             sx, sy, np.zeros_like(sx), ex, ey, ch, sh
@@ -1262,16 +1271,22 @@ class PseudoCamera:
         face_hh = board_hh * 0.78
 
         m = cam.size
+        kinds = self._sign_kind[sgn]
+        board_shape = np.where(kinds == "stop", 2, np.where(np.isin(kinds, ("crosswalk", "one_way")), 0, 1)).astype(np.int8)
+        board_label = np.where(np.isin(kinds, ("crosswalk", "one_way", "mandatory_direction")), LBL_SIGN_BLUE, LBL_SIGN_RIM).astype(np.uint8)
+        face_label = np.where(np.isin(kinds, ("no_parking", "no_stopping")), LBL_SIGN_BLUE, np.where(kinds == "stop", LBL_SIGN_RIM, LBL_SIGN_FACE)).astype(np.uint8)
+        board_label[kinds == "stop"] = LBL_SIGN_FACE
+        face_label[np.isin(kinds, ("crosswalk", "one_way", "mandatory_direction"))] = LBL_SIGN_BLUE
         cams = [cam, cam, cam]
         cxs = [board_cx, board_cx, board_cx]
         cys = [(v_ground + v_bottom) * 0.5, v_c, v_c]
         hws = [pole_hw, board_hw, face_hw]
         hhs = [np.abs(v_ground - v_bottom) * 0.5, board_hh, face_hh]
-        ell = [np.zeros(m, dtype=bool), np.ones(m, dtype=bool), np.ones(m, dtype=bool)]
+        ell = [np.zeros(m, dtype=np.int8), board_shape, board_shape]
         lbl = [
             np.full(m, LBL_POLE, dtype=np.uint8),
-            np.full(m, LBL_SIGN_RIM, dtype=np.uint8),
-            np.full(m, LBL_SIGN_FACE, dtype=np.uint8),
+            board_label,
+            face_label,
         ]
         dep = [zc, zc, zc]
         order = [
@@ -1292,6 +1307,11 @@ class PseudoCamera:
             dep.append(digits[7])
             order.append(digits[8])
 
+        symbols = self._sign_symbol_shapes(cam, sgn, board_cx, v_c, face_hw, face_hh, zc)
+        if symbols is not None:
+            for values, field in zip(symbols, (cams, cxs, cys, hws, hhs, ell, lbl, dep, order)):
+                field.append(values)
+
         return (
             np.concatenate(cams),
             np.concatenate(cxs).astype(np.float32),
@@ -1303,6 +1323,53 @@ class PseudoCamera:
             np.concatenate(dep).astype(np.float32),
             np.concatenate(order),
         )
+
+    def _sign_symbol_shapes(self, cam, sgn, cx, cy, hw, hh, depth):
+        """標識の矢印・横断者・禁止線を矩形と三角形の群で作る。"""
+        if np.all(self._sign_kind[sgn] == "speed_limit"):
+            return None
+        fields = [[] for _ in range(9)]
+
+        def add(mask, dx=0.0, dy=0.0, width=0.15, height=0.15, shape=0, label=LBL_SIGN_FACE, level=3):
+            indices = np.flatnonzero(mask)
+            if not len(indices):
+                return
+            values = (
+                cam[indices], cx[indices] + hw[indices] * dx, cy[indices] + hh[indices] * dy,
+                hw[indices] * width, hh[indices] * height,
+                np.full(len(indices), shape, dtype=np.int8), np.full(len(indices), label, dtype=np.uint8),
+                depth[indices], np.full(len(indices), level, dtype=np.int16),
+            )
+            for field, value in zip(fields, values):
+                field.append(value)
+
+        kinds = self._sign_kind[sgn]
+        stop = kinds == "stop"
+        add(stop, dy=-0.3, width=0.43, height=0.07)
+        add(stop, dy=-0.04, width=0.3, height=0.07)
+        crossing = kinds == "crosswalk"
+        add(crossing, width=0.82, height=0.85, shape=3)
+        add(crossing, dy=-0.13, width=0.14, height=0.14, shape=1, label=LBL_SIGN_BLUE, level=4)
+        add(crossing, dy=0.24, width=0.16, height=0.25, label=LBL_SIGN_BLUE, level=4)
+        for dx in (-0.5, 0.0, 0.5):
+            add(crossing, dx=dx, dy=0.65, width=0.15, height=0.08, level=5)
+        forbidden = np.isin(kinds, ("no_parking", "no_stopping"))
+        add(forbidden, width=0.9, height=0.9, shape=4, label=LBL_SIGN_RIM)
+        add(kinds == "no_stopping", width=0.9, height=0.9, shape=5, label=LBL_SIGN_RIM)
+        arrow = np.isin(kinds, ("mandatory_direction", "one_way"))
+        direction = self._sign_direction[sgn]
+        straight = arrow & np.isin(direction, ("straight", "left_or_straight", "right_or_straight"))
+        left = arrow & np.isin(direction, ("left", "left_or_straight", "left_or_right"))
+        right = arrow & np.isin(direction, ("right", "right_or_straight", "left_or_right"))
+        add(straight, dy=0.1, width=0.12, height=0.55)
+        add(straight, dy=-0.54, width=0.33, height=0.32, shape=3)
+        add(left, dx=-0.1, width=0.53, height=0.12)
+        add(left, dx=-0.56, width=0.32, height=0.33, shape=6)
+        add(right, dx=0.1, width=0.53, height=0.12)
+        add(right, dx=0.56, width=0.32, height=0.33, shape=7)
+        if not fields[0]:
+            return None
+        return tuple(np.concatenate(field) for field in fields)
 
     def _sign_digit_shapes(
         self,
@@ -1413,14 +1480,22 @@ class PseudoCamera:
             return
 
         row_hw = hw[obj].astype(np.float64)
-        is_ell = ell[obj]
-        if is_ell.any():
+        is_shaped = ell[obj] != 0
+        cx_o = cxf[obj].astype(np.float64)
+        if is_shaped.any():
             hh_o = np.maximum(hh[obj].astype(np.float64), 1e-6)
             dy = (rows + 0.5 - cyf[obj]) / hh_o
             shrink = np.sqrt(np.maximum(1.0 - dy * dy, 0.0))
-            row_hw = np.where(is_ell, row_hw * shrink, row_hw)
-
-        cx_o = cxf[obj].astype(np.float64)
+            row_hw = np.where(ell[obj] == 1, row_hw * shrink, row_hw)
+            if np.any(ell >= 2):
+                row_hw = np.where(ell[obj] == 2, row_hw * np.clip((1.0 - dy) * 0.5, 0.0, 1.0), row_hw)
+                row_hw = np.where(ell[obj] == 3, row_hw * np.clip((1.0 + dy) * 0.5, 0.0, 1.0), row_hw)
+                diagonal = np.isin(ell[obj], (4, 5))
+                horizontal = np.isin(ell[obj], (6, 7))
+                cx_o += np.where(diagonal, np.clip(dy, -1.0, 1.0) * hw[obj] * np.where(ell[obj] == 4, 1.0, -1.0), 0.0)
+                cx_o += np.where(horizontal, np.clip(np.abs(dy), 0.0, 1.0) * hw[obj] * np.where(ell[obj] == 6, 1.0, -1.0), 0.0)
+                row_hw = np.where(diagonal, hw[obj] * 0.12, row_hw)
+                row_hw = np.where(horizontal, hw[obj] * np.maximum(1.0 - np.abs(dy), 0.0), row_hw)
         sx0 = np.clip(np.floor(cx_o - row_hw).astype(np.int32), 0, w - 1)
         sx1 = np.clip(np.floor(cx_o + row_hw).astype(np.int32), 0, w - 1)
         lens = (sx1 - sx0 + 1).astype(np.int64)

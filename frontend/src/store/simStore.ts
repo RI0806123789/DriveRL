@@ -148,7 +148,7 @@ const DEFAULT_CONFIG: SimConfig = {
   maxVehicles: 8,
   maxPedestrians: DEFAULT_MAX_PEDESTRIANS,
   simHz: 20,
-  obsDim: 87,
+  obsDim: 111,
   actionDim: 2,
 }
 

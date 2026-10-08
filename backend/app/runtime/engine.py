@@ -1101,7 +1101,7 @@ class SimulationEngine:
         if widened:
             self._notify(
                 f"前回の学習済みモデルを復元しました。観測が {trainer.widened_from} 次元から "
-                f"{config.OBS_DIM} 次元に増えた（周囲カメラ・V2X の欄）ので、"
+                f"{config.OBS_DIM} 次元に増えた（周囲カメラ・V2X・死角・標識の欄）ので、"
                 "足した入力の重みを 0 で読み込みました（元のファイルは "
                 f"{config.CHECKPOINT_PATH.name}.obs{trainer.widened_from} に控えました）"
             )

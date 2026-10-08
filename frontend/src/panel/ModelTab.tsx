@@ -55,6 +55,12 @@ const CLASS_LABEL: Record<string, string> = {
   OBSTACLE: '障害物',
   LANE: '車線',
   PEDESTRIAN: '歩行者',
+  STOP_SIGN: '一時停止',
+  CROSSWALK_SIGN: '横断歩道',
+  ONE_WAY_SIGN: '一方通行',
+  MANDATORY_DIRECTION_SIGN: '指定方向外進行禁止',
+  NO_PARKING_SIGN: '駐車禁止',
+  NO_STOPPING_SIGN: '駐停車禁止',
 }
 
 /** 集める枚数から、おおよその所要時間を見積もる（銀座での実測が元）。 */

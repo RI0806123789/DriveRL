@@ -21,6 +21,7 @@ from app.percep.types import (
     DetClass,
     Detection,
     PerceptionResult,
+    SIGN_DIRECTIONS,
     pack_by_class_quota,
 )
 from app.warn import warn_once
@@ -57,7 +58,9 @@ OFF_PHASE = OFF_CLS + NUM_CLASSES
 OFF_SPEED = OFF_PHASE + NUM_PHASES
 OFF_DIST = OFF_SPEED + NUM_SPEED_BINS
 OFF_LATERAL = OFF_DIST + 1
-CHANNELS = OFF_LATERAL + 1
+OFF_DIRECTION = OFF_LATERAL + 1
+NUM_DIRECTIONS = len(SIGN_DIRECTIONS)
+CHANNELS = OFF_DIRECTION + NUM_DIRECTIONS
 
 FREESPACE_DIM = int(config.OBS_FREESPACE_DIM)
 
@@ -131,6 +134,7 @@ def build_detector(
         layers.Conv2D(NUM_SPEED_BINS, 1, activation="softmax", name="head_speed")(features),
         layers.Conv2D(1, 1, activation="sigmoid", name="head_dist")(features),
         layers.Conv2D(1, 1, activation="tanh", name="head_lateral")(features),
+        layers.Conv2D(NUM_DIRECTIONS, 1, activation="softmax", name="head_direction")(features),
     ]
     detections = layers.Concatenate(axis=-1, name=DET_OUTPUT_NAME)(head)
 
@@ -190,6 +194,8 @@ def encode_targets(
                 cell[OFF_PHASE + int(np.clip(int(det.phase), 0, NUM_PHASES - 1))] = 1.0
             if det.cls is DetClass.SPEED_SIGN and det.speed_limit is not None:
                 cell[OFF_SPEED + speed_bin_index(float(det.speed_limit))] = 1.0
+            if det.cls in (DetClass.MANDATORY_DIRECTION_SIGN, DetClass.ONE_WAY_SIGN) and det.direction in SIGN_DIRECTIONS:
+                cell[OFF_DIRECTION + SIGN_DIRECTIONS.index(det.direction)] = 1.0
             cell[OFF_DIST] = np.clip(distance / max(far, 1e-6), 0.0, 1.0)
             if det.lateral is not None:
                 cell[OFF_LATERAL] = np.clip(
@@ -272,6 +278,7 @@ def decode_detections(
         classes = np.argmax(selected[:, OFF_CLS:OFF_CLS + NUM_CLASSES], axis=1)
         phases = np.argmax(selected[:, OFF_PHASE:OFF_PHASE + NUM_PHASES], axis=1)
         speeds = np.argmax(selected[:, OFF_SPEED:OFF_SPEED + NUM_SPEED_BINS], axis=1)
+        directions = np.argmax(selected[:, OFF_DIRECTION:OFF_DIRECTION + NUM_DIRECTIONS], axis=1)
         per_class: dict[DetClass, list[Detection]] = {c: [] for c in DetClass}
         for k, values in enumerate(selected):
             cls = DetClass(int(classes[k]))
@@ -292,6 +299,8 @@ def decode_detections(
             elif cls is DetClass.LANE:
                 det.lateral = float(values[OFF_LATERAL]) * LATERAL_SCALE
                 det.lane_points = _lane_polyline(det, spec)
+            elif cls in (DetClass.MANDATORY_DIRECTION_SIGN, DetClass.ONE_WAY_SIGN):
+                det.direction = SIGN_DIRECTIONS[int(directions[k])]
             per_class[cls].append(det)
         out.append(
             PerceptionResult(

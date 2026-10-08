@@ -129,7 +129,7 @@ class MapIndexImpl:
         self._signal_heading = np.array([s.heading for s in data.signals], dtype=np.float64)
         self._sign_xy = _xy_of(data.signs)
         self._signals_by_hop = self._by_hop(data.signals, at_exit=True)
-        self._signs_by_hop = self._by_hop(data.signs, at_exit=False)
+        self._signs_by_hop = self._by_hop(data.signs, at_exit=False, kind="speed_limit")
 
         self.occupancy = self._build_occupancy(data)
 
@@ -614,10 +614,12 @@ class MapIndexImpl:
             out.append((arc, limit))
         return out
 
-    def _by_hop(self, items: Sequence, at_exit: bool) -> dict[tuple[int, int], list[int]]:
+    def _by_hop(self, items: Sequence, at_exit: bool, kind: str | None = None) -> dict[tuple[int, int], list[int]]:
         """地物を、それが立つ辺の (入口のノード, 出口のノード) で引けるようにする。"""
         table: dict[tuple[int, int], list[int]] = {}
         for i, item in enumerate(items):
+            if kind is not None and item.kind != kind:
+                continue
             edge = self._edges_by_id.get(int(item.edge_id))
             node = int(item.node_id)
             if edge is None or node not in (int(edge.u), int(edge.v)):

@@ -103,7 +103,7 @@ def _match(
 
 
 def _attribute_ok(cls: DetClass, truth: Detection, pred: Detection) -> bool | None:
-    """属性（灯色・規制速度）が合っているか。属性を持たないクラスは None。"""
+    """属性（灯色・規制速度・矢印）が合っているか。属性を持たないクラスは None。"""
     if cls is DetClass.TRAFFIC_LIGHT:
         if truth.phase is None:
             return None
@@ -114,6 +114,8 @@ def _attribute_ok(cls: DetClass, truth: Detection, pred: Detection) -> bool | No
         if pred.speed_limit is None:
             return False
         return abs(float(truth.speed_limit) - float(pred.speed_limit)) <= SPEED_TOLERANCE_MPS
+    if cls in (DetClass.MANDATORY_DIRECTION_SIGN, DetClass.ONE_WAY_SIGN):
+        return None if truth.direction is None else truth.direction == pred.direction
     return None
 
 
@@ -254,6 +256,12 @@ _CLASS_LABELS: dict[DetClass, str] = {
     DetClass.OBSTACLE: "障害物",
     DetClass.LANE: "車線",
     DetClass.PEDESTRIAN: "歩行者",
+    DetClass.STOP_SIGN: "一時停止",
+    DetClass.CROSSWALK_SIGN: "横断歩道",
+    DetClass.ONE_WAY_SIGN: "一方通行",
+    DetClass.MANDATORY_DIRECTION_SIGN: "指定方向外進行禁止",
+    DetClass.NO_PARKING_SIGN: "駐車禁止",
+    DetClass.NO_STOPPING_SIGN: "駐停車禁止",
 }
 
 _WEATHER_LABELS: dict[str, str] = {
