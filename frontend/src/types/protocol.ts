@@ -1,7 +1,10 @@
-/** docs/protocol.md v2 の TypeScript 表現。 */
+/** docs/protocol.md v3 の TypeScript 表現。 */
 
 /** プロトコルバージョン。init.protocolVersion がこれと違えば警告する */
-export const PROTOCOL_VERSION = 2
+export const PROTOCOL_VERSION = 3
+
+/** モデル書き出し API の形式。 */
+export type ExportKind = 'checkpoint' | 'torchscript' | 'pt2' | 'keras'
 
 /** ENU 平面上の座標 [x（東）, y（北）]（メートル） */
 export type Vec2 = [number, number]
