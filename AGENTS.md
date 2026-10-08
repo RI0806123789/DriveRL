@@ -106,6 +106,9 @@ cd backend
   命名は既存に合わせて `feat/...` / `fix/...`（例: `feat/detector-training-tab-and-pwa`）
 - コミットメッセージは `feat:` / `fix:` + **日本語**の要約。本文には
   **「なぜそうしたか」と「★ 壊れやすい点」**を書く（既存のログが手本）
+- **Codex が作成するコミットの Author / Committer は `Codex <codex@openai.com>` にする。**
+  `git -c user.name=Codex -c user.email=codex@openai.com commit ...` で、そのコミットだけ名義を指定する。
+  手動コミットの名義を保つため、共通の `git config user.name` / `user.email` は変更しない。
 - 利用者が作業完了（機能の実装やバグ修正の完了）を報告したら、
   **プライバシーの確認**（個人情報・鍵・ローカルの絶対パスはプレースホルダーへ）をしたうえで
   プルリクエストを出す。既存ブランチの再利用でかまわない
