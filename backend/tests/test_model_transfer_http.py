@@ -9,8 +9,10 @@ import logging
 import re
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path, PurePath
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 from fastapi import FastAPI, Request, UploadFile
@@ -69,7 +71,7 @@ def transfer_app(tmp_path, monkeypatch):
     namespace = {
         "app": app, "asyncio": asyncio, "Request": Request, "UploadFile": UploadFile,
         "JSONResponse": JSONResponse, "FileResponse": FileResponse, "time": time,
-        "PurePath": PurePath, "re": re, "Any": object,
+        "PurePath": PurePath, "re": re, "Any": object, "uuid4": uuid4,
         "logger": logging.getLogger(__name__), "config": SimpleNamespace(UPLOAD_DIR=tmp_path),
         "engine": SimpleNamespace(request_export=request_export, request_import=request_import,
                                   status_payload=lambda: {"state": "running"}),
@@ -324,6 +326,86 @@ def test_http_timeout_keeps_engine_owned_upload(transfer_app, temporary_files):
     status, _, _ = request(app, "POST", "/api/import", [multipart(b"content")], {"content-type": CONTENT_TYPE})
     assert status == 504 and calls["imports"][0][0].read_bytes() == b"content"
     assert all(file.closed for file in temporary_files)
+
+
+@pytest.mark.parametrize("names", [("model.pt", "model.pt"), ("model?.pt", "model*.pt")])
+@pytest.mark.parametrize("timeout", [False, True])
+def test_parallel_uploads_keep_separate_engine_owned_files(transfer_app, temporary_files, names, timeout):
+    app, calls, namespace = transfer_app
+    namespace["time"] = SimpleNamespace(strftime=lambda fmt: "fixed-second")
+    assert namespace["_safe_upload_name"](names[0]) == namespace["_safe_upload_name"](names[1])
+    barrier = threading.Barrier(2)
+    original = namespace["engine"].request_import
+
+    def queued_import(path):
+        barrier.wait(timeout=5)
+        ticket = original(path)
+        if timeout:
+            ticket.done = SimpleNamespace(wait=lambda seconds: False)
+        return ticket
+
+    namespace["engine"].request_import = queued_import
+    data = [b"first-policy", b"second-policy"]
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(request, app, "POST", "/api/import", [multipart(content, filename=name)],
+                   {"content-type": CONTENT_TYPE}) for content, name in zip(data, names)]
+        results = [future.result(timeout=10) for future in futures]
+    assert all(status == (504 if timeout else 200) for status, _, _ in results)
+    imports = calls["imports"]
+    assert len(imports) == 2 and imports[0][0] != imports[1][0]
+    assert {content for _, content in imports} == set(data)
+    assert {path.read_bytes() for path, _ in imports} == set(data)
+    if not timeout:
+        assert [json.loads(body)["filename"] for _, body, _ in results] == list(names)
+    assert all(file.closed for file in temporary_files)
+
+
+def test_exclusive_creation_failure_keeps_existing_upload(transfer_app, temporary_files):
+    app, calls, namespace = transfer_app
+    namespace["time"] = SimpleNamespace(strftime=lambda fmt: "fixed-second")
+    namespace["uuid4"] = lambda: SimpleNamespace(hex="fixed-id")
+    existing = namespace["config"].UPLOAD_DIR / "fixed-second_fixed-id_model.pt"
+    existing.write_bytes(b"queued-policy")
+    status, body, _ = request(app, "POST", "/api/import", [multipart(b"replacement")], {"content-type": CONTENT_TYPE})
+    assert status == 500 and "保存に失敗" in json.loads(body)["error"]
+    assert existing.read_bytes() == b"queued-policy" and calls["imports"] == []
+    assert all(file.closed for file in temporary_files)
+
+
+def test_partial_save_failure_removes_only_its_own_upload(transfer_app, temporary_files, monkeypatch):
+    app, calls, namespace = transfer_app
+    foreign = namespace["config"].UPLOAD_DIR / "queued_model.pt"
+    foreign.write_bytes(b"queued-policy")
+    original = StarletteUploadFile.read
+    reads = 0
+
+    async def broken_read(file, size=-1):
+        nonlocal reads
+        if size == 1024 * 1024:
+            reads += 1
+            if reads == 2:
+                raise OSError("部分ファイルの検査")
+        return await original(file, size)
+
+    monkeypatch.setattr(StarletteUploadFile, "read", broken_read)
+    assert request(app, "POST", "/api/import", [multipart(b"partial")], {"content-type": CONTENT_TYPE})[0] == 500
+    assert calls["imports"] == [] and list(namespace["config"].UPLOAD_DIR.glob("*_model.pt")) == [foreign]
+    assert foreign.read_bytes() == b"queued-policy" and all(file.closed for file in temporary_files)
+
+
+def test_queue_failure_cleans_only_unhanded_upload(transfer_app, temporary_files):
+    app, calls, namespace = transfer_app
+    foreign = namespace["config"].UPLOAD_DIR / "queued_model.pt"
+    foreign.write_bytes(b"queued-policy")
+
+    def broken_queue(path):
+        raise RuntimeError("キューの検査")
+
+    namespace["engine"].request_import = broken_queue
+    with pytest.raises(RuntimeError, match="キューの検査"):
+        request(app, "POST", "/api/import", [multipart(b"content")], {"content-type": CONTENT_TYPE})
+    assert calls["imports"] == [] and list(namespace["config"].UPLOAD_DIR.glob("*_model.pt")) == [foreign]
+    assert foreign.read_bytes() == b"queued-policy" and all(file.closed for file in temporary_files)
 
 
 

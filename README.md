@@ -81,6 +81,7 @@ DriveRL/
 │   │   │   ├── warmstart.py        経路追従を教師にした行動クローニング
 │   │   │   ├── online_assist.py    学習中の車へ経路追従を割り込ませる度合い（DAgger 風のオンライン模倣）
 │   │   │   ├── export.py           モデルの書き出し（.pt / .pt2 / TorchScript / .keras）
+│   │   │   ├── checkpoint.py       モデル定義・重み・Adam の検証と移行
 │   │   │   └── importer.py         モデルの読み込みと安全な検証
 │   │   ├── host_guard.py           WebSocket / HTTP の接続元（Host / Origin）の確認
 │   │   ├── warn.py                 失敗を握りつぶすときの初回だけのログ（warn_once）
@@ -379,6 +380,7 @@ cd backend; .venv\Scripts\python.exe -m app.map.prefetch; cd ..
   発行したキーを書いて、バックエンドを起動し直します。**キーはブラウザへ送りません。** モデルは `GEMINI_MODEL` で変えられます。
   混雑（`503` など）のときは自動で試し直し、`GEMINI_FALLBACK_MODEL` を書くと最後の 1 回だけそちらへ送ります
 - **頼んでも信号・制限速度・車間は緩みません。** Gemini が選べるのは「走り方の切り替え」「緊急停止」「状況の説明」の 3 つだけです
+- 配車が終了したり開発モードへ戻ったりした後に届く応答は、新しい配車を操作せず、消した会話も復活させません。迎車の引き継ぎは同じ配車として扱います
 
 ---
 
@@ -526,6 +528,8 @@ TorchScript 版なら `policy = torch.jit.load("<書き出したファイル>.to
 - torch.export 版・TorchScript 版・Keras 版は推論専用で、学習の再開には使えません
 - torch.export 版はモデルをトレースするので、書き出す間（1 秒足らず）シミュレーションが止まります
 - `.pt` は必ず `weights_only=True` で解析し、テンソルと素の値以外が入っていれば読み込みを止めます（詳しくは `SECURITY.md`）
+- 重みや Adam に NaN・無限大・形状や型の違いがあれば拒否し、現在の学習状態と保存済みモデルを保ちます。
+  現行モデルの Adam は復元し、旧次元・旧方策への移行や Adam を含まないモデルでは Adam を初期化します（学習率は現在の設定を維持）
 - 読み込みはファイル 1 つ、256MiB までです（出典: `backend/app/model_upload.py`）。受信中に容量を検査し、超過した部分ファイルも片付けます
 - 書き出しは JSON の POST です。以前の GET では生成しません
 - 容量検査は HTTP 側で行います。2026-10-09 の新旧比較でファイル内容は一致し、2MiB の解析は中央値 13.9 → 14.5ms でした（計測条件は `CLAUDE.md`「モデルの入出力」）

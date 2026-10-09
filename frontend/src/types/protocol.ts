@@ -644,6 +644,8 @@ export function isWaitingPhase(phase: TaxiPhase): boolean {
 export interface TaxiMessage {
   type: 'taxi'
   phase: TaxiPhase
+  /** 配車固有の識別子。迎車の引き継ぎでも維持し、idle は null */
+  rideId: string | null
   /** 徴用している車両スロット。-1 なら無し */
   vehicleId: number
   /** 道路へスナップ済みの乗車地点（クライアントが送った座標ではない） */

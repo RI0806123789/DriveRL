@@ -25,6 +25,7 @@ import { pushFrame, resetFrameBuffer } from './frameBuffer'
 import { normalizeAssistRate } from './assistRate'
 import { lostSessionNotice, readAutotuneFlag, writeAutotuneFlag } from './autotune'
 import { normalizeRatio } from './curriculum'
+import { useConcierge } from './concierge'
 
 /** メトリクス履歴に**上限は設けない**。 */
 
@@ -166,6 +167,7 @@ const DEFAULT_STATUS: StatusPayload = {
 const IDLE_TAXI: TaxiMessage = {
   type: 'taxi',
   phase: 'idle',
+  rideId: null,
   vehicleId: -1,
   pickup: null,
   dropoff: null,
@@ -257,6 +259,7 @@ let errorSeq = 0
 /** モードが変わるときに一緒に書き換える値。ボタン・init・status のどれで変わっても同じ後始末をする */
 function modeChange(s: Pick<SimStore, 'mode'>, mode: AppMode): Partial<SimStore> {
   if (s.mode === mode) return { mode }
+  useConcierge.getState().clear()
   // 開発モードへ戻ったら車載カメラも自動操作も畳む（どちらも相手がいなくなる）。
   // 実用モードへ入ったら 3D 画面のクリックでの介入をやめる（障害物を置いたままにしない）
   return mode === 'dev'
@@ -477,6 +480,7 @@ export const useSimStore = create<SimStore>((set, get) => ({
       }
 
       case 'taxi': {
+        if (msg.rideId !== get().taxi.rideId) useConcierge.getState().clear()
         // 経路は版が変わった通にしか入らないので、無い通では前回のものを引き継ぐ
         set((s) => ({
           taxi: {

@@ -18,8 +18,11 @@ import torch.nn as nn
 from app import config
 from app.contracts import DriveState, SimParams
 from app.rl.buffer import RolloutBuffer
+from app.rl.checkpoint import (
+    CHECKPOINT_FORMAT, FLAT_CHECKPOINT_FORMATS, KNOWN_CHECKPOINT_FORMATS,
+    is_flat_state, prepare_checkpoint, upgrade_flat_state, widen_observation,
+)
 from app.rl.hierarchical_policy import (
-    META_MODULES,
     NUM_OPTIONS,
     OptionScheduler,
     sub_reward_shaping,
@@ -34,57 +37,6 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
-
-CHECKPOINT_FORMAT = "autoware-sim-ppo-2"
-
-#: 1 は階層型にする前（平らな方策）。読み込むときに `upgrade_flat_state` で移す
-FLAT_CHECKPOINT_FORMATS: frozenset[object] = frozenset({"autoware-sim-ppo-1", 1})
-KNOWN_CHECKPOINT_FORMATS: frozenset[object] = frozenset({CHECKPOINT_FORMAT}) | FLAT_CHECKPOINT_FORMATS
-
-
-#: 観測を受け取る入力層（方策と価値の MLP の先頭の Linear）
-_INPUT_WEIGHTS = ("policy_trunk.0.weight", "value_trunk.0.weight")
-_META_INPUT_WEIGHTS = ("meta_trunk.0.weight", "meta_value_trunk.0.weight")
-
-
-def widen_observation(
-    state: dict[str, torch.Tensor], saved_obs: int, obs_dim: int
-) -> dict[str, torch.Tensor]:
-    """入力層の重みの観測の末尾（意図の one-hot の手前）に 0 の列を足す。読み込んだ直後の振る舞いは元と同じ。"""
-    out = dict(state)
-    extra = int(obs_dim) - int(saved_obs)
-    keys = [*_INPUT_WEIGHTS, *(k for k in _META_INPUT_WEIGHTS if k in out)]
-    for key in keys:
-        weight = out.get(key)
-        width = -1 if weight is None or weight.dim() != 2 else int(weight.shape[1])
-        if width not in (int(saved_obs), int(saved_obs) + NUM_OPTIONS):
-            raise ValueError(f"{key} の形が観測 {saved_obs} 次元の入力層ではありません")
-        pad = torch.zeros((int(weight.shape[0]), extra), dtype=weight.dtype, device=weight.device)
-        out[key] = torch.cat([weight[:, : int(saved_obs)], pad, weight[:, int(saved_obs) :]], dim=1)
-    return out
-
-
-def is_flat_state(state: dict[str, torch.Tensor]) -> bool:
-    """階層型にする前（上位方策が無く、下位の入力に意図の one-hot が無い）の重みか。"""
-    return not any(key.startswith(META_MODULES) for key in state)
-
-
-def upgrade_flat_state(
-    state: dict[str, torch.Tensor], fresh: dict[str, torch.Tensor]
-) -> dict[str, torch.Tensor]:
-    """平らな方策の重みを階層型へ移す。意図の入力の重みと偏りは 0、上位方策は `fresh`（初期値）のまま。"""
-    out = dict(state)
-    for key in _INPUT_WEIGHTS:
-        weight = out[key]
-        pad = torch.zeros((int(weight.shape[0]), NUM_OPTIONS), dtype=weight.dtype, device=weight.device)
-        out[key] = torch.cat([weight, pad], dim=1)
-    # 意図で操作が変わると、読み込んだ直後の振る舞いが元と違ってしまう
-    out["option_bias"] = torch.zeros_like(fresh["option_bias"])
-    for key, value in fresh.items():
-        if key.startswith(META_MODULES):
-            out[key] = value.clone()
-    return out
-
 
 def peek_hidden_sizes(path: Path) -> tuple[int, ...] | None:
     """チェックポイントに保存された隠れ層構成だけを覗き見る。"""
@@ -711,86 +663,28 @@ class PPOTrainer:
         os.replace(tmp_path, path)
 
     def load(self, path: Path) -> bool:
-        """チェックポイントを読み込む。読めたら True、形状不一致等なら False。"""
+        """検証済みの方策と Adam をまとめて切り替え、失敗時は現在の状態を保つ。"""
         path = Path(path)
-        self.widened_from = None
-        self.upgraded_flat = False
         if not path.exists():
             return False
         try:
             payload = torch.load(path, map_location=self.device, weights_only=True)
-        except Exception as exc:  # noqa: BLE001 - 拒否した理由を残す
-            logger.warning(
-                "チェックポイントを安全モードで読み込めませんでした: %s（%s: %s）",
-                path.name,
-                type(exc).__name__,
-                str(exc).splitlines()[0] if str(exc) else "",
+            prepared = prepare_checkpoint(
+                payload, obs_dim=self.obs_dim, action_dim=self.action_dim,
+                hidden_sizes=self.hidden_sizes, seed=self._seed,
+                learning_rate=self.learning_rate, reference_policy=self.policy,
             )
+        except Exception as exc:
+            logger.warning("チェックポイントを読み込めませんでした: %s（%s）", path.name, exc)
             return False
-        if not isinstance(payload, dict):
-            return False
-        fmt = payload.get("format")
-        if fmt is not None and fmt not in KNOWN_CHECKPOINT_FORMATS:
-            logger.warning(
-                "見覚えのないチェックポイント形式です: %r（%s）", fmt, path.name
-            )
-        try:
-            saved_obs = int(payload.get("obs_dim", -1))
-            if saved_obs != self.obs_dim and not self._can_widen(saved_obs):
-                return False
-            if int(payload.get("action_dim", -1)) != self.action_dim:
-                return False
-            if tuple(payload.get("hidden_sizes", ())) != tuple(self.policy.hidden_sizes):
-                return False
-        except (TypeError, ValueError):
-            logger.warning("チェックポイントのモデル定義が壊れています: %s", path.name)
-            return False
-        widened = saved_obs != self.obs_dim
-        before = copy.deepcopy(self.policy.state_dict())
-        flat = False
-        try:
-            self._drop_pending()
-            state = payload["policy"]
-            flat = isinstance(state, dict) and is_flat_state(state)
-            if widened:
-                state = widen_observation(state, saved_obs, self.obs_dim)
-            if flat:
-                state = upgrade_flat_state(state, before)
-            self.policy.load_state_dict(state)
-            # 入力の形が変わった重みの Adam の統計は使えないので、移行したときは捨てる
-            if "optimizer" in payload and not widened and not flat:
-                self.optimizer.load_state_dict(payload["optimizer"])
-                for group in self.optimizer.param_groups:
-                    group["lr"] = self.learning_rate
-        except Exception:
-            logger.exception("チェックポイントの適用に失敗しました: %s", path.name)
-            try:
-                self.policy.load_state_dict(before)
-            except Exception:
-                logger.exception("方策の巻き戻しにも失敗しました。方策を初期化します")
-                self.reset_policy()
-            return False
-        finally:
-            self.buffer.clear()
-            self._last_raw_actions = None
-            self._last_meta = None
-            self.scheduler.restart()
-        self.policy.clamp_log_std()
-        self._updates = int(payload.get("updates", 0))
-        self.widened_from = saved_obs if widened else None
-        self.upgraded_flat = flat
-        if flat:
-            logger.info(
-                "階層型にする前のチェックポイントを移して読み込みました（意図の入力の重みは 0・上位方策は初期値）"
-            )
-        if widened:
-            logger.info(
-                "観測 %d 次元のチェックポイントを %d 次元へ広げて読み込みました（足した入力の重みは 0）",
-                saved_obs,
-                self.obs_dim,
-            )
+        self.policy = prepared.policy.to(self.device)
+        self.optimizer = prepared.optimizer
+        self._updates = prepared.updates
+        self.reset_rollout()
+        self.widened_from = prepared.obs_dim if prepared.obs_dim != self.obs_dim else None
+        self.upgraded_flat = prepared.flat
+        if prepared.flat:
+            logger.info("旧方策を階層型へ移しました（意図の入力はゼロ・上位方策と Adam は初期状態）")
+        if self.widened_from is not None:
+            logger.info("観測 %d 次元を %d 次元へ広げました（追加入力はゼロ・Adam は初期状態）", self.widened_from, self.obs_dim)
         return True
-
-    def _can_widen(self, saved_obs: int) -> bool:
-        """周囲カメラ・V2X の欄を足す前の観測次元なら、入力を 0 埋めして読み込める。"""
-        return saved_obs in config.OBS_WIDENABLE_DIMS and self.obs_dim == int(config.OBS_DIM)

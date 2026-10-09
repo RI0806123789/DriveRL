@@ -151,6 +151,7 @@ export function TaxiAiView({ on, driveMode, onClose }: TaxiAiViewProps) {
   const ask = useConcierge((s) => s.ask)
   const checkAvailability = useConcierge((s) => s.checkAvailability)
   const usingMock = useSimStore((s) => s.usingMock)
+  const rideId = useSimStore((s) => s.taxi.rideId)
   const [draft, setDraft] = useState('')
 
   // キーはサーバーの起動時に読むので、開いたときに確かめれば足りる。モックでは本物のサーバーへ問い合わせない
@@ -168,10 +169,10 @@ export function TaxiAiView({ on, driveMode, onClose }: TaxiAiViewProps) {
       driveMode={driveMode}
       draft={draft}
       onDraft={setDraft}
-      onAsk={(action) => void ask({ action })}
+      onAsk={(action) => void ask({ action, rideId })}
       onSend={(text) => {
         setDraft('')
-        void ask({ message: text })
+        void ask({ message: text, rideId })
       }}
       onClose={onClose}
     />

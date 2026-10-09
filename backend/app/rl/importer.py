@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
@@ -11,14 +10,10 @@ import zipfile
 
 import torch
 
-from app import config
 from app.model_upload import MAX_UPLOAD_BYTES
-from app.rl.ppo import KNOWN_CHECKPOINT_FORMATS
+from app.rl.checkpoint import CheckpointValidationError, prepare_checkpoint
 
 __all__ = ["CheckpointImportError", "CheckpointInfo", "inspect_checkpoint", "MAX_UPLOAD_BYTES"]
-
-logger = logging.getLogger(__name__)
-
 
 class CheckpointImportError(RuntimeError):
     """読み込めないファイルを渡されたときに投げる。文言はそのまま画面に出す。"""
@@ -37,6 +32,9 @@ class CheckpointInfo:
 
     def to_wire(self) -> dict[str, Any]:
         meta = self.metadata or {}
+        map_info = meta.get("map")
+        if not isinstance(map_info, dict):
+            map_info = {}
         return {
             "updates": self.updates,
             "obsDim": self.obs_dim,
@@ -44,8 +42,8 @@ class CheckpointInfo:
             "hiddenSizes": self.hidden_sizes,
             "hasOptimizer": self.has_optimizer,
             "exportedAt": meta.get("exportedAt"),
-            "presetId": (meta.get("map") or {}).get("presetId"),
-            "presetName": (meta.get("map") or {}).get("presetName"),
+            "presetId": map_info.get("presetId"),
+            "presetName": map_info.get("presetName"),
             "metrics": meta.get("metrics") or {},
         }
 
@@ -133,60 +131,23 @@ def inspect_checkpoint(
             "PyTorch のチェックポイントとして読めませんでした。ファイルが壊れていないか確認してください"
         ) from exc
 
-    if not isinstance(payload, dict):
-        raise CheckpointImportError("チェックポイントの形式が違います（辞書ではありません）")
-
-    missing = [k for k in ("obs_dim", "action_dim", "hidden_sizes", "policy") if k not in payload]
-    if missing:
-        raise CheckpointImportError(
-            f"必要な項目が入っていません: {', '.join(missing)}。"
-            "このアプリが書き出した「重み一式（.pt）」を選んでください"
-        )
-
-    fmt = payload.get("format")
-    if fmt is None:
-        logger.warning("形式の識別子が入っていないチェックポイントです: %s", path.name)
-    elif fmt not in KNOWN_CHECKPOINT_FORMATS:
-        logger.warning(
-            "見覚えのないチェックポイント形式です: %r（%s）", fmt, path.name
-        )
-
     try:
-        obs_dim = int(payload["obs_dim"])
-        action_dim = int(payload["action_dim"])
-        hidden_sizes = [int(h) for h in payload["hidden_sizes"]]
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise CheckpointImportError("チェックポイントのモデル定義が壊れています") from exc
-
-    # 周囲カメラ・V2X の欄を足す前のモデルは、入力を 0 埋めして読み込める（`rl/ppo.py` の widen_observation）
-    widenable = obs_dim in config.OBS_WIDENABLE_DIMS and int(expected_obs_dim) == int(config.OBS_DIM)
-    if obs_dim != expected_obs_dim and not widenable:
-        raise CheckpointImportError(
-            f"観測ベクトルの次元が違います（ファイル: {obs_dim} / このアプリ: {expected_obs_dim}）。"
-            "観測の作り方を変更した後のモデルは読み込めません"
+        prepared = prepare_checkpoint(
+            payload, obs_dim=expected_obs_dim, action_dim=expected_action_dim,
+            hidden_sizes=expected_hidden_sizes,
         )
-    if action_dim != expected_action_dim:
-        raise CheckpointImportError(
-            f"行動の次元が違います（ファイル: {action_dim} / このアプリ: {expected_action_dim}）"
-        )
-    if tuple(hidden_sizes) != tuple(int(h) for h in expected_hidden_sizes):
-        raise CheckpointImportError(
-            f"ネットワークの層構成が違います"
-            f"（ファイル: {hidden_sizes} / このアプリ: {list(expected_hidden_sizes)}）"
-        )
-
-    if not isinstance(payload.get("policy"), dict):
-        raise CheckpointImportError("重み（policy）が入っていません")
+    except CheckpointValidationError as exc:
+        raise CheckpointImportError(str(exc)) from exc
 
     metadata = payload.get("metadata")
     if not isinstance(metadata, dict):
         metadata = None
 
     return CheckpointInfo(
-        updates=int(payload.get("updates", 0)),
-        obs_dim=obs_dim,
-        action_dim=action_dim,
-        hidden_sizes=hidden_sizes,
-        has_optimizer=isinstance(payload.get("optimizer"), dict),
+        updates=prepared.updates,
+        obs_dim=prepared.obs_dim,
+        action_dim=prepared.action_dim,
+        hidden_sizes=list(prepared.hidden_sizes),
+        has_optimizer=prepared.has_optimizer,
         metadata=metadata,
     )

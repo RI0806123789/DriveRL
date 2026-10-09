@@ -11,6 +11,7 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import PurePath
 from typing import Any
+from uuid import uuid4
 
 import orjson
 from fastapi import FastAPI, Request, UploadFile, WebSocket, WebSocketDisconnect
@@ -707,13 +708,15 @@ async def _import_model_file(file: UploadFile):
 
     stamp = time.strftime("%Y%m%d-%H%M%S")
     safe_name = _safe_upload_name(file.filename)
-    dest = config.UPLOAD_DIR / f"{stamp}_{safe_name}"
+    dest = config.UPLOAD_DIR / f"{stamp}_{uuid4().hex}_{safe_name}"
 
     written = 0
     handed_off = False
+    created = False
     try:
         try:
-            with dest.open("wb") as out:
+            with dest.open("xb") as out:
+                created = True
                 while True:
                     chunk = await file.read(1024 * 1024)
                     if not chunk:
@@ -777,7 +780,7 @@ async def _import_model_file(file: UploadFile):
     finally:
         # 依頼を積めたなら削除はエンジン側（_handle_import）の責任（code_review E-05）。
         # 積む前に抜けた場合だけここで消す
-        if not handed_off:
+        if created and not handed_off:
             try:
                 dest.unlink(missing_ok=True)
             except OSError as exc:
@@ -818,6 +821,9 @@ async def concierge_endpoint(request: Request) -> JSONResponse:
         return JSONResponse({"ok": False, "error": "JSON のオブジェクトを送ってください"}, status_code=400)
     action = body.get("action")
     message = body.get("message")
+    ride_id = body.get("rideId")
+    if "rideId" in body and ride_id is not None and (not isinstance(ride_id, str) or not ride_id):
+        return JSONResponse({"ok": False, "error": "rideId は配車の識別子か null にしてください"}, status_code=400)
     if action is not None and action not in concierge.QUICK_ACTIONS:
         return JSONResponse({"ok": False, "error": "未知の操作です"}, status_code=400)
     if action is None and (not isinstance(message, str) or not message.strip()):
@@ -835,6 +841,11 @@ async def concierge_endpoint(request: Request) -> JSONResponse:
     if not finished or ticket.situation is None:
         return JSONResponse({"ok": False, "error": "車の状況を取得できませんでした"}, status_code=504)
     situation = ticket.situation
+    if not situation.get("practicalMode") or (
+        "rideId" in body and ride_id != situation.get("rideId")
+    ):
+        return JSONResponse({"ok": False, "error": "配車が変わったため、もう一度お試しください"}, status_code=409)
+    ride_id = situation.get("rideId")
 
     if action in (concierge.TAXI_DRIVE_HURRY, concierge.TAXI_DRIVE_COMFORT, concierge.TAXI_DRIVE_NORMAL):
         reply = concierge.quick_reply(str(action), situation)
@@ -865,9 +876,9 @@ async def concierge_endpoint(request: Request) -> JSONResponse:
     for call in reply.calls:
         if call.name == concierge.TOOL_SET_DRIVING_MODE:
             drive_mode = str(call.args["mode"])
-            engine.taxi_command("drive_mode", {"mode": drive_mode})
+            engine.taxi_command("drive_mode", {"mode": drive_mode, "rideId": ride_id})
         elif call.name == concierge.TOOL_EMERGENCY_STOP:
-            engine.taxi_command("halt")
+            engine.taxi_command("halt", {"rideId": ride_id})
     return JSONResponse(
         {
             "ok": True,

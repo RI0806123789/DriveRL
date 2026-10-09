@@ -33,12 +33,17 @@ PyTorch の `torch.load` は既定で pickle を実行するため、細工さ�
   （`backend/app/rl/ppo.py`）。検証と読み込みで同じファイルを 2 回開くので、
   片方だけ安全でも意味がありません。安全モードで読めないファイルは理由を
   ログに出して拒否し、`weights_only=False` へフォールバックすることはありません。
+- モデル定義・重み・Adam は `backend/app/rl/checkpoint.py` の共通検証を通します。層構成、テンソルの型・形状・有限性、
+  Adam のパラメータ対応・設定・更新回数を確認し、別の方策と Adam 上で復元できてから現在の学習器を切り替えます。
+  不正なモデルは読み込み前の退避や本番への保存に進まず、現在の重み・Adam・収集中のデータを保持します。
 - **ファイル形式の見分けにもデシリアライズを使いません。** `.keras`（zip）・
   TorchScript（zip）・torch.export の `.pt2`（zip）は中身のファイル名一覧だけで判別します
   （`backend/app/rl/importer.py`）。以前は取り違えを親切に案内するために
   `torch.jit.load()` を呼んでおり、**上の宣言の唯一の例外**になっていました。
 - ファイル名はディレクトリ区切りや `..` を取り除いてから保存します
   （`backend/app/main.py` の `_safe_upload_name`）。保存先を抜け出すことはできません。
+  表示名と保存先を分け、UUID 付きの保存先を排他的に作ります。同名や正規化後に同名となる並行要求でも上書きせず、
+  保存中の失敗ではその要求が作ったファイルだけ片付けます。
 - アップロードは `file` 欄の 1 ファイルだけを受け付けます。ファイルは 256MiB、本文全体は付帯情報用の 64KiB を加えた容量までです
   （唯一の出典: `backend/app/model_upload.py` の `MAX_UPLOAD_BYTES` / `MAX_MULTIPART_OVERHEAD_BYTES` / `MAX_IMPORT_BODY_BYTES`）。
   Content-Length の事前検査と、受信中の累積検査を multipart 解析より先に行い、超過時は `413` で打ち切ります。

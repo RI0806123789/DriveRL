@@ -862,6 +862,7 @@ class TaxiStatus:
     """docs/protocol.md 2.10 の taxi に対応。実用モードの配車 1 件ぶんの状態。"""
 
     phase: str = TAXI_PHASE_IDLE
+    ride_id: str | None = None
     vehicle_id: int = -1
     pickup: tuple[float, float] | None = None
     dropoff: tuple[float, float] | None = None
@@ -876,6 +877,7 @@ class TaxiStatus:
         """`route` は数百点になるので、版が変わったときだけ載せる（frame と同じ約束）。"""
         payload: dict[str, Any] = {
             "phase": self.phase,
+            "rideId": self.ride_id,
             "vehicleId": self.vehicle_id,
             "pickup": _point_wire(self.pickup),
             "dropoff": _point_wire(self.dropoff),

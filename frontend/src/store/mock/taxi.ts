@@ -9,6 +9,7 @@ import type { MockVehicle } from './traffic.ts'
 const MOCK_IDLE_TAXI: TaxiMessage = {
   type: 'taxi',
   phase: 'idle',
+  rideId: null,
   vehicleId: -1,
   pickup: null,
   dropoff: null,
@@ -151,6 +152,7 @@ export class MockTaxi {
     this.state = {
       ...MOCK_IDLE_TAXI,
       phase: 'approaching',
+      rideId: `mock-${this.state.routeRevision + 1}`,
       vehicleId: slot,
       pickup: pick.point,
       dropoff: drop.point,
