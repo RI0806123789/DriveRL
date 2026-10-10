@@ -19,6 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
 from app import config
+from app.client_messages import INVALID_TYPE_MESSAGE, dispatch_client_text, invalid_message
 from app.connections import ConnectionManager, frame_carries_route
 from app.contracts import InterventionEvent
 from app.contracts import coerce_bool, validate_hidden_sizes
@@ -304,6 +305,10 @@ def _parse_point(value: Any) -> tuple[float, float] | None:
 
 async def handle_client_message(websocket: WebSocket, message: dict[str, Any]) -> None:
     kind = message.get("type")
+    if not isinstance(kind, str):
+        # 入口（dispatch_client_text）で弾いているが、種別の集合との照合で TypeError を出さないよう、ここでも見る
+        await send_json(websocket, invalid_message(INVALID_TYPE_MESSAGE))
+        return
 
     if kind == "ping":
         await send_json(websocket, {"type": "pong", "t": int(time.time() * 1000)})
@@ -899,23 +904,12 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
             manager.send(websocket, {"type": "map", **_current_map_wire})
             engine.request_full_frame()
 
+        handle = functools.partial(handle_client_message, websocket)
+        reply = functools.partial(send_json, websocket)
         while True:
             raw = await websocket.receive_text()
-            try:
-                message = orjson.loads(raw)
-            except orjson.JSONDecodeError:
-                await send_json(
-                    websocket,
-                    {"type": "error", "code": "INVALID_MESSAGE", "message": "JSON として解釈できません"},
-                )
-                continue
-            if not isinstance(message, dict):
-                await send_json(
-                    websocket,
-                    {"type": "error", "code": "INVALID_MESSAGE", "message": "オブジェクトを送ってください"},
-                )
-                continue
-            await handle_client_message(websocket, message)
+            # 不正な通（type が文字列でないなど）や処理の失敗は INVALID_MESSAGE を返し、受信を続ける
+            await dispatch_client_text(raw, handle, reply)
 
     except WebSocketDisconnect:
         logger.info("WebSocket が切断されました")

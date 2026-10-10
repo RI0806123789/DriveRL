@@ -812,6 +812,19 @@ TCP が詰まった相手への close フレームで**配信ループごと止�
 - 1 回に 512 通を譲らずに積むと、健全な接続でも送る前に上限に届きます。配信ループは 1/60 秒ごとに譲るので、
   1 回に積むのは十数通です。**まとめて大量に積む処理を足すときは、途中で譲ること**
 
+★ **受けた 1 通は、種類ごとの処理（`main.py` の `handle_client_message`）へ渡す前に `app/client_messages.py` の
+`dispatch_client_text` で検証すること**（#129）。JSON として読めるか・オブジェクトか・`type` が空でない 64 文字以内の文字列かを見て、
+だめなら `INVALID_MESSAGE` を返して次の通を待ちます。以前は `type` を確かめずに分岐していたので、`{"type": []}` や `{"type": {}}` は
+`kind in _EVENT_KINDS` で `TypeError: unhashable type` になり、**受信ループごと抜けて、その接続が配信から外れていました**。
+種類ごとの処理が想定外の例外を出したときも、ログに残して `INVALID_MESSAGE`（固定の文。例外の文は載せない）を返し、受信を続けます。
+
+- `handle_client_message` の頭でも `type` が文字列かを見ます（入口を通さずに呼ばれたときの保険）
+- 振り分け（`kind == "x"`）は `main.py` に残すこと。契約テスト（`tests/test_protocol_sync.py`）が ast で読みます
+- 各種類の欄の検証は、これまでどおり共通の関数（`contracts.coerce_bool`・`validate_hidden_sizes`・`detector_job.parse_request`・
+  `_parse_point`）で行います
+- 検査は `tests/test_client_messages.py`（`type` の欠落・`null`・配列・オブジェクト・数値・真偽値・空・長すぎ、壊れた JSON。
+  `main.py` から抜き出した実物の `handle_client_message` で、不正な通の後に同じ接続の `ping` が通り、エンジンへ何も渡らないか）
+
 ★ **認識器（CNN）を載せると、1 ステップが 50ms の予算をほぼ使い切ります。**
 実測（8 台・全車が経路追従・100 ステップ × 3 回の最小値。測り直すときは
 同じ条件で。`env.autopilot_all = True`）:
