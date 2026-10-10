@@ -4,7 +4,9 @@ import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import { useFrame } from '@react-three/fiber'
 import * as THREE from 'three'
 import { frameBuffer } from '../store/frameBuffer'
+import type { Vec2 } from '../types/protocol'
 import { buildChevrons, buildRibbon } from './routeArrowGeometry'
+import { syncRouteCache, type HeldRoute } from './routeCache'
 import { vehicleColor } from './vehicleColors'
 
 interface RouteEntry {
@@ -13,10 +15,8 @@ interface RouteEntry {
   chevrons: THREE.BufferGeometry | null
 }
 
-/** キャッシュ 1 件。rev は「このジオメトリを作った時点の車両ごとの版」 */
-interface HeldEntry {
-  entry: RouteEntry
-  rev: number
+function buildEntry(id: number, points: Vec2[]): RouteEntry {
+  return { id, ribbon: buildRibbon(points), chevrons: buildChevrons(points) }
 }
 
 export interface RouteLinesProps {
@@ -29,7 +29,7 @@ export function RouteLines({ showRoutes, showGoals, maxVehicles }: RouteLinesPro
   const [routes, setRoutes] = useState<RouteEntry[]>([])
   const lastRouteVersion = useRef(-1)
   /** id -> 生成済みジオメトリ。React の外で持ち、差分だけ差し替える */
-  const held = useRef<Map<number, HeldEntry>>(new Map())
+  const held = useRef<Map<number, HeldRoute<RouteEntry>>>(new Map())
   /** 解放待ちのジオメトリ。反映前の描画で作り直させないよう、コミット後の useEffect でまとめて解放する */
   const pendingDispose = useRef<THREE.BufferGeometry[]>([])
 
@@ -45,28 +45,7 @@ export function RouteLines({ showRoutes, showGoals, maxVehicles }: RouteLinesPro
     lastRouteVersion.current = frameBuffer.routeVersion
 
     const cache = held.current
-    let dirty = false
-
-    for (const id of Array.from(cache.keys())) {
-      if (!frameBuffer.routes.has(id)) {
-        retire(cache.get(id)?.entry)
-        cache.delete(id)
-        dirty = true
-      }
-    }
-
-    frameBuffer.routes.forEach((points, id) => {
-      const rev = frameBuffer.routeRevisions.get(id) ?? 0
-      const current = cache.get(id)
-      if (current && current.rev === rev) return
-      retire(current?.entry)
-      cache.set(id, {
-        rev,
-        entry: { id, ribbon: buildRibbon(points), chevrons: buildChevrons(points) },
-      })
-      dirty = true
-    })
-
+    const dirty = syncRouteCache(cache, frameBuffer.routes, frameBuffer.routeRevisions, buildEntry, retire)
     if (dirty) setRoutes(Array.from(cache.values(), (h) => h.entry))
   })
 

@@ -31,7 +31,7 @@ export interface FrameBuffer {
   displayed: number
   /** 車両ごとの最新経路。frame.route は変化時のみ届くので、ここで保持する */
   routes: Map<number, Vec2[]>
-  /** 車両ごとの経路の版。その車両の経路が届くたびに +1 する。 */
+  /** 車両ごとの経路の版。経路が届くたびにバッファ全体の通し番号を振る（リセットをまたいでも同じ値を二度使わない） */
   routeRevisions: Map<number, number>
   /** routes が変わるたびに増える。3D 側はこれを見て作り直しの要否を判断する */
   routeVersion: number
@@ -78,6 +78,9 @@ function obstacleSignature(obstacles: ObstacleState[]): string {
 
 let lastObstacleSig = ''
 
+/** 経路の版の通し番号。resetFrameBuffer でも戻さない（戻すと描画側が同じ版の別の経路を見分けられない） */
+let routeSerial = 0
+
 /** 新しい frame を受け取ってバッファを進める */
 export function pushFrame(frame: FrameMessage): void {
   const now = performance.now()
@@ -101,7 +104,8 @@ export function pushFrame(frame: FrameMessage): void {
       if (frameBuffer.routes === EMPTY_ROUTES) frameBuffer.routes = new Map()
       if (frameBuffer.routeRevisions === EMPTY_REVISIONS) frameBuffer.routeRevisions = new Map()
       frameBuffer.routes.set(v.id, v.route)
-      frameBuffer.routeRevisions.set(v.id, (frameBuffer.routeRevisions.get(v.id) ?? 0) + 1)
+      routeSerial += 1
+      frameBuffer.routeRevisions.set(v.id, routeSerial)
       routeChanged = true
     }
     if (!v.active && frameBuffer.routes.has(v.id)) {
