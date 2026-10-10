@@ -1039,6 +1039,14 @@ HTTP 側の `finally` で消すと、504 を返した後にエンジンが
 - **徒歩キャラを動かすのはフロントだけ**（`store/pedestrian.ts`）。乗車の可否は
   「照準に入っているか」をフロントが判断して `board_taxi` を送ります。位置は 60fps で
   動くため zustand には入れません（`frameBuffer` と同じ作法）。
+- ★ **3D の操作のキー（WASD・Enter で乗降・Space で緊急停止）は、画面の部品の操作を横取りしないこと**
+  （`scene/sceneKeys.ts` の `isSceneKeyEvent`。#126）。キーは `window` で拾うので、以前は入力欄だけを除いていて、
+  **ボタンにフォーカスして Enter / Space を押すと乗降・緊急停止（`cancel_taxi` の `halt`）として送られ、`preventDefault` で
+  ボタン本来の操作も止めていました**。いまはボタン・`href` のあるリンク・`role` の付いた操作部品・`contenteditable`
+  （とその中の要素）と、ほかの部品がすでに処理したキー（`defaultPrevented`）を除きます。判定は DOM を持たない純粋関数で、
+  親を `parentElement` でたどります（`src/__tests__/sceneKeys.test.ts`）
+  - **離す（keyup）のは対象を問わないこと。** 押したまま部品へフォーカスが移ると keyup は部品に届くので、そこで除くと
+    押しっぱなしが残ります。フォーカスが部品へ移ったとき（`focusin`）にも移動キーを離します（自動操作は毎フレーム押し直すので止まらない）
 - ★ **ただし位置は 10Hz でサーバーへ送ること**（`player_pose`。`docs/protocol.md` 3 章）。
   `World.set_player()` が `pedestrian_xy` へ NPC 群衆と並べて混ぜるので、**これ 1 本で**
   車間・擬似カメラ・正解ラベル・観測・衝突判定の 5 つが同時に利用者を見ます
