@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import re
+import uuid
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime
@@ -469,11 +470,40 @@ def _safe_slug(text: str | None, fallback: str = "nomap") -> str:
 
 
 def _atomic_save(write: Any, path: Path) -> None:
-    """一時ファイルへ書いてから差し替える。中断しても壊れたファイルを残さない。"""
+    """一時ファイルへ書いてから置く。中断しても壊れたファイルを残さず、同じ名前の既存のファイルも上書きしない。"""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_suffix(path.suffix + ".tmp")
-    write(tmp_path)
-    os.replace(tmp_path, path)
+    try:
+        write(tmp_path)
+        _install_new(tmp_path, path)
+    except BaseException:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
+def _install_new(tmp_path: Path, path: Path) -> None:
+    """書き終えた一時ファイルを `path` に置く。すでにあれば FileExistsError（前の書き出し・退避を消さない）。"""
+    try:
+        os.link(tmp_path, path)
+    except FileExistsError:
+        raise
+    except OSError:
+        # ハードリンクを作れないファイルシステム（FAT など）。名前は一意なので、無いことを確かめてから置く
+        if path.exists():
+            raise FileExistsError(str(path)) from None
+        os.replace(tmp_path, path)
+        return
+    os.unlink(tmp_path)
+
+
+def _export_basename(preset_id: str | None, updates: int, label: str | None) -> str:
+    """書き出しのファイル名（拡張子なし）。同じ秒・同じ更新回数でも重ならないよう、末尾に乱数の識別子を付ける。"""
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    tag = f"_{_safe_slug(label, 'x')}" if label else ""
+    return f"autoware-sim_{_safe_slug(preset_id)}_upd{int(updates)}{tag}_{stamp}_{uuid.uuid4().hex[:12]}"
 
 
 def _is_import_backup(name: str) -> bool:
@@ -548,9 +578,7 @@ def export_model(
         raise ExportError(f"未知の書き出し形式です: {kind}")
 
     directory = Path(out_dir) if out_dir is not None else config.EXPORT_DIR
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    tag = f"_{_safe_slug(label, 'x')}" if label else ""
-    base = f"autoware-sim_{_safe_slug(preset_id)}_upd{int(trainer.updates)}{tag}_{stamp}"
+    base = _export_basename(preset_id, int(trainer.updates), label)
 
     metadata = build_metadata(
         trainer,
@@ -590,9 +618,13 @@ def export_model(
             path = directory / f"{base}.keras"
             model = _build_keras_model(trainer)
             tmp_path = path.with_name(path.stem + ".partial.keras")
-            model.save(tmp_path)
-            _attach_metadata(tmp_path, metadata)
-            os.replace(tmp_path, path)
+            try:
+                model.save(tmp_path)
+                _attach_metadata(tmp_path, metadata)
+                _install_new(tmp_path, path)
+            except BaseException:
+                tmp_path.unlink(missing_ok=True)
+                raise
             media_type = "application/octet-stream"
 
         else:

@@ -1177,8 +1177,9 @@ GET / HEAD では生成・トレース・世代削除を行わない。以前の
 | `pt2` | 推論だけを切り出した `torch.export` の ExportedProgram（`.pt2`。`metadata.json` を同梱） | このリポジトリのコード無しで `torch.export.load()` するだけで動く |
 | `keras` | 同じネットワークを Keras 3 のモデルとして組み直したもの（`.keras`）| Keras / TensorFlow 系のツールで扱う |
 
-- 成功時: `200`、`Content-Disposition: attachment; filename="autoware-sim_<preset>_upd<更新回数>_<日時>.pt"`
-  （拡張子は形式ごとに `.pt` / `.torchscript.pt` / `.pt2` / `.keras`）
+- 成功時: `200`、`Content-Disposition: attachment; filename="autoware-sim_<preset>_upd<更新回数>_<日時>_<識別子>.pt"`
+  （拡張子は形式ごとに `.pt` / `.torchscript.pt` / `.pt2` / `.keras`。`<識別子>` は 16 進 12 桁の乱数で、
+  同じ秒・同じ更新回数の書き出しでも名前が重ならない。名前が重なっても既存のファイルは上書きしない）
   - 補助ヘッダ `X-Export-Kind` と `X-Export-Size`（バイト数）も返す
 - 未知の `kind`: `400` — `{"error": "...", "supported": ["checkpoint", "torchscript", "pt2", "keras"]}`
 - 書き出し失敗: `500` — `{"error": "..."}`
@@ -1248,7 +1249,7 @@ TorchScript・torch.export（`.pt2`）・Keras 形式を渡した場合は、そ
 ```jsonc
 {
   "ok": true,
-  "filename": "autoware-sim_ginza_upd585_20260905-163218.pt",
+  "filename": "autoware-sim_ginza_upd585_20260905-163218_3f9c2a7b1d04.pt",
   "sizeBytes": 578601,
   "checkpoint": {
     "updates": 585,
@@ -1262,7 +1263,7 @@ TorchScript・torch.export（`.pt2`）・Keras 形式を渡した場合は、そ
     "metrics": { /* 書き出し時点の指標 */ }
   },
   "backup": {                       // 上書き前に自動退避した、それまでのモデル
-    "filename": "autoware-sim_ginza_upd594_before-import_20260905-163259.pt",
+    "filename": "autoware-sim_ginza_upd594_before-import_20260905-163259_a81e6c05f2b9.pt",
     "sizeBytes": 578601
   },
   "message": "学習回数 585 回の状態から学習を再開します"
@@ -1282,7 +1283,8 @@ TorchScript・torch.export（`.pt2`）・Keras 形式を渡した場合は、そ
 
 **上書きの扱い**: 読み込みは現在の学習状態を不可逆に置き換えるため、
 載せ替える直前に現在のモデルを `backend/data/exports/` へ
-`..._before-import_...pt` という名前で自動退避する。**退避できなかったとき（ディスクの空きが無いなど）は
+`..._before-import_...pt` という名前で自動退避する（同じ秒に続けて読み込んでも、退避は別々のファイルに残る）。
+**退避できなかったとき（ディスクの空きが無いなど）は
 読み込まずに失敗を返す**（`{"ok": false, "error": ...}`。学習はいまのモデルのまま続く）。
 また、読み込み後ただちに `backend/data/checkpoints/shared_policy.pt` を更新するので、
 サーバーを再起動しても読み込んだ状態が残る。
