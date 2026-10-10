@@ -920,7 +920,7 @@ class SimulationEngine:
 
     def _handle_export(self, ticket: ExportTicket) -> None:
         """モデルを書き出す。何があっても必ず `done` を立てる（依頼側が待ち続けないように）。"""
-        from app.rl.export import ExportError, export_model
+        from app.rl.export import EXPORT_FAILED_MESSAGE, ExportError, export_model
 
         started = time.perf_counter()
         try:
@@ -951,16 +951,16 @@ class SimulationEngine:
 
         except ExportError as exc:
             ticket.error = str(exc)
-        except Exception as exc:  # noqa: BLE001 - 理由を画面に返したい
+        except Exception:  # noqa: BLE001
             logger.exception("モデルの書き出しで例外が発生しました")
-            ticket.error = f"モデルの書き出しに失敗しました: {exc}"
+            ticket.error = EXPORT_FAILED_MESSAGE
         finally:
             ticket.done.set()
 
     def _handle_import(self, ticket: ImportTicket) -> None:
         """書き出したモデルを読み込んで学習を再開する。必ず `done` を立てる。"""
         from app.rl.export import IMPORT_BACKUP_LABEL, ExportError, export_model
-        from app.rl.importer import CheckpointImportError, inspect_checkpoint
+        from app.rl.importer import IMPORT_FAILED_MESSAGE, CheckpointImportError, inspect_checkpoint
 
         started = time.perf_counter()
         try:
@@ -994,12 +994,12 @@ class SimulationEngine:
                     label=IMPORT_BACKUP_LABEL,
                     params=self.snapshot_params(),
                 )
-            except ExportError as exc:
+            except ExportError:
                 # 退避できないまま読み込むと、元の重みを取り戻す手段が無くなる
                 logger.exception("読み込み前のバックアップに失敗しました。読み込みを中止します")
                 ticket.error = (
-                    f"いまのモデルを退避できなかったため、読み込みを中止しました（{exc}）。"
-                    "学習はいまのモデルのまま続けます"
+                    "いまのモデルを退避できなかったため、読み込みを中止しました"
+                    "（詳しい理由はサーバーのログに残しています）。学習はいまのモデルのまま続けます"
                 )
                 return
 
@@ -1031,9 +1031,9 @@ class SimulationEngine:
 
         except CheckpointImportError as exc:
             ticket.error = str(exc)
-        except Exception as exc:  # noqa: BLE001 - 理由を画面に返したい
+        except Exception:  # noqa: BLE001
             logger.exception("モデルの読み込みで例外が発生しました")
-            ticket.error = f"モデルの読み込みに失敗しました: {exc}"
+            ticket.error = IMPORT_FAILED_MESSAGE
         finally:
             # アップロードを消すのは**読み終えたこちら側**（code_review E-05）。
             #   HTTP 側の finally で消すと、504 の後にエンジンが読みにいって失敗する

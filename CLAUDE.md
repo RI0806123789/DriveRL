@@ -3171,6 +3171,17 @@ OSM キャッシュ・チェックポイント・認識器と教師データ・�
   応答には固定の文を返します（CodeQL の「Information exposure through an exception」。`main.py` の 2 か所で指摘された）。
   画面に出したい文が例外の中にあるなら、定数にして両方から使うこと（`rl/export.py` の `KERAS_MISSING_MESSAGE`）。
   `backend/tests/test_error_responses.py` が `main.py` を ast で読んで検査します
+  - ★ **エンジンが組み立てる `ticket.error` も応答にそのまま載ります**（#121）。以前は `export_model` が一般の例外を
+    `ExportError(f"…: {exc}")` に包み、`engine._handle_export` / `_handle_import` も `f"…: {exc}"` を入れていたので、
+    ディスク不足の `OSError` などが**書き出し先のパスごと HTTP 500 の本文に出ていました**（main.py だけを見る検査では捕まらない）。
+    いまは想定外の例外を `logger.exception` に残し、応答には `EXPORT_FAILED_MESSAGE`（`rl/export.py`）/
+    `IMPORT_FAILED_MESSAGE`（`rl/importer.py`）を返します
+  - **`ExportError` / `CheckpointImportError` / `CheckpointValidationError` の文は画面へそのまま出す公開用です。** 固定の文と
+    値（次元・層の構成など）だけで組み立て、捕まえた内部の例外の文を入れないこと。検査は同じ `test_error_responses.py` が
+    `engine.py` / `export.py` / `importer.py` / `checkpoint.py` を ast で読みます（公開用の例外を捕まえて渡し直すのは許す）。
+    応答そのものは `tests/test_model_transfer_http.py` が、保存をディスク不足で落として 4 形式の書き出しと読み込みで確かめます
+  - 地図の読み込みと認識器の学習の失敗（`main.py` の `handle_load_map`・`runtime/detector_job.py`）は、まだ例外の文を
+    WebSocket の `error` / `status` に載せています（HTTP ではないので CodeQL の指摘の外。#121 の範囲外として残している）
 - **失敗を握りつぶすときは必ず初回だけログを残す。**
   黙らせると「衝突しない世界」「速度超過 0 件」のように**成績が良くなる方向**に症状が出て、
   外から絶対に気づけなくなります

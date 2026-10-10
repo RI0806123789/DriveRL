@@ -67,8 +67,12 @@ KERAS_MISSING_MESSAGE = (
 )
 
 
+#: 書き出しが想定外の理由で失敗したときに画面へ出す文（内部の例外の文はログにだけ残す）
+EXPORT_FAILED_MESSAGE = "モデルの書き出しに失敗しました。詳しい理由はサーバーのログに残しています"
+
+
 class ExportError(RuntimeError):
-    """書き出しに失敗したときに投げる。"""
+    """書き出しに失敗したときに投げる。文は画面へそのまま出すので、内部の例外の文を入れないこと。"""
 
 
 @dataclass
@@ -587,8 +591,9 @@ def export_model(
 
     except ExportError:
         raise
-    except Exception as exc:  # noqa: BLE001 - 失敗理由をそのまま画面に出したい
-        raise ExportError(f"モデルの書き出しに失敗しました: {exc}") from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("モデルの書き出しに失敗しました（形式 %s）", kind)
+        raise ExportError(EXPORT_FAILED_MESSAGE) from exc
 
     if directory == config.EXPORT_DIR:
         try:

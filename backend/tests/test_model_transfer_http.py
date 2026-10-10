@@ -408,6 +408,113 @@ def test_queue_failure_cleans_only_unhanded_upload(transfer_app, temporary_files
     assert foreign.read_bytes() == b"queued-policy" and all(file.closed for file in temporary_files)
 
 
+#: 内部の例外に入っていそうな文（ローカルのパスと OS の errno）。応答に 1 文字でも出たら漏れ
+SECRET = r"C:\Users\someone\secret-project\backend\data\exports\autoware-sim_ginza.pt"
+LEAK_MARKERS = (SECRET, "secret-project", "Errno", "Traceback")
+
+
+@pytest.fixture(scope="module")
+def real_trainer():
+    from app import config as app_config
+    from app.contracts import SimParams
+    from app.rl.ppo import PPOTrainer
+
+    return PPOTrainer(app_config.OBS_DIM, app_config.ACTION_DIM, SimParams(), app_config.MAX_VEHICLES, seed=0)
+
+
+def engine_self(trainer):
+    """`SimulationEngine._handle_export` / `_handle_import` が読む属性だけを持つ偽のエンジン。"""
+    from app.contracts import SimParams
+
+    return SimpleNamespace(
+        _trainer=trainer, _lock=threading.Lock(), _loaded_preset_id="ginza", _loaded_preset_name="銀座",
+        _metrics=SimpleNamespace(to_wire=lambda: {}), snapshot_params=lambda: SimParams(),
+        _notify=lambda message: None, _autotune=SimpleNamespace(active=False),
+    )
+
+
+def disk_full(*args, **kwargs):
+    raise OSError(28, "No space left on device", SECRET)
+
+
+def assert_no_leak(text):
+    for marker in LEAK_MARKERS:
+        assert marker not in text, f"応答に内部の情報が載っている: {text}"
+
+
+@pytest.mark.parametrize("kind", MODEL_EXPORT_KINDS)
+def test_export_failure_response_does_not_expose_internal_details(
+    transfer_app, real_trainer, monkeypatch, caplog, kind
+):
+    from app.runtime.engine import ExportTicket, SimulationEngine
+
+    app, _, namespace = transfer_app
+    # 保存（と Keras / torch.export の組み立て）だけをディスク不足で落とす
+    monkeypatch.setattr(export, "_atomic_save", disk_full)
+    monkeypatch.setattr(export, "_build_keras_model", disk_full)
+    monkeypatch.setattr(export, "_export_program", disk_full)
+    monkeypatch.setattr(export, "preload_keras", lambda: None)
+    fake = engine_self(real_trainer)
+
+    def run_export(requested):
+        ticket = ExportTicket(kind=requested)
+        SimulationEngine._handle_export(fake, ticket)
+        return ticket
+
+    namespace["engine"] = SimpleNamespace(request_export=run_export)
+    with caplog.at_level(logging.ERROR):
+        status, body, _ = request(app, "POST", f"/api/export/{kind}", [b"{}"], {"content-type": "application/json"})
+    assert status == 500
+    error = json.loads(body)["error"]
+    assert error == export.EXPORT_FAILED_MESSAGE
+    assert_no_leak(body.decode("utf-8"))
+    assert "secret-project" in caplog.text  # 診断の手がかりはサーバーのログに残る
+
+
+def test_import_failures_do_not_expose_internal_details(transfer_app, real_trainer, tmp_path, monkeypatch, caplog):
+    from app.rl import importer
+    from app.runtime.engine import ImportTicket, SimulationEngine
+
+    app, _, namespace = transfer_app
+    fake = engine_self(real_trainer)
+    checkpoint = tmp_path / "valid.pt"
+    real_trainer.save(checkpoint)
+
+    def run_import(path):
+        ticket = ImportTicket(path=path)
+        SimulationEngine._handle_import(fake, ticket)
+        return ticket
+
+    namespace["engine"] = SimpleNamespace(request_import=run_import, status_payload=lambda: {})
+
+    # 読み込む前の退避が落ちる（ディスク不足）。読み込みの失敗は従来どおり 400 で返る
+    original_save = export._atomic_save
+    monkeypatch.setattr(export, "_atomic_save", disk_full)
+    with caplog.at_level(logging.ERROR):
+        status, body, _ = request(app, "POST", "/api/import", [multipart(checkpoint.read_bytes())],
+                                  {"content-type": CONTENT_TYPE})
+    assert status == 400
+    error = json.loads(body)["error"]
+    assert "退避できなかった" in error
+    assert_no_leak(body.decode("utf-8"))
+    assert "secret-project" in caplog.text
+
+    # 検証の途中で想定外の例外が出る
+    monkeypatch.setattr(export, "_atomic_save", original_save)
+    caplog.clear()
+
+    def broken_inspect(*args, **kwargs):
+        raise RuntimeError(f"内部の失敗: {SECRET}")
+
+    monkeypatch.setattr(importer, "inspect_checkpoint", broken_inspect)
+    with caplog.at_level(logging.ERROR):
+        status, body, _ = request(app, "POST", "/api/import", [multipart(checkpoint.read_bytes())],
+                                  {"content-type": CONTENT_TYPE})
+    assert status == 400
+    assert json.loads(body)["error"] == importer.IMPORT_FAILED_MESSAGE
+    assert_no_leak(body.decode("utf-8"))
+    assert "secret-project" in caplog.text
+
 
 def test_model_export_kinds_match_frontend_contract(protocol_ts_source):
     declaration = re.search(r"export type ExportKind = ([^\r\n]+)", protocol_ts_source)
