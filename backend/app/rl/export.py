@@ -15,6 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -84,8 +85,8 @@ class ExportResult:
     kind: str
 
 
-#: Keras で上位方策のいちばん確率の高い意図を one-hot にするときの温度（ロジットをこれで割って softmax）
-KERAS_OPTION_TEMPERATURE = 1e-8
+#: Keras で意図のロジットの差を 0/1 に変えるときの倍率。差が 2^-100 以上なら 1 になる（2 の冪なので掛けても丸めない）
+KERAS_OPTION_STEP_SCALE = float(2**100)
 
 
 class InferencePolicy(nn.Module):
@@ -255,7 +256,7 @@ def build_metadata(
                 "note": (
                     "上位方策が意図を選び、下位方策が観測と意図の one-hot から操作を出す。"
                     "書き出したモデルは呼ばれるたびに、上位方策のいちばん確率の高い意図を選び直す"
-                    "（アプリの中では periodSteps ごとに引き直して保つ）"
+                    "（同点なら番号の小さい意図。アプリの中では periodSteps ごとに引き直して保つ）"
                 ),
             },
         },
@@ -382,9 +383,15 @@ def _build_keras_model(trainer: Any):
             x = keras.layers.Dense(units, activation="tanh", name=f"{prefix}_dense_{i}")(x)
         return x
 
-    # いちばん確率の高い意図の one-hot を、温度の低い softmax で標準の層だけで作る（Lambda を使わない）
-    option = keras.layers.Dense(num_options, activation="softmax", name="option")(
-        trunk(inputs, "meta")
+    # 意図の one-hot を torch の argmax（同点なら番号の小さい方）と同じ規則で、標準の層だけで作る（Lambda を使わない）
+    logits = keras.layers.Dense(num_options, activation=None, name="option_logits")(trunk(inputs, "meta"))
+    pairs = [(i, j) for i in range(num_options) for j in range(i)]
+    diffs = keras.layers.Dense(len(pairs), use_bias=False, name="option_diffs")(logits)
+    greater = keras.layers.ReLU(max_value=1.0, name="option_greater")(
+        keras.layers.Rescaling(KERAS_OPTION_STEP_SCALE, name="option_step")(diffs)
+    )
+    option = keras.layers.ReLU(max_value=1.0, name="option")(
+        keras.layers.Dense(num_options, name="option_select")(greater)
     )
     sub_inputs = keras.layers.Concatenate(name="observation_option")([inputs, option])
     raw_action = keras.layers.Dense(action_dim, activation=None, name="action_raw")(
@@ -416,10 +423,22 @@ def _build_keras_model(trainer: Any):
             model.get_layer(f"{prefix}_dense_{i}").set_weights(
                 [weight(f"{source}.{2 * i}").T, bias(f"{source}.{2 * i}")]
             )
-    scale = 1.0 / float(KERAS_OPTION_TEMPERATURE)
-    model.get_layer("option").set_weights(
-        [weight("meta_head").T * scale, bias("meta_head") * scale]
-    )
+    model.get_layer("option_logits").set_weights([weight("meta_head").T, bias("meta_head")])
+    # option_greater の列 p は pairs[p] = (i, j)（j < i）について「L_i > L_j」なら 1、そうでなければ 0
+    diff_kernel = np.zeros((num_options, len(pairs)), dtype=np.float32)
+    for p, (i, j) in enumerate(pairs):
+        diff_kernel[i, p] = 1.0
+        diff_kernel[j, p] = -1.0
+    model.get_layer("option_diffs").set_weights([diff_kernel])
+    # 意図 i を選ぶのは、前の意図すべてより大きく（列そのもの）、後ろの意図すべて以上（1 - 列）のとき。
+    #   K-1 個の 0/1 の和が K-1 のときだけ、K-2 を引いて 1 になる
+    select_kernel = np.zeros((len(pairs), num_options), dtype=np.float32)
+    select_bias = np.full(num_options, -float(num_options - 2), dtype=np.float32)
+    for p, (i, j) in enumerate(pairs):
+        select_kernel[p, i] += 1.0
+        select_kernel[p, j] -= 1.0
+        select_bias[j] += 1.0
+    model.get_layer("option_select").set_weights([select_kernel, select_bias])
     model.get_layer("action_raw").set_weights([weight("mu_head").T, bias("mu_head")])
     model.get_layer("option_bias").set_weights(
         [state["option_bias"].detach().cpu().numpy()]

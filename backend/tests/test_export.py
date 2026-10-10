@@ -100,6 +100,39 @@ def test_pt2_matches_the_policy_without_deprecation(trainer: PPOTrainer, tmp_pat
         assert torch.equal(action, ref_action) and torch.equal(value, ref_value), batch
 
 
+@pytest.mark.parametrize(
+    "logits",
+    [
+        None,  # 初期の方策。上位の出力層が 0 から始まるので、どの観測でも 4 つの意図が同点
+        [1.0, 1.0, 1.0, 1.0],
+        [0.0, 2.0, 2.0, -1.0],
+        [3.0, 3.0 - 1e-6, 3.0, 2.0],
+        [0.5, 0.5 + 1e-4, 0.5, 0.5],
+        [-1.0, -2.0, -3.0, 4.0],
+    ],
+)
+def test_keras_picks_the_same_option_as_torch_argmax_on_ties(logits, tmp_path: Path) -> None:
+    os.environ.setdefault("KERAS_BACKEND", "torch")
+    keras = pytest.importorskip("keras")
+    from app.rl.export import _build_keras_model
+
+    policy_trainer = PPOTrainer(config.OBS_DIM, config.ACTION_DIM, SimParams(), config.MAX_VEHICLES, seed=0)
+    if logits is not None:
+        with torch.no_grad():
+            policy_trainer.policy.meta_head.weight.zero_()
+            policy_trainer.policy.meta_head.bias.copy_(torch.tensor(logits))
+    obs = torch.cat([torch.zeros(2, config.OBS_DIM), torch.randn(30, config.OBS_DIM, generator=torch.Generator().manual_seed(1))])
+    with torch.no_grad():
+        ref_action, ref_value = InferencePolicy(policy_trainer.policy)(obs)
+    model = _build_keras_model(policy_trainer)
+    path = tmp_path / "policy.keras"
+    model.save(path)
+    for m in (model, keras.saving.load_model(path)):
+        action, value = m.predict(obs.numpy(), verbose=0)
+        assert abs(action - ref_action.numpy()).max() < 1e-5
+        assert abs(value - ref_value.numpy()).max() < 1e-5
+
+
 def test_import_refuses_a_pt2_with_a_hint(trainer: PPOTrainer, tmp_path: Path) -> None:
     result = export_model(trainer, "pt2", out_dir=tmp_path, preset_id="test", params=SimParams())
     with pytest.raises(CheckpointImportError, match="torch.export 形式"):
