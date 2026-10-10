@@ -19,6 +19,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
 from app import config
+from app.client_messages import INVALID_TYPE_MESSAGE, dispatch_client_text, invalid_message
+from app.connections import ConnectionManager, frame_carries_route
 from app.contracts import InterventionEvent
 from app.contracts import coerce_bool, validate_hidden_sizes
 from app.host_guard import HostOriginGuard
@@ -85,59 +87,6 @@ def _safe_upload_name(name: str | None) -> str:
     return (cleaned or "model.pt")[:120]
 
 
-_SEND_TIMEOUT_SEC = 5.0
-
-
-class ConnectionManager:
-    """接続中の WebSocket をまとめて扱う。"""
-
-    def __init__(self) -> None:
-        self._connections: set[WebSocket] = set()
-        self._lock = asyncio.Lock()
-
-    async def add(self, websocket: WebSocket) -> None:
-        async with self._lock:
-            self._connections.add(websocket)
-
-    async def remove(self, websocket: WebSocket) -> None:
-        async with self._lock:
-            self._connections.discard(websocket)
-
-    @property
-    def count(self) -> int:
-        return len(self._connections)
-
-    async def broadcast(self, payload: dict[str, Any]) -> None:
-        """全接続へ 1 通送る。**読み取りの遅い接続では時間切れで切断する。**"""
-        if not self._connections:
-            return
-        text = orjson.dumps(payload).decode("utf-8")
-        async with self._lock:
-            targets = list(self._connections)
-        dead: list[WebSocket] = []
-        for ws in targets:
-            try:
-                await asyncio.wait_for(ws.send_text(text), timeout=_SEND_TIMEOUT_SEC)
-            except TimeoutError:
-                logger.warning(
-                    "WebSocket への送信が %.1f 秒で完了しませんでした。"
-                    "読み取りが滞っている接続として切断します",
-                    _SEND_TIMEOUT_SEC,
-                )
-                dead.append(ws)
-            except Exception:
-                dead.append(ws)
-        if dead:
-            async with self._lock:
-                for ws in dead:
-                    self._connections.discard(ws)
-            for ws in dead:
-                try:
-                    await ws.close(code=1011)
-                except Exception:
-                    pass
-
-
 manager = ConnectionManager()
 
 
@@ -153,7 +102,8 @@ def _detector_training_error(
 
 
 async def send_json(websocket: WebSocket, payload: dict[str, Any]) -> None:
-    await websocket.send_text(orjson.dumps(payload).decode("utf-8"))
+    """1 接続へ返す。配信と同じ送信キューを通すので、同じ接続の中では積んだ順に届く。"""
+    manager.send(websocket, payload)
 
 
 async def send_notice(websocket: WebSocket, message: str) -> None:
@@ -179,7 +129,11 @@ async def broadcast_loop() -> None:
 
             last_seq, frame = engine.take_frame(last_seq)
             if frame is not None:
-                await manager.broadcast({"type": "frame", **frame.to_wire()})
+                wire = frame.to_wire()
+                # 経路を運ばない frame は、遅い接続でまだ送っていない前の frame と差し替えてよい
+                await manager.broadcast(
+                    {"type": "frame", **wire}, replaceable=not frame_carries_route(wire)
+                )
 
             last_taxi_seq, taxi = engine.take_taxi(last_taxi_seq)
             if taxi is not None:
@@ -351,6 +305,10 @@ def _parse_point(value: Any) -> tuple[float, float] | None:
 
 async def handle_client_message(websocket: WebSocket, message: dict[str, Any]) -> None:
     kind = message.get("type")
+    if not isinstance(kind, str):
+        # 入口（dispatch_client_text）で弾いているが、種別の集合との照合で TypeError を出さないよう、ここでも見る
+        await send_json(websocket, invalid_message(INVALID_TYPE_MESSAGE))
+        return
 
     if kind == "ping":
         await send_json(websocket, {"type": "pong", "t": int(time.time() * 1000)})
@@ -611,6 +569,7 @@ async def lifespan(app: FastAPI):
             await task
         except asyncio.CancelledError:
             pass
+        await manager.close_all()
         engine.stop()
 
 
@@ -903,8 +862,6 @@ def _weather_presets_wire() -> list[dict[str, Any]]:
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket) -> None:
     await websocket.accept()
-    await manager.add(websocket)
-    logger.info("WebSocket 接続を受け付けました（接続数 %d）", manager.count)
 
     try:
         from app.map.presets import list_presets
@@ -914,8 +871,11 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
         logger.exception("プリセット一覧の取得に失敗しました")
         presets = []
 
+    # 登録してから map まで await を挟まずに積む。挟むと配信（frame など）が init より先に積まれる
+    manager.add(websocket)
+    logger.info("WebSocket 接続を受け付けました（接続数 %d）", manager.count)
     try:
-        await send_json(
+        manager.send(
             websocket,
             {
                 "type": "init",
@@ -934,42 +894,29 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
             },
         )
 
-        await send_json(
-            websocket, {"type": "detector", **engine.detector_job.snapshot()}
-        )
-        await send_json(websocket, {"type": "autotune", **engine.autotune_payload()})
+        manager.send(websocket, {"type": "detector", **engine.detector_job.snapshot()})
+        manager.send(websocket, {"type": "autotune", **engine.autotune_payload()})
 
         # 配車は 1 件しか無い（決定 8）ので、経路つきの 1 通を全接続へ配り直す
         engine.request_full_taxi()
 
         if _current_map_wire is not None:
-            await send_json(websocket, {"type": "map", **_current_map_wire})
+            manager.send(websocket, {"type": "map", **_current_map_wire})
             engine.request_full_frame()
 
+        handle = functools.partial(handle_client_message, websocket)
+        reply = functools.partial(send_json, websocket)
         while True:
             raw = await websocket.receive_text()
-            try:
-                message = orjson.loads(raw)
-            except orjson.JSONDecodeError:
-                await send_json(
-                    websocket,
-                    {"type": "error", "code": "INVALID_MESSAGE", "message": "JSON として解釈できません"},
-                )
-                continue
-            if not isinstance(message, dict):
-                await send_json(
-                    websocket,
-                    {"type": "error", "code": "INVALID_MESSAGE", "message": "オブジェクトを送ってください"},
-                )
-                continue
-            await handle_client_message(websocket, message)
+            # 不正な通（type が文字列でないなど）や処理の失敗は INVALID_MESSAGE を返し、受信を続ける
+            await dispatch_client_text(raw, handle, reply)
 
     except WebSocketDisconnect:
         logger.info("WebSocket が切断されました")
     except Exception:
         logger.exception("WebSocket ハンドラで例外が発生しました")
     finally:
-        await manager.remove(websocket)
+        manager.remove(websocket)
 
 
 _dist_dir = config.PROJECT_DIR / "frontend" / "dist"

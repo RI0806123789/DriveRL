@@ -131,6 +131,8 @@ class MockServer {
   private closed = false
   private updates = 0
   private progress = 0
+  /** 直前に送った metrics。物理と学習を止めている間は、実機と同じく同じ値を 1Hz で配り直す */
+  private lastMetrics: MetricsMessage | null = null
   /** 周囲カメラの検出を頼まれた車と、頼まれた時刻 [ms] */
   private surroundWatch = new Map<number, number>()
   private occlusionWatch = new Map<number, number>()
@@ -196,6 +198,11 @@ class MockServer {
 
   private sendMetrics(): void {
     if (!this.map) return
+    if (this.status.simSuspended) {
+      // 認識器の学習中は PPO も止まっている。乱数も引かない（再開後の並びを止める前と同じ形に保つ）
+      if (this.lastMetrics) this.send(this.lastMetrics)
+      return
+    }
     this.updates += 1
     const p = this.progress
     const noise = () => (this.rng() - 0.5) * 2
@@ -228,6 +235,7 @@ class MockServer {
       ...mockCurriculum(this.params.incidentCurriculum, p, this.updates),
       ...mockOptionMetrics(p),
     }
+    this.lastMetrics = metrics
     this.send(metrics)
     // 試行の進み具合は実機と同じく 1Hz で配る
     if (this.autotune.running) this.autotune.send()
@@ -244,6 +252,8 @@ class MockServer {
 
   private step(): void {
     if (this.closed || !this.map) return
+    // 認識器の学習中は物理と PPO を止める（実機の `engine.suspend_sim()`）。時刻も進めず frame も送らない
+    if (this.status.simSuspended) return
 
     const dt = (FRAME_MS / 1000) * this.params.simSpeed
     this.tick += 1

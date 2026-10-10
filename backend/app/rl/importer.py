@@ -13,10 +13,16 @@ import torch
 from app.model_upload import MAX_UPLOAD_BYTES
 from app.rl.checkpoint import CheckpointValidationError, prepare_checkpoint
 
-__all__ = ["CheckpointImportError", "CheckpointInfo", "inspect_checkpoint", "MAX_UPLOAD_BYTES"]
+__all__ = [
+    "CheckpointImportError", "CheckpointInfo", "IMPORT_FAILED_MESSAGE", "inspect_checkpoint", "MAX_UPLOAD_BYTES",
+]
+
+#: 読み込みが想定外の理由で失敗したときに画面へ出す文（内部の例外の文はログにだけ残す）
+IMPORT_FAILED_MESSAGE = "モデルの読み込みに失敗しました。詳しい理由はサーバーのログに残しています"
+
 
 class CheckpointImportError(RuntimeError):
-    """読み込めないファイルを渡されたときに投げる。文言はそのまま画面に出す。"""
+    """読み込めないファイルを渡されたときに投げる。文言はそのまま画面に出すので、内部の例外の文を入れないこと。"""
 
 
 @dataclass

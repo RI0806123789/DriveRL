@@ -189,7 +189,14 @@ cd backend
   （読み込んだ直後の振る舞いは元と同じ。元は `.flat` へ控える）。下位の報酬の整形（加加速度・車線維持・意図の速度帯）は
   学習器の中で足し、`StepResult.rewards` と metrics は変えない。お手本が運転し始めたときに選んだ意図は上位の方策の勾配に
   入れない。検査は `backend/verify/verify_hierarchical_policy.py`
-- **`map/loader.py` と `public/sw.js` の `CACHE_VERSION` は、生成物の中身を変えたら上げる**
+- **`map/loader.py` と `public/sw.js` の `CACHE_VERSION` は、生成物の中身を変えたら上げる**。
+  `sw.js` が消す・引くのは `driverl-shell-` で始まる自分のキャッシュだけ（同じオリジンの別アプリのキャッシュに触れない。
+  検査は `src/__tests__/serviceWorker.test.ts`）
+- **WebSocket へは `websocket.send_text` を直接呼ばず、`app/connections.py` の `ConnectionManager`（`manager.send` /
+  `manager.broadcast`）を通す。** 接続ごとの送信キューで、遅い接続が他の接続の配信を止めず、1 接続の中では積んだ順に届く。
+  置き換えてよいのは経路（`vehicles[].route`）を運ばない frame だけ。検査は `backend/tests/test_connections.py`
+- **学習グラフの集計（`panel/metricsChartMath.ts`）は、系列の配列ごとの索引に追記分だけ足す。** 系列（`metricsSeries`）は
+  追記だけにすること（途中の点を書き換えると索引が気づけない）。検査は `src/__tests__/metricsChart.test.ts`
 - **実用モード（自動運転タクシー）では重みの更新だけが止まる。** 物理も推論も配信も動き続ける。
   この間は**全車**を PPO ではなく経路追従（Pure Pursuit）で走らせ、徴用した 1 台は
   エピソードを閉じない。**開発モードでは必ず経路追従を切ること**（学習環境が変わる）

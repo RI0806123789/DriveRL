@@ -9,12 +9,14 @@ import json
 import logging
 import os
 import re
+import uuid
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -67,8 +69,12 @@ KERAS_MISSING_MESSAGE = (
 )
 
 
+#: 書き出しが想定外の理由で失敗したときに画面へ出す文（内部の例外の文はログにだけ残す）
+EXPORT_FAILED_MESSAGE = "モデルの書き出しに失敗しました。詳しい理由はサーバーのログに残しています"
+
+
 class ExportError(RuntimeError):
-    """書き出しに失敗したときに投げる。"""
+    """書き出しに失敗したときに投げる。文は画面へそのまま出すので、内部の例外の文を入れないこと。"""
 
 
 @dataclass
@@ -80,8 +86,8 @@ class ExportResult:
     kind: str
 
 
-#: Keras で上位方策のいちばん確率の高い意図を one-hot にするときの温度（ロジットをこれで割って softmax）
-KERAS_OPTION_TEMPERATURE = 1e-8
+#: Keras で意図のロジットの差を 0/1 に変えるときの倍率。差が 2^-100 以上なら 1 になる（2 の冪なので掛けても丸めない）
+KERAS_OPTION_STEP_SCALE = float(2**100)
 
 
 class InferencePolicy(nn.Module):
@@ -251,7 +257,7 @@ def build_metadata(
                 "note": (
                     "上位方策が意図を選び、下位方策が観測と意図の one-hot から操作を出す。"
                     "書き出したモデルは呼ばれるたびに、上位方策のいちばん確率の高い意図を選び直す"
-                    "（アプリの中では periodSteps ごとに引き直して保つ）"
+                    "（同点なら番号の小さい意図。アプリの中では periodSteps ごとに引き直して保つ）"
                 ),
             },
         },
@@ -378,9 +384,15 @@ def _build_keras_model(trainer: Any):
             x = keras.layers.Dense(units, activation="tanh", name=f"{prefix}_dense_{i}")(x)
         return x
 
-    # いちばん確率の高い意図の one-hot を、温度の低い softmax で標準の層だけで作る（Lambda を使わない）
-    option = keras.layers.Dense(num_options, activation="softmax", name="option")(
-        trunk(inputs, "meta")
+    # 意図の one-hot を torch の argmax（同点なら番号の小さい方）と同じ規則で、標準の層だけで作る（Lambda を使わない）
+    logits = keras.layers.Dense(num_options, activation=None, name="option_logits")(trunk(inputs, "meta"))
+    pairs = [(i, j) for i in range(num_options) for j in range(i)]
+    diffs = keras.layers.Dense(len(pairs), use_bias=False, name="option_diffs")(logits)
+    greater = keras.layers.ReLU(max_value=1.0, name="option_greater")(
+        keras.layers.Rescaling(KERAS_OPTION_STEP_SCALE, name="option_step")(diffs)
+    )
+    option = keras.layers.ReLU(max_value=1.0, name="option")(
+        keras.layers.Dense(num_options, name="option_select")(greater)
     )
     sub_inputs = keras.layers.Concatenate(name="observation_option")([inputs, option])
     raw_action = keras.layers.Dense(action_dim, activation=None, name="action_raw")(
@@ -412,10 +424,22 @@ def _build_keras_model(trainer: Any):
             model.get_layer(f"{prefix}_dense_{i}").set_weights(
                 [weight(f"{source}.{2 * i}").T, bias(f"{source}.{2 * i}")]
             )
-    scale = 1.0 / float(KERAS_OPTION_TEMPERATURE)
-    model.get_layer("option").set_weights(
-        [weight("meta_head").T * scale, bias("meta_head") * scale]
-    )
+    model.get_layer("option_logits").set_weights([weight("meta_head").T, bias("meta_head")])
+    # option_greater の列 p は pairs[p] = (i, j)（j < i）について「L_i > L_j」なら 1、そうでなければ 0
+    diff_kernel = np.zeros((num_options, len(pairs)), dtype=np.float32)
+    for p, (i, j) in enumerate(pairs):
+        diff_kernel[i, p] = 1.0
+        diff_kernel[j, p] = -1.0
+    model.get_layer("option_diffs").set_weights([diff_kernel])
+    # 意図 i を選ぶのは、前の意図すべてより大きく（列そのもの）、後ろの意図すべて以上（1 - 列）のとき。
+    #   K-1 個の 0/1 の和が K-1 のときだけ、K-2 を引いて 1 になる
+    select_kernel = np.zeros((len(pairs), num_options), dtype=np.float32)
+    select_bias = np.full(num_options, -float(num_options - 2), dtype=np.float32)
+    for p, (i, j) in enumerate(pairs):
+        select_kernel[p, i] += 1.0
+        select_kernel[p, j] -= 1.0
+        select_bias[j] += 1.0
+    model.get_layer("option_select").set_weights([select_kernel, select_bias])
     model.get_layer("action_raw").set_weights([weight("mu_head").T, bias("mu_head")])
     model.get_layer("option_bias").set_weights(
         [state["option_bias"].detach().cpu().numpy()]
@@ -446,11 +470,40 @@ def _safe_slug(text: str | None, fallback: str = "nomap") -> str:
 
 
 def _atomic_save(write: Any, path: Path) -> None:
-    """一時ファイルへ書いてから差し替える。中断しても壊れたファイルを残さない。"""
+    """一時ファイルへ書いてから置く。中断しても壊れたファイルを残さず、同じ名前の既存のファイルも上書きしない。"""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_suffix(path.suffix + ".tmp")
-    write(tmp_path)
-    os.replace(tmp_path, path)
+    try:
+        write(tmp_path)
+        _install_new(tmp_path, path)
+    except BaseException:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
+def _install_new(tmp_path: Path, path: Path) -> None:
+    """書き終えた一時ファイルを `path` に置く。すでにあれば FileExistsError（前の書き出し・退避を消さない）。"""
+    try:
+        os.link(tmp_path, path)
+    except FileExistsError:
+        raise
+    except OSError:
+        # ハードリンクを作れないファイルシステム（FAT など）。名前は一意なので、無いことを確かめてから置く
+        if path.exists():
+            raise FileExistsError(str(path)) from None
+        os.replace(tmp_path, path)
+        return
+    os.unlink(tmp_path)
+
+
+def _export_basename(preset_id: str | None, updates: int, label: str | None) -> str:
+    """書き出しのファイル名（拡張子なし）。同じ秒・同じ更新回数でも重ならないよう、末尾に乱数の識別子を付ける。"""
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    tag = f"_{_safe_slug(label, 'x')}" if label else ""
+    return f"autoware-sim_{_safe_slug(preset_id)}_upd{int(updates)}{tag}_{stamp}_{uuid.uuid4().hex[:12]}"
 
 
 def _is_import_backup(name: str) -> bool:
@@ -525,9 +578,7 @@ def export_model(
         raise ExportError(f"未知の書き出し形式です: {kind}")
 
     directory = Path(out_dir) if out_dir is not None else config.EXPORT_DIR
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    tag = f"_{_safe_slug(label, 'x')}" if label else ""
-    base = f"autoware-sim_{_safe_slug(preset_id)}_upd{int(trainer.updates)}{tag}_{stamp}"
+    base = _export_basename(preset_id, int(trainer.updates), label)
 
     metadata = build_metadata(
         trainer,
@@ -567,9 +618,13 @@ def export_model(
             path = directory / f"{base}.keras"
             model = _build_keras_model(trainer)
             tmp_path = path.with_name(path.stem + ".partial.keras")
-            model.save(tmp_path)
-            _attach_metadata(tmp_path, metadata)
-            os.replace(tmp_path, path)
+            try:
+                model.save(tmp_path)
+                _attach_metadata(tmp_path, metadata)
+                _install_new(tmp_path, path)
+            except BaseException:
+                tmp_path.unlink(missing_ok=True)
+                raise
             media_type = "application/octet-stream"
 
         else:
@@ -587,8 +642,9 @@ def export_model(
 
     except ExportError:
         raise
-    except Exception as exc:  # noqa: BLE001 - 失敗理由をそのまま画面に出したい
-        raise ExportError(f"モデルの書き出しに失敗しました: {exc}") from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("モデルの書き出しに失敗しました（形式 %s）", kind)
+        raise ExportError(EXPORT_FAILED_MESSAGE) from exc
 
     if directory == config.EXPORT_DIR:
         try:

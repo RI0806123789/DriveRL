@@ -358,13 +358,48 @@ with torch.no_grad():
 scripted = torch.jit.script(InferencePolicy(trainer.policy))
 a_ts, v_ts = scripted(xe)
 check("TorchScript の操作と価値が方策と一致", float((a_ts - a_ref).abs().max()) == 0.0 and float((v_ts - v_ref).abs().max()) == 0.0)
+def _keras_gap(policy_trainer, obs: torch.Tensor) -> tuple[float, float]:
+    """Keras へ書き出した操作・価値と方策の差（そのままと、保存して読み直した後）。"""
+    import keras  # noqa: PLC0415
+
+    with torch.no_grad():
+        o = policy_trainer.policy.greedy_options(obs)
+        a = policy_trainer.policy.mean_action(obs, o).numpy()
+        v = policy_trainer.policy.sub_value(obs, o).numpy()
+    model = _build_keras_model(policy_trainer)
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "policy.keras"
+        model.save(path)
+        loaded = keras.saving.load_model(path)
+        gaps = []
+        for m in (model, loaded):
+            a_k, v_k = m.predict(obs.numpy(), verbose=0)
+            gaps.append(max(float(np.abs(a_k - a).max()), float(np.abs(v_k - v).max())))
+    return gaps[0], gaps[1]
+
+
 try:
-    keras_model = _build_keras_model(trainer)
-    a_k, v_k = keras_model.predict(xe.numpy(), verbose=0)
-    diff_k = max(float(np.abs(a_k - a_ref.numpy()).max()), float(np.abs(v_k - v_ref.numpy()).max()))
-    check("Keras の操作と価値が方策と一致（意図は温度の低い softmax。float32 で同点に近いときだけ僅かにずれる）", diff_k < 1e-3, f"最大差 {diff_k:.2e}")
+    diff_k, diff_loaded = _keras_gap(trainer, xe)
+    check("Keras の操作と価値が方策と一致（float32 の丸めの差だけ）", diff_k < 1e-5, f"最大差 {diff_k:.2e}")
+    check("保存して読み直した Keras も一致", diff_loaded < 1e-5, f"最大差 {diff_loaded:.2e}")
+    # 意図が同点・近接のとき。torch の argmax は同点なら番号の小さい意図を選ぶ（Keras も同じ規則で選ぶこと）
+    fresh = PPOTrainer(D, A, params, N, seed=0)
+    zero_gap, _ = _keras_gap(fresh, torch.zeros(4, D))
+    check("初期の方策・ゼロ観測（上位の出力層が 0 なので 4 つの意図が同点）でも一致", zero_gap < 1e-5, f"最大差 {zero_gap:.2e}")
+    for label, logits in (
+        ("完全な同点 [1, 1, 1, 1]", [1.0, 1.0, 1.0, 1.0]),
+        ("後ろ 2 つが同点 [0, 2, 2, -1]", [0.0, 2.0, 2.0, -1.0]),
+        ("近接 [3, 3 - 1e-6, 3, 2]", [3.0, 3.0 - 1e-6, 3.0, 2.0]),
+        ("近接 [0.5, 0.5 + 1e-4, 0.5, 0.5]", [0.5, 0.5 + 1e-4, 0.5, 0.5]),
+    ):
+        tie = PPOTrainer(D, A, params, N, seed=0)
+        with torch.no_grad():
+            tie.policy.meta_head.weight.zero_()
+            tie.policy.meta_head.bias.copy_(torch.tensor(logits))
+        gap, gap_loaded = _keras_gap(tie, torch.randn(32, D))
+        check(f"意図が{label}でも一致（保存して読み直した後も）", max(gap, gap_loaded) < 1e-5, f"最大差 {max(gap, gap_loaded):.2e}")
 except Exception as exc:  # noqa: BLE001
-    check("Keras の操作と価値が方策と一致（意図は温度の低い softmax）", False, f"{type(exc).__name__}: {exc}")
+    check("Keras の操作と価値が方策と一致", False, f"{type(exc).__name__}: {exc}")
 
 # ---------------------------------------------------------------------------
 section("9. 環境: 意図の教師・走りの真値・frame の currentOption")

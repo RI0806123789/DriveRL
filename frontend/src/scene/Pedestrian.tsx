@@ -39,6 +39,7 @@ import {
   makeTorsoGeometry,
   swingFor,
 } from './pedestrianGeometry'
+import { isSceneKeyEvent, isUiControlTarget } from './sceneKeys'
 import { usePalette } from './usePalette'
 
 /** マウス感度 [rad/px] と、見上げ・見下ろしの限界 [rad] */
@@ -56,11 +57,6 @@ const SPAWN_BEHIND_M = 9
 
 /** 位置をサーバーへ知らせる間隔 [ms]。 */
 const POSE_REPORT_MS = 100
-
-function isTypingTarget(target: EventTarget | null): boolean {
-  const el = target as HTMLElement | null
-  return !!el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName)
-}
 
 /** いま画面に出ているアクティブ車両を、当たり判定用の形で集める */
 function collectBlockers(
@@ -273,8 +269,8 @@ export function Pedestrian() {
     }
 
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.ctrlKey || e.metaKey || e.altKey || e.isComposing) return
-      if (isTypingTarget(e.target)) return
+      // ボタンやリンクの Enter / Space は部品の操作として通す（乗降・緊急停止に化けさせない）
+      if (!isSceneKeyEvent(e)) return
       if (setKey(e.code, true)) {
         e.preventDefault()
         return
@@ -288,9 +284,13 @@ export function Pedestrian() {
       }
     }
     const onKeyUp = (e: KeyboardEvent) => {
-      if (setKey(e.code, false)) e.preventDefault()
+      // 離すのは対象を問わない（押したまま部品へフォーカスが移っても、押しっぱなしを残さない）
+      if (setKey(e.code, false) && !isUiControlTarget(e.target)) e.preventDefault()
     }
     const onBlur = () => releasePedestrianKeys()
+    const onFocusIn = (e: FocusEvent) => {
+      if (isUiControlTarget(e.target)) releasePedestrianKeys()
+    }
 
     canvas.addEventListener('click', onClick)
     document.addEventListener('pointerlockchange', onLockChange)
@@ -298,6 +298,7 @@ export function Pedestrian() {
     window.addEventListener('keydown', onKeyDown)
     window.addEventListener('keyup', onKeyUp)
     window.addEventListener('blur', onBlur)
+    window.addEventListener('focusin', onFocusIn)
     return () => {
       canvas.removeEventListener('click', onClick)
       document.removeEventListener('pointerlockchange', onLockChange)
@@ -305,6 +306,7 @@ export function Pedestrian() {
       window.removeEventListener('keydown', onKeyDown)
       window.removeEventListener('keyup', onKeyUp)
       window.removeEventListener('blur', onBlur)
+      window.removeEventListener('focusin', onFocusIn)
       if (document.pointerLockElement === canvas) document.exitPointerLock?.()
       pedestrian.locked = false
       releasePedestrianKeys()
