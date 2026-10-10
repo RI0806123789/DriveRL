@@ -53,6 +53,7 @@ from app.sim.signals import GREEN, RED, STOP_MARGIN_M, constrain_accel, stop_spe
 from app.sim.v2x import V2XMessageRouter
 from app.sim.world import SPAWN_CLEARANCE_M2, World
 from app.sim.scenario import Scenario, ScenarioTraffic, load_scenario
+from app.warn import warn_once
 
 #: 1 ステップで再スポーンに使ってよい時間 [秒]。1 台ぶんは必ず処理するので、
 #: これを超えたら残りは次のステップへ回す（金沢は 1 台 9.9ms、銀座は 1.6ms）
@@ -834,8 +835,13 @@ class SimulationEnv:
             dones[held] = False
         truncated &= dones
         # 打ち切りの価値目標は「打ち切った時点の状態」から作る。再スポーンの後に
-        # 評価すると、別のエピソードの初期状態の価値が混ざる（`rl/buffer.py`）
-        final_obs = self._encode_last_perception() if bool(truncated.any()) else None
+        # 評価すると、別のエピソードの初期状態の価値が混ざる（`rl/buffer.py`）。
+        #   前方カメラは物理を進めた後の世界で撮り直す（前のステップの検出のままだと時刻が混ざる）
+        final_obs = (
+            self._encode_terminal_observations([int(s) for s in np.flatnonzero(truncated)])
+            if bool(truncated.any())
+            else None
+        )
 
         episodes: list[EpisodeResult] = []
         for slot in np.flatnonzero(dones):
@@ -1349,20 +1355,23 @@ class SimulationEnv:
         self._occlusion_obs[:] = 0.0
         if not self.latest_perception:
             return
-        spec = self._camera_spec
         for slot in idx:
             s = int(slot)
             front = self.latest_perception.get(s)
-            cams = self.latest_surround.get(s) or {}
-            frees = self._surround_free.get(s) or {}
-            views = [CameraInput(spec, front, self._latest_freespace.get(s) if front is not None else None)]
-            views.extend(
-                CameraInput(cam, cams.get(cam.key), frees.get(cam.key) if cam.key in cams else None)
-                for cam in SURROUND_CAMERAS
-            )
-            result = evaluate_occlusion(views)
+            result = self._occlusion_for(s, front, self._latest_freespace.get(s) if front is not None else None)
             self.latest_occlusion[s] = result
             self._occlusion_obs[s] = result.features
+
+    def _occlusion_for(self, slot: int, front: PerceptionResult | None, front_free: np.ndarray | None) -> OcclusionResult:
+        """1 台ぶんの見通しと死角。周囲カメラは撮り直した時刻つきで持っている直近の結果を使う。"""
+        cams = self.latest_surround.get(slot) or {}
+        frees = self._surround_free.get(slot) or {}
+        views = [CameraInput(self._camera_spec, front, front_free)]
+        views.extend(
+            CameraInput(cam, cams.get(cam.key), frees.get(cam.key) if cam.key in cams else None)
+            for cam in SURROUND_CAMERAS
+        )
+        return evaluate_occlusion(views)
 
     def _exchange_v2x(self, perceptions: dict[int, PerceptionResult], spec: CameraSpec) -> np.ndarray:
         """V2X のメッセージを作って近くの車へ配り、受け取った平均 (N, 4) を返す（`sim/v2x.py`）。切っていれば 0。"""
@@ -1520,6 +1529,67 @@ class SimulationEnv:
             ages,
             rear_free,
             self.latest_occlusion,
+        )
+
+    def _terminal_front(self, slots: list[int]) -> tuple[dict[int, PerceptionResult], dict[int, np.ndarray]]:
+        """打ち切った車の前方カメラを、いまの（再スポーン前の）世界で撮り直す。通常の観測と同じ経路（CNN か真値）を使う。"""
+        weather = self.weather
+        spec = self._camera_spec
+        fronts: dict[int, PerceptionResult] = {}
+        frees: dict[int, np.ndarray] = {}
+        if self._detector is not None and self._camera is not None:
+            try:
+                frame_index = int(self.world.sim_time * config.SIM_HZ)
+                images = self._camera.render(self.world, np.asarray(slots, dtype=np.int64), weather, frame_index)
+                found, free_arr = self._detector.detect_with_freespace(images, slots)
+                fronts = {s: found[i] for i, s in enumerate(slots)}
+                frees = {s: free_arr[i] for i, s in enumerate(slots)}
+            except Exception:
+                if self._perception_mode == "cnn":
+                    raise
+                warn_once("sim.env.terminal_front", "打ち切りの観測を作る推論に失敗しました。直近の検出で代用します")
+                return {}, {}
+        elif (self._perception_mode == "oracle" or config.PERCEP_FALLBACK_GROUND_TRUTH) and (
+            self._ground_truth is not None and self._freespace_gt is not None
+        ):
+            reach = min(float(config.OBS_FREESPACE_MAX_DISTANCE), weather.visibility_m(float(spec.far)))
+            try:
+                # 通常の観測と同じ組み立て（4 台ぶんを作って前方だけ使う）にして、値を揃える
+                free_all = self._freespace_gt(self.world, slots, (spec, *SURROUND_CAMERAS), reach)
+                for i, s in enumerate(slots):
+                    fronts[s] = self._ground_truth(self.world, s, CAMERA_RIG, weather)[0]
+                    frees[s] = free_all[i, 0]
+            except Exception:
+                if self._perception_mode == "oracle":
+                    raise
+                warn_once("sim.env.terminal_ground_truth", "打ち切りの観測を作る真値の生成に失敗しました。直近の検出で代用します")
+                return {}, {}
+        if self._perception_transform is not None:
+            fronts = {s: self._perception_transform(result, spec) for s, result in fronts.items()}
+        return fronts, frees
+
+    def _encode_terminal_observations(self, slots: list[int]) -> np.ndarray:
+        """打ち切った車の終端の観測。前方カメラと死角はその時点で作り直し、周囲カメラは通常どおり直近の結果を使う。"""
+        if not self._observations_enabled or not slots:
+            return self._encode_last_perception()
+        fronts, frees = self._terminal_front(slots)
+        if not fronts:
+            return self._encode_last_perception()
+        perceptions = {**self.latest_perception, **fronts}
+        freespace = {**self._latest_freespace, **frees}
+        occlusion = self._occlusion_obs.copy()
+        for s, front in fronts.items():
+            occlusion[s] = self._occlusion_for(s, front, frees.get(s)).features
+        spec = self._camera_spec
+        return encode_observations(
+            self.world,
+            self.params,
+            perceptions,
+            freespace=freespace,
+            spec=spec,
+            surround=self.latest_surround,
+            v2x=self._exchange_v2x(perceptions, spec),
+            occlusion=occlusion,
         )
 
     def _encode_last_perception(self) -> np.ndarray:
