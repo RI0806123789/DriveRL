@@ -755,7 +755,12 @@ class SimulationEngine:
             self._notify("学習の自動化は実行していません")
             self._publish_autotune()
             return
-        message = self._autotune.stop(self._autotune_host, self._trainer)
+        try:
+            message = self._autotune.stop(self._autotune_host, self._trainer)
+        except Exception:
+            logger.exception("学習の自動化の終了処理で例外が発生しました")
+            message = "学習の自動化の終了処理に失敗しました。サーバーのログを確認してください"
+        # 探索の状態を畳んだことをエンジン側（自動保存の抑止・配信）にも必ず伝える
         self._finish_autotune()
         self._notify(message)
 

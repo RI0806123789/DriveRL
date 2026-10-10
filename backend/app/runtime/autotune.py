@@ -779,37 +779,67 @@ class LiveAutoTune:
         """探索をやめ、最良の試行のパラメータと重みを適用して本番の重みへ保存する。画面へ出す文を返す。"""
         if not self.active:
             return "自動探索は実行していません"
-        self._close_worker()
         best = self.best
         baseline = self._baseline_state
-        assert baseline is not None
-        if best is None:
-            host.restore(self._baseline_patch, baseline)
-            message = "完了した試行が無かったため、自動探索の前のパラメータと重みに戻しました"
-        else:
-            try:
-                backup = backup_checkpoint(self.paths.checkpoint)
-            except OSError:
-                logger.exception("自動探索の結果を適用する前の退避に失敗しました")
-                host.restore(self._baseline_patch, baseline)
-                message = (
-                    "いまの重みを退避できなかったため、最良の試行は適用せず、自動探索の前のパラメータと重みに戻しました。"
-                    f"最良の試行の重みは {self.paths.best_policy.name} に残っています"
-                )
+        baseline_patch = self._baseline_patch
+        message = "自動探索を終了しました"
+        try:
+            self._close_worker()
+            assert baseline is not None
+            if best is None:
+                host.restore(baseline_patch, baseline)
+                message = "完了した試行が無かったため、自動探索の前のパラメータと重みに戻しました"
             else:
-                host.restore(best.patch, best.state)
-                if save_policy_checked(trainer, self.paths.checkpoint):
-                    kept = f"元の重みは {backup.name} に退避しました" if backup is not None else "元の重みはありませんでした"
-                    message = (
-                        f"試行 #{best.number}（スコア {best.score.value:+.3f}）のパラメータと重みを適用し、"
-                        f"{self.paths.checkpoint.name} に保存しました（{kept}）。この設定のまま学習を続けます"
-                    )
-                else:
-                    host.restore(self._baseline_patch, baseline)
-                    message = "最良の試行の重みに NaN / Inf が混じっていたため適用せず、自動探索の前のパラメータと重みに戻しました"
-        self._reset_session()
-        self.message = message
+                message = self._apply_best(host, trainer, best, baseline_patch, baseline)
+        except Exception:
+            # 戻すことさえできなかった。重みは途中のまま残りうるが、探索の状態だけが残るよりは通常の学習へ戻す
+            logger.exception("自動探索の終了処理に失敗しました")
+            message = "自動探索の終了処理に失敗しました。サーバーのログを確認し、必要ならモデルを読み込み直してください"
+        finally:
+            # どの経路でも探索を畳む。畳まないと phase が running のまま残り、通常の自動保存も止まったままになる
+            self._reset_session()
+            self.message = message
         return message
+
+    def _apply_best(
+        self,
+        host: TuneHost,
+        trainer: "PPOTrainer",
+        best: _Best,
+        baseline_patch: dict[str, float],
+        baseline: dict[str, Any],
+    ) -> str:
+        """最良の試行を適用して本番の重みへ保存する。退避・保存のどちらかが失敗したら探索の前へ戻す。"""
+        kept_best = f"最良の試行の重みは {self.paths.best_policy.name} に書き出しています（書き出せていれば）"
+        try:
+            backup = backup_checkpoint(self.paths.checkpoint)
+        except OSError:
+            logger.exception("自動探索の結果を適用する前の退避に失敗しました")
+            host.restore(baseline_patch, baseline)
+            return (
+                "いまの重みを退避できなかったため、最良の試行は適用せず、自動探索の前のパラメータと重みに戻しました。"
+                + kept_best
+            )
+        host.restore(best.patch, best.state)
+        try:
+            saved = save_policy_checked(trainer, self.paths.checkpoint)
+        except Exception:
+            # 保存は一時ファイルから差し替えるので、本番のファイルは探索を始めたときの重みのまま。メモリもそこへ揃える
+            logger.exception("自動探索の結果を本番の重みへ保存できませんでした")
+            host.restore(baseline_patch, baseline)
+            return (
+                f"最良の試行（#{best.number}）の重みを {self.paths.checkpoint.name} に保存できなかったため"
+                "（ディスクの空きなどを確認してください）、適用せず、自動探索の前のパラメータと重みに戻しました。"
+                + kept_best
+            )
+        if not saved:
+            host.restore(baseline_patch, baseline)
+            return "最良の試行の重みに NaN / Inf が混じっていたため適用せず、自動探索の前のパラメータと重みに戻しました"
+        kept = f"元の重みは {backup.name} に退避しました" if backup is not None else "元の重みはありませんでした"
+        return (
+            f"試行 #{best.number}（スコア {best.score.value:+.3f}）のパラメータと重みを適用し、"
+            f"{self.paths.checkpoint.name} に保存しました（{kept}）。この設定のまま学習を続けます"
+        )
 
     def abort(self, host: TuneHost | None, reason: str) -> str:
         """探索を捨てて、探索の前のパラメータと重みに戻す（地図の差し替え・失敗など）。"""

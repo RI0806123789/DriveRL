@@ -382,6 +382,93 @@ def test_engine_autotune_applies_best_and_backs_up(engine, tmp_path: Path) -> No
     assert any("保存しました" in m for m in _drain(eng))
 
 
+def test_engine_stop_save_failure_restores_baseline_and_resumes(engine, tmp_path: Path, monkeypatch) -> None:
+    """退避の後の本番の保存だけがディスク不足で落ちても、探索の状態を残さず探索の前へ戻り、通常の学習・保存へ戻る（#123）。"""
+    eng = engine
+    trainer = eng._trainer
+    baseline = {k: v.clone() for k, v in trainer.policy.state_dict().items()}
+    before = replace(eng._params)
+
+    eng.start_autotune()
+    _drain(eng)
+    _wait_for_ready(eng)
+    _run_until(eng, 3)
+    best = eng._autotune.best
+    assert best is not None and not _state_equal(best.state["policy"], baseline)
+
+    original_save = trainer.save
+
+    def disk_full(path):
+        raise OSError(28, "No space left on device", str(path))
+
+    monkeypatch.setattr(trainer, "save", disk_full)
+    eng.stop_autotune()
+    notices = _drain(eng)
+    assert any("保存できなかった" in m and "戻しました" in m for m in notices), notices
+
+    # 探索の状態は残らない（エンジンの印・配信・セッションのどれも止まっている）
+    assert not eng._autotune.active and eng._autotune.phase == "idle" and eng._autotune._worker is None
+    assert not eng.autotune_running()
+    assert eng.autotune_payload()["running"] is False
+    assert eng._autotune.tick(eng._autotune_host, trainer, None, None) == []
+
+    # メモリもディスクも探索を始める前の重みとパラメータ
+    assert _state_equal(trainer.policy.state_dict(), baseline)
+    assert autotune.tuned_patch(eng._params) == autotune.tuned_patch(before)
+    assert _state_equal(torch.load(tmp_path / "shared_policy.pt", weights_only=True)["policy"], baseline)
+    assert _state_equal(torch.load(tmp_path / "shared_policy.pt.before-autotune", weights_only=True)["policy"], baseline)
+
+    # ディスクが戻れば、通常の学習・手動の保存・自動保存に戻る
+    monkeypatch.setattr(trainer, "save", original_save)
+    eng.command("save_checkpoint")
+    assert any("保存しました" in m for m in _drain(eng))
+    eng._autosave_every = 1
+    updates = trainer.updates
+    saved_before = (tmp_path / "shared_policy.pt").stat().st_mtime_ns
+    for _ in range(400):
+        eng._step_once()
+        _drain(eng)
+        if trainer.updates > updates + 1:
+            break
+    assert trainer.updates > updates
+    assert (tmp_path / "shared_policy.pt").stat().st_mtime_ns != saved_before, "自動保存が再開していない"
+
+    # もう一度始めて止められる（孤立したセッションが残っていない）
+    eng.start_autotune()
+    assert any("始めました" in m for m in _drain(eng))
+    assert eng.autotune_running()
+    eng.stop_autotune()
+    _drain(eng)
+    assert not eng.autotune_running()
+
+
+def test_live_stop_never_leaves_an_active_session(tmp_path: Path) -> None:
+    """戻す処理まで落ちても、探索のセッションは畳む（呼び出し元の自動保存の抑止が残らない）。"""
+    from app.contracts import SimParams
+    from app.rl.ppo import PPOTrainer
+
+    live = autotune.LiveAutoTune(
+        paths=autotune.TunePaths(
+            db=tmp_path / "db.sqlite", best_params=tmp_path / "best.json", summary=tmp_path / "s.csv",
+            best_policy=tmp_path / "best.pt", checkpoint=tmp_path / "shared_policy.pt",
+        ),
+    )
+    trainer = PPOTrainer(config.OBS_DIM, config.ACTION_DIM, SimParams(), 2, seed=0)
+    live.phase = "running"
+    live._baseline_state = trainer.snapshot_state()
+
+    class BrokenHost:
+        def begin_trial(self, patch, state):
+            raise AssertionError("呼ばれない")
+
+        def restore(self, patch, state):
+            raise RuntimeError("戻す処理も落ちる")
+
+    message = live.stop(BrokenHost(), trainer)
+    assert "失敗しました" in message
+    assert not live.active and live._worker is None
+
+
 def test_engine_stop_without_trials_restores_baseline(engine, tmp_path: Path) -> None:
     eng = engine
     trainer = eng._trainer
