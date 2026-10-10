@@ -1918,6 +1918,12 @@ pointerdown のときしか走らないので、1 回ぶんのリフローは無
 - **`/assets/` は件数に上限を設ける**（`ASSET_KEEP`）。キャッシュ優先で
   無条件に入れるので、再ビルドのたびにハッシュ違いの JS/CSS が積み上がる。
   three.js と drei で 1 バンドル 1MB を超えるため、放っておくと数十 MB になる
+- ★ **消すのは `driverl-shell-`（`CACHE_PREFIX`）で始まる DriveRL の旧版だけ、引くのも `CACHE_NAME` のキャッシュだけ**
+  （`matchOwn`。#119）。Cache Storage はオリジンごとなので、同じ `127.0.0.1:8000` を別のアプリが使っていると
+  そのキャッシュも同じ一覧に並びます。以前は activate が `CACHE_NAME` 以外をすべて消し、取得も `caches.match`
+  （オリジンの全キャッシュを探す）だったので、**別アプリのオフラインデータを壊し、別アプリが同じパス（`/`・`/assets/…`）に
+  入れた応答を DriveRL の画面として返しえました**。接頭辞は変えないこと（変えると旧版が消えずに残る）。
+  検査は `src/__tests__/serviceWorker.test.ts`（実物の `sw.js` を `node:vm` で動かす）
 - **プリキャッシュする `SHELL` のアイコンは `manifest.webmanifest` の宣言と揃える**
   （3 枚とも `scripts/make-icons.ts` が同時に作る）
 - `manifest.webmanifest` の `theme_color` は**インストール時に OS が使う唯一の色**で、

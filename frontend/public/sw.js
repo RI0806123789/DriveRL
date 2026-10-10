@@ -1,7 +1,8 @@
 /** Service Worker（PWA のインストールと起動を成り立たせるための最小限）。 */
 
-const CACHE_VERSION = 'v7'
-const CACHE_NAME = `driverl-shell-${CACHE_VERSION}`
+const CACHE_VERSION = 'v8'
+const CACHE_PREFIX = 'driverl-shell-'
+const CACHE_NAME = `${CACHE_PREFIX}${CACHE_VERSION}`
 
 /** 先に取っておくもの。**ハッシュ付きの JS/CSS はここに書けない** */
 const SHELL = ['/', '/icon-192.png', '/icon-512.png', '/icon-maskable-512.png']
@@ -27,9 +28,12 @@ self.addEventListener('install', (event) => {
 self.addEventListener('activate', (event) => {
   event.waitUntil(
     (async () => {
+      // 同じオリジンに同居する別アプリのキャッシュは消さない（DriveRL の旧版だけ）
       const names = await caches.keys()
       await Promise.all(
-        names.filter((name) => name !== CACHE_NAME).map((name) => caches.delete(name)),
+        names
+          .filter((name) => name.startsWith(CACHE_PREFIX) && name !== CACHE_NAME)
+          .map((name) => caches.delete(name)),
       )
       await self.clients.claim()
     })(),
@@ -39,6 +43,12 @@ self.addEventListener('activate', (event) => {
 /** キャッシュに入れてよい応答か（部分応答・エラー・他オリジンは入れない） */
 function isCacheable(response) {
   return Boolean(response) && response.status === 200 && response.type === 'basic'
+}
+
+/** DriveRL のキャッシュだけから引く（`caches.match` は同じオリジンの全キャッシュを探す） */
+async function matchOwn(request) {
+  const cache = await caches.open(CACHE_NAME)
+  return cache.match(request)
 }
 
 /** `/assets/` のキャッシュを古いものから `ASSET_KEEP` 件まで減らす。 */
@@ -84,7 +94,7 @@ self.addEventListener('fetch', (event) => {
           putInCache(event, '/', fresh)
           return fresh
         } catch {
-          const cached = (await caches.match('/')) ?? (await caches.match(request))
+          const cached = (await matchOwn('/')) ?? (await matchOwn(request))
           if (cached) return cached
           return Response.error()
         }
@@ -96,7 +106,7 @@ self.addEventListener('fetch', (event) => {
   if (url.pathname.startsWith('/assets/')) {
     event.respondWith(
       (async () => {
-        const cached = await caches.match(request)
+        const cached = await matchOwn(request)
         if (cached) return cached
         const fresh = await fetch(request)
         putInCache(event, request, fresh, { trim: true })
@@ -121,7 +131,7 @@ self.addEventListener('fetch', (event) => {
   )
   event.respondWith(
     (async () => {
-      const cached = await caches.match(request)
+      const cached = await matchOwn(request)
       if (cached) return cached
       const { fresh } = await network
       return fresh ?? Response.error()
