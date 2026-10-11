@@ -350,16 +350,19 @@ def verify_learning_mask(index) -> None:
         env.world.add_obstacle(px, py, config.OBSTACLE_RADIUS)
         for _ in range(int(40.0 / config.DT)):
             overriding = env.safety.commands[slot].override
+            serial = int(env.world.route_serial[slot])
             # 車線に沿って走る方策の代わりに経路追従の操作を入れる（方策の出来に結果を左右させない）
             act = ACT.copy()
             act[slot] = env._autopilot(slot, 8.0)
             res = env.step(act)
+            applied = env._intersection_applied.get(slot)
+            overriding |= applied is not None and applied[0] == serial
             masked += int(not bool(res.learn[slot]))
             mismatched += int(bool(res.learn[slot]) == overriding)
         if masked:
             break
     check(
-        "学習から外すのは、安全ギミックが操作を引き受けていたステップと一致する",
+        "学習から外すのは、安全ギミックか交差点支援が実際に操作を引き受けたステップと一致する",
         masked > 0 and mismatched == 0,
         f"外したステップ {masked} / 食い違い {mismatched}",
     )
@@ -454,10 +457,12 @@ def verify_observation(index) -> None:
         f"{np.round(rear, 3).tolist()}",
     )
     check(
-        "周囲カメラの欄・V2X の欄・死角の欄の順（後から足した欄は末尾へ足していく）",
+        "周囲カメラ・V2X・死角・新標識の順（後から足した欄は末尾へ足していく）",
         base + config.OBS_SURROUND_DIM == OBS_OFFSETS["v2x"]
         and OBS_OFFSETS["v2x"] + config.OBS_V2X_DIM == OBS_OFFSETS["occlusion"]
-        and OBS_OFFSETS["occlusion"] + config.OBS_OCCLUSION_DIM == config.OBS_DIM,
+        and OBS_OFFSETS["occlusion"] + config.OBS_OCCLUSION_DIM == OBS_OFFSETS["traffic_signs"]
+        and OBS_OFFSETS["traffic_signs"] == config.OBS_DIM_BEFORE_TRAFFIC_SIGNS
+        and OBS_OFFSETS["traffic_signs"] + config.OBS_TRAFFIC_SIGN_DIM == config.OBS_DIM,
         f"OBS_DIM {config.OBS_DIM} / 欄の先頭 {base}",
     )
 

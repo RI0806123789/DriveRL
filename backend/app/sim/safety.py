@@ -374,7 +374,7 @@ class SafetySupervisor:
         if watching and stopped and not cmd.assist:
             cmd.assist = ASSIST_BLIND_SPOT
 
-        peek_cap, peek_assist, peeking = self._peek(world, slot, now, cams)
+        peek_cap, peek_assist, peeking = (math.inf, "", False) if world.slots[slot].intersections else self._peek(world, slot, now, cams)
         if peeking:
             demand.extend((LEFT_CAMERA.key, RIGHT_CAMERA.key))
         if peek_cap < cmd.speed_cap:

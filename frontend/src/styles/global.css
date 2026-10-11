@@ -396,6 +396,23 @@ p {
   background: color-mix(in srgb, #e5322b 92%, transparent);
 }
 
+.intersection-status {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 3px;
+  white-space: normal;
+}
+.intersection-status-detail {
+  font-size: 10px;
+  font-weight: 400;
+}
+.app-hud .intersection-status--stop {
+  color: var(--m3-error);
+}
+.app-hud .intersection-status--warn {
+  color: var(--m3-warning);
+}
+
 .panel {
   display: flex;
   flex-direction: column;

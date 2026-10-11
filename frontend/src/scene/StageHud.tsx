@@ -5,6 +5,9 @@ import { currentCameraNotice, sceneStats } from './sceneStats'
 import { frameBuffer } from '../store/frameBuffer'
 import { useSimStore } from '../store/simStore'
 import { OptionBadge } from '../panel/OptionBadge'
+import { IntersectionStatus } from '../panel/IntersectionStatus'
+import type { IntersectionDecision } from '../types/protocol'
+import { intersectionSummary } from './assistLabels'
 
 interface HudState {
   tick: number
@@ -16,6 +19,7 @@ interface HudState {
   notice: string
   /** 追跡中の車が選んでいる意図。追跡していない・意図が無ければ空 */
   option: string
+  intersection: IntersectionDecision | undefined
 }
 
 const EMPTY_HUD: HudState = {
@@ -27,6 +31,7 @@ const EMPTY_HUD: HudState = {
   drawCalls: 0,
   notice: '',
   option: '',
+  intersection: undefined,
 }
 
 /** 要求倍速に対してこの割合を下回ったら「追いつけていない」と見なす */
@@ -34,6 +39,7 @@ const SPEED_SHORTFALL_RATIO = 0.9
 
 /** 表示に使う桁だけを並べた署名。これが同じなら再レンダリングしても見た目は変わらない */
 function hudSignature(h: HudState): string {
+  const intersection = intersectionSummary(h.intersection)
   return [
     h.tick,
     h.simTime.toFixed(1),
@@ -43,6 +49,8 @@ function hudSignature(h: HudState): string {
     h.drawCalls,
     h.notice,
     h.option,
+    intersection?.text ?? '',
+    intersection?.detail ?? '',
   ].join('|')
 }
 
@@ -75,6 +83,7 @@ export function StageHud() {
       const got = frameBuffer.received - lastSample.current.received
       const hz = dt > 0 && got > 0 ? got / dt : 0
       lastSample.current = { received: frameBuffer.received, at: now }
+      const tracked = curr?.vehicles.find((v) => v.id === followTarget && v.active)
 
       const next: HudState = {
         tick: curr?.tick ?? 0,
@@ -84,7 +93,8 @@ export function StageHud() {
         hz,
         drawCalls: sceneStats.drawCalls,
         notice: currentCameraNotice(),
-        option: curr?.vehicles.find((v) => v.id === followTarget && v.active)?.currentOption ?? '',
+        option: tracked?.currentOption ?? '',
+        intersection: tracked?.intersection,
       }
       const sig = hudSignature(next)
       if (sig === lastSignature.current) return
@@ -111,6 +121,11 @@ export function StageHud() {
         <div className="app-hud-item" title="追跡中の車の上位方策が選んでいる意図">
           追跡 #{followTarget}
           <OptionBadge option={hud.option} />
+        </div>
+      )}
+      {hud.intersection && (
+        <div className="app-hud-item">
+          <IntersectionStatus decision={hud.intersection} />
         </div>
       )}
       <div className="app-hud-item">

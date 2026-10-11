@@ -149,13 +149,20 @@ def release_phases(world) -> None:
 
 
 def drive(env, slot: int, steps: int) -> float:
-    """アクセル 1.0 で走らせ、出た最高速度 [m/s] を返す。"""
+    """カメラ無しで信号の速度制約を確かめ、出た最高速度 [m/s] を返す。"""
+    from unittest.mock import patch
+
     act = np.zeros((config.MAX_VEHICLES, config.ACTION_DIM), dtype=np.float32)
     act[slot, 0] = 1.0
     top = 0.0
-    for _ in range(steps):
-        env.step(act)
-        top = max(top, float(env.world.fleet.speed[slot]))
+    env.intersections.decisions.clear()
+    with patch.object(
+        env.intersections, "evaluate",
+        side_effect=lambda *_args, **_kwargs: env.intersections.decisions.clear(),
+    ):
+        for _ in range(steps):
+            env.step(act)
+            top = max(top, float(env.world.fleet.speed[slot]))
     return top
 
 
