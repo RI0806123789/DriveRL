@@ -49,6 +49,7 @@ from app.sim.curriculum import (
 )
 from app.sim.safety import FRESH_SEC as SAFETY_FRESH_SEC
 from app.sim.safety import SafetyCommand, SafetySupervisor
+from app.sim.intersection import IntersectionSupervisor
 from app.sim.signals import GREEN, RED, STOP_MARGIN_M, constrain_accel, stop_speed_limit
 from app.sim.v2x import V2XMessageRouter
 from app.sim.world import SPAWN_CLEARANCE_M2, World
@@ -206,6 +207,7 @@ class SimulationEnv:
         self.latest_surround: dict[int, dict[str, PerceptionResult]] = {}
         #: (撮った時刻, そのときの経路の通し番号)。経路が変わったら古いものとして扱う
         self._surround_taken: dict[int, dict[str, tuple[float, int]]] = {}
+        self._surround_poses: dict[int, dict[str, tuple[float, float, float]]] = {}
         self._rear_free: dict[int, np.ndarray] = {}
         # 周囲カメラの走行可能距離（見通しと死角に使う）。認識結果と同じ時刻・通し番号で持つ
         self._surround_free: dict[int, dict[str, np.ndarray]] = {}
@@ -215,6 +217,8 @@ class SimulationEnv:
         # 見通しと死角を frame に載せる車（`watch_occlusion`）
         self.watched_occlusion: frozenset[int] = frozenset()
         self.safety = SafetySupervisor()
+        self.intersections = IntersectionSupervisor()
+        self._intersection_applied: dict[int, tuple[int, int, str]] = {}
         # ヒヤリハットのオートカリキュラム。環境の乱数とは別の乱数で回す（難易度 0 の間は 1 つも引かない）
         self.curriculum = CurriculumManager(np.random.default_rng([int(seed), 63]))
         # 車車間通信。受け取ったメッセージの平均は観測の末尾へ、受け取った相手は frame へ載せる
@@ -464,7 +468,8 @@ class SimulationEnv:
             if self.traffic_hold(s) or (int(phase) == RED and distance <= OPTION_LABEL_RED_M):
                 labels[s] = config.HRL_OPTIONS.index("STOP")
             elif (
-                self._pedestrian_gap(s) <= OPTION_LABEL_PEDESTRIAN_M
+                (self.intersections.decisions.get(s) is not None and bool(self.intersections.decisions[s].reason))
+                or self._pedestrian_gap(s) <= OPTION_LABEL_PEDESTRIAN_M
                 or world.next_junction(s) <= OPTION_LABEL_JUNCTION_M
             ):
                 labels[s] = config.HRL_OPTIONS.index("YIELD")
@@ -529,7 +534,7 @@ class SimulationEnv:
         return self.hold_reason(slot) != ""
 
     def hold_reason(self, slot: int) -> str:
-        """止められている理由（"safety" / "signal" / "lead_vehicle" / "pedestrian"）。止められていなければ空文字。"""
+        """安全支援・交差点・信号・前走車・歩行者に止められている理由。停止理由がなければ空文字。"""
         slot = int(slot)
         if not (0 <= slot < config.MAX_VEHICLES):
             return ""
@@ -542,6 +547,9 @@ class SimulationEnv:
         # 安全ギミックが止めている・切り返している間も、待たされているのと同じに扱う
         if self.safety.holding(slot):
             return "safety"
+        intersection = self.intersections.decisions.get(slot)
+        if intersection is not None and intersection.imposed and intersection.speed_cap <= TRAFFIC_HOLD_MPS:
+            return "intersection"
         distance, phase = self.world.next_signal(slot)
         if int(phase) != GREEN and held(distance, STOP_MARGIN_M):
             return "signal"
@@ -690,6 +698,7 @@ class SimulationEnv:
         overridden = np.zeros(n, dtype=bool)
         for slot in assisted:
             overridden[int(slot)] = commands[int(slot)].override
+        safety_overridden = overridden.copy()
         # オンライン模倣でエキスパートが運転する車。安全ギミックが引き受けている車は除く
         expert_mask = np.zeros(n, dtype=bool)
         if expert is not None:
@@ -741,19 +750,36 @@ class SimulationEnv:
         for slot in assisted:
             s = int(slot)
             limit[s] = min(float(limit[s]), float(commands[s].speed_cap))
+        limits_without_intersection = limit.copy()
+        intersection_slots = np.union1d(assisted, driven)
+        intersection_changed = np.zeros(n, dtype=bool)
+        for slot in intersection_slots:
+            s = int(slot)
+            decision = self.intersections.decisions.get(s)
+            if decision is not None:
+                cap = float(decision.speed_cap)
+                decision.imposed = math.isfinite(cap) and cap < min(float(limit[s]), max_speed)
+                limit[s] = min(float(limit[s]), cap)
         # 経路追従は、下の constrain_accel と同じ上限を目標速度にして手前からアクセルを絞る
         self.autopilot_actions[:] = 0.0
+        without_intersection_accel = accel_cmd.copy()
         for slot in steered:
             s = int(slot)
             offset = float(commands[s].offset) if assist_mask[s] else 0.0
             accel_cmd[s], steer_cmd[s] = self._autopilot(
                 s, min(float(limit[s]), max_speed), offset
             )
+            decision = self.intersections.decisions.get(s)
+            without_intersection_accel[s] = self._autopilot(s, min(float(limits_without_intersection[s]), max_speed), offset)[0] if decision is not None and decision.imposed else accel_cmd[s]
             if self.traffic is not None and s in self.traffic.drivers and not commands[s].override:
                 accel_cmd[s], steer_cmd[s] = self.traffic.adjust_commands(s, float(accel_cmd[s]), float(steer_cmd[s]))
+                driver = self.traffic.drivers[s]
+                raw = float(without_intersection_accel[s])
+                without_intersection_accel[s] = np.clip(raw * (driver.accel_scale if raw >= 0.0 else driver.brake_scale), -1.0, 1.0)
             if s in piloted:
                 self.autopilot_actions[s, 0] = accel_cmd[s]
                 self.autopilot_actions[s, 1] = steer_cmd[s]
+        without_intersection = constrain_accel(without_intersection_accel, self.world.fleet.speed, limits_without_intersection, config.DT, config.MAX_ACCEL, abs(config.MAX_DECEL))
         accel_cmd = constrain_accel(
             accel_cmd,
             self.world.fleet.speed,
@@ -762,6 +788,16 @@ class SimulationEnv:
             config.MAX_ACCEL,
             abs(config.MAX_DECEL),
         )
+        self._intersection_applied = {}
+        for slot in intersection_slots:
+            s = int(slot)
+            decision = self.intersections.decisions.get(s)
+            if decision is not None and decision.imposed:
+                intersection_changed[s] = accel_cmd[s] < without_intersection[s] - 1e-6 and not commands[s].reverse and int(self.world.fleet.gear[s]) >= 0
+                decision.imposed = bool(intersection_changed[s])
+                if decision.imposed:
+                    self._intersection_applied[s] = (int(self.world.route_serial[s]), decision.node_id, decision.reason)
+        overridden |= intersection_changed & ~expert_mask
         # 後退とギアの切り替えは前進の上限（constrain_accel）の外で決める
         for slot in assisted:
             s = int(slot)
@@ -769,10 +805,15 @@ class SimulationEnv:
                 accel_cmd[s], steer_cmd[s] = self._reverse_control(s, commands[s])
 
         # ヒヤリハットの急制動。前走車の操作を最大制動で上書きするので、その車のそのステップは学習に使わない
-        forced_brake = self.curriculum.braking_mask() & active_before & ~overridden
+        forced_brake = self.curriculum.braking_mask() & active_before & ~safety_overridden
         forced_brake[piloted] = False
         accel_cmd[forced_brake] = np.float32(-1.0)
         expert_mask &= ~forced_brake
+        for slot in np.flatnonzero(forced_brake):
+            self._intersection_applied.pop(int(slot), None)
+            decision = self.intersections.decisions.get(int(slot))
+            if decision is not None:
+                decision.imposed = False
 
         expert_actions = np.zeros((n, config.ACTION_DIM), dtype=np.float32)
         expert_mask &= self.world.fleet.gear >= 0
@@ -1130,6 +1171,11 @@ class SimulationEnv:
         for vehicle in frame.vehicles:
             if vehicle.active:
                 vehicle.assist = self.safety.assist(vehicle.id)
+                decision = self.intersections.decisions.get(vehicle.id)
+                vehicle.intersection = replace(decision) if decision is not None else None
+                if vehicle.intersection is not None and vehicle.intersection.imposed and not vehicle.assist:
+                    reason = vehicle.intersection.reason
+                    vehicle.assist = {"stop": "intersection_stop", "exit_blocked": "intersection_exit", "visibility": "intersection_visibility"}.get(reason, "intersection_yield")
                 vehicle.v2x_links = list(self.v2x_links.get(vehicle.id, ()))
                 if self.current_options is not None and not self.autopilot_all and not (self.traffic is not None and self.traffic.mask[vehicle.id]):
                     option = int(self.current_options[vehicle.id])
@@ -1226,6 +1272,7 @@ class SimulationEnv:
         """前方と周囲のカメラを描いて検出し、安全ギミックを評価してから観測ベクトルへ落とす。"""
         if not self._observations_enabled:
             self._clear_perception()
+            self._run_safety()
             return np.zeros((config.MAX_VEHICLES, config.OBS_DIM), dtype=np.float32)
 
         active = self.world.fleet.active
@@ -1435,7 +1482,7 @@ class SimulationEnv:
             for slot in idx:
                 s = int(slot)
                 age = self._surround_age(s, cam.key, now)
-                wanted = s in assisted and cam.key in self.safety.demand(s)
+                wanted = (s in assisted and cam.key in self.safety.demand(s)) or cam.key in self.intersections.demand(s)
                 weight = SURROUND_DEMAND_WEIGHT if wanted else 1.0
                 ranked.append((min(age, SURROUND_AGE_CAP_SEC) * weight, s))
             ranked.sort(key=lambda item: -item[0])
@@ -1471,12 +1518,14 @@ class SimulationEnv:
         if replace_all:
             self.latest_surround = {}
             self._surround_taken = {}
+            self._surround_poses = {}
             self._rear_free = {}
             self._surround_free = {}
         for slot in list(self.latest_surround):
             if slot not in alive:
                 self.latest_surround.pop(slot, None)
                 self._surround_taken.pop(slot, None)
+                self._surround_poses.pop(slot, None)
                 self._rear_free.pop(slot, None)
                 self._surround_free.pop(slot, None)
                 continue
@@ -1488,6 +1537,7 @@ class SimulationEnv:
             for key in [k for k in kept if stamps.get(k, (0.0, -1))[1] != serial]:
                 kept.pop(key, None)
                 stamps.pop(key, None)
+                self._surround_poses.get(slot, {}).pop(key, None)
                 frees.pop(key, None)
                 if key == REAR_CAMERA.key:
                     self._rear_free.pop(slot, None)
@@ -1501,6 +1551,8 @@ class SimulationEnv:
             for key, result in cams.items():
                 kept[key] = result
                 stamps[key] = (now, serial)
+                fleet = self.world.fleet
+                self._surround_poses.setdefault(slot, {})[key] = (float(fleet.x[slot]), float(fleet.y[slot]), float(fleet.heading[slot]))
         for slot, frees in (fresh_free or {}).items():
             if slot in self.latest_surround:
                 self._surround_free.setdefault(slot, {}).update(frees)
@@ -1510,6 +1562,8 @@ class SimulationEnv:
     def _run_safety(self) -> None:
         """表示する検出枠から、次のステップの安全ギミックの指示を作る（枠に危険度も付ける）。"""
         now = float(self.world.sim_time)
+        for slot in np.flatnonzero(self.world.fleet.active):
+            self.world.prepare_intersections(int(slot))
         assisted = self._assisted_slots(self.world.fleet.active)
         ages = {
             slot: {key: self._surround_age(slot, key, now) for key in cams}
@@ -1530,6 +1584,10 @@ class SimulationEnv:
             rear_free,
             self.latest_occlusion,
         )
+        background = frozenset(int(s) for s in np.flatnonzero(self.world.fleet.active & self.traffic.mask)) if self.traffic is not None else frozenset()
+        self.intersections.evaluate(self.world, now, self.latest_perception, self.latest_surround, ages, self._surround_poses, self.latest_occlusion, background)
+        for slot, decision in self.intersections.decisions.items():
+            decision.imposed = self._intersection_applied.get(slot) == (int(self.world.route_serial[slot]), decision.node_id, decision.reason) and bool(decision.reason)
 
     def _terminal_front(self, slots: list[int]) -> tuple[dict[int, PerceptionResult], dict[int, np.ndarray]]:
         """打ち切った車の前方カメラを、いまの（再スポーン前の）世界で撮り直す。通常の観測と同じ経路（CNN か真値）を使う。"""

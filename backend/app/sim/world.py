@@ -17,6 +17,7 @@ from app.contracts import (
     MapIndex,
     ObstacleSnapshot,
     RoadLead,
+    RouteIntersection,
     RouteLeg,
     VehicleSnapshot,
 )
@@ -140,6 +141,10 @@ class SlotState:
     route: np.ndarray = field(default_factory=lambda: np.zeros((2, 2), dtype=np.float32))
     route_cum: np.ndarray = field(default_factory=lambda: np.zeros(2, dtype=np.float32))
     route_progress: int = 0
+    route_legs: tuple[RouteLeg, ...] = ()
+    intersections: tuple[RouteIntersection, ...] = ()
+    intersections_from: float = math.inf
+    intersections_until: float = -math.inf
     arc_position: float = 0.0
     goal: tuple[float, float] = (0.0, 0.0)
     steps: int = 0
@@ -738,6 +743,7 @@ class World:
         self.route_serial[slot] += 1
         state.route = np.ascontiguousarray(route, dtype=np.float32)
         state.route_cum = self._cumulative_length(state.route)
+        state.route_legs = plan.legs
         self.route_total[slot] = (
             state.route_cum[-1] if state.route_cum.size >= 2 else np.float32(0.0)
         )
@@ -772,6 +778,10 @@ class World:
         self.stop_arc[slot] = np.inf
 
         points = [(float(px), float(py)) for px, py in state.route]
+        state.intersections = ()
+        state.intersections_from = math.inf
+        state.intersections_until = -math.inf
+        self.prepare_intersections(slot)
         try:
             stops = self.map_index.signals_on_route(points, plan.legs)
         except Exception:
@@ -864,6 +874,24 @@ class World:
             np.asarray([a for a, _ in found], dtype=np.float32),
             np.asarray([s for _, s in found], dtype=np.int8),
         )
+
+    def prepare_intersections(self, slot: int) -> None:
+        """現在位置から60mまでの交錯を、25m進むごとに構成する。"""
+        state = self.slots[int(slot)]
+        arc = float(self.arc[int(slot)])
+        rear_arc = arc - config.VEHICLE_LENGTH / 2.0
+        if state.intersections_until - arc >= 35.0 and rear_arc >= state.intersections_from:
+            return
+        state.intersections_from = rear_arc - 10.0
+        state.intersections_until = arc + 60.0
+        build = getattr(self.map_index, "intersections_on_route", None)
+        if build is None:
+            return
+        try:
+            state.intersections = tuple(build(state.route, state.route_legs, start_arc=state.intersections_from, end_arc=state.intersections_until))
+        except Exception:
+            state.intersections = ()
+            warn_once("sim.world.intersections", "交差点の交錯区間の構成に失敗しました。既存の交差点支援で続行します")
 
     def next_junction(self, slot: int) -> float:
         """前方の直近の、信号の無い交差点の入口までの距離 [m]（車体の中心から）。無ければ inf。"""

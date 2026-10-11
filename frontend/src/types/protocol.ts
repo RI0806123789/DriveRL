@@ -272,6 +272,8 @@ export interface VehicleState {
   reverse?: boolean
   /** 安全ギミックの介入（protocol.md 2.3）。介入していなければ空文字 */
   assist?: AssistKind
+  /** 交差点の進入判断。対象の交差点が無いときは省略し、前回値を保持しない */
+  intersection?: IntersectionDecision
   /** V2X でこの車がメッセージを受け取った相手（近い順）。いなければ省略 */
   v2xConnectedIds?: number[]
   /** 階層型の方策がいま選んでいる意図（protocol.md 2.3）。方策が運転していない車は省略 */
@@ -284,7 +286,7 @@ export interface VehicleState {
 export const DRIVE_OPTIONS = ['CRUISE', 'FOLLOW', 'YIELD', 'STOP'] as const
 export type DriveOption = (typeof DRIVE_OPTIONS)[number]
 
-/** 安全ギミックの介入の種類。**バックエンドの `sim/safety.py` の ASSIST_* と同じ値** */
+/** 安全ギミックの介入の種類。バックエンドの `sim/safety.py` / `sim/intersection.py` と同じ値 */
 export type AssistKind =
   | ''
   | 'front_hold'
@@ -296,6 +298,21 @@ export type AssistKind =
   | 'peek'
   | 'creep'
   | 'yield'
+  | 'intersection_yield'
+  | 'intersection_stop'
+  | 'intersection_exit'
+  | 'intersection_visibility'
+
+/** 交差点の進入判断と、その根拠・操作への反映（protocol.md 2.3）。 */
+export interface IntersectionDecision {
+  nodeId: number
+  state: 'approaching' | 'waiting' | 'clear' | 'committed'
+  reason: '' | 'oncoming' | 'pedestrian' | 'exit_blocked' | 'stop' | 'priority' | 'visibility'
+  source: 'camera' | 'background'
+  waitingSeconds: number
+  gapSeconds: number | null
+  imposed: boolean
+}
 
 /** 周囲カメラのキー。**バックエンドの `percep/types.py` の CAMERA_RIG と同じ値** */
 export type SurroundKey = 'rear' | 'left' | 'right'

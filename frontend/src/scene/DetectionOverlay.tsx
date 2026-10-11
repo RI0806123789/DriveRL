@@ -11,7 +11,8 @@ import {
   type SurroundDetections,
   type VehicleState,
 } from '../types/protocol'
-import { assistSummary, paneAssist } from './assistLabels'
+import { assistSummary, intersectionSummary, paneAssist } from './assistLabels'
+import { IntersectionStatus } from '../panel/IntersectionStatus'
 import { detectionFrameColor, detectionLabel } from './detectionLabels'
 import { projectBox } from './detectionProjection'
 import { PANE_LABELS, QUAD_PANES, paneFov, quadPaneRect, type QuadPane } from './quadLayout'
@@ -132,6 +133,8 @@ function QuadPanes({
 }) {
   const vehicle = tracked.vehicle
   const summary = assistSummary(vehicle?.assist)
+  const intersection = intersectionSummary(vehicle?.intersection)
+  const showAssist = summary && (!intersection || !vehicle?.assist?.startsWith('intersection_'))
   return (
     <>
       {QUAD_PANES.map((pane, index) => {
@@ -162,8 +165,11 @@ function QuadPanes({
           </div>
         )
       })}
-      {summary && (
-        <div className={`quad-summary quad-badge--${summary.level}`}>{summary.text}</div>
+      {(summary || intersection) && (
+        <div className={`quad-summary quad-badge--${summary?.level ?? intersection?.level}`}>
+          {showAssist && <span>{summary.text}</span>}
+          <IntersectionStatus decision={vehicle?.intersection} />
+        </div>
       )}
     </>
   )

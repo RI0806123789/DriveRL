@@ -22,12 +22,14 @@ from app.contracts import (
     MapEdge,
     OccupancyGrid,
     RoadLead,
+    RouteIntersection,
     RouteLeg,
 )
 
 __all__ = ["MapIndexImpl", "build_map_index"]
 
 from app.map.lanes import RouteSegment, build_lane_route
+from app.map.intersections import IntersectionGeometry
 from app.warn import warn_once
 
 logger = logging.getLogger("autoware_sim")
@@ -91,6 +93,7 @@ class MapIndexImpl:
             for node in self.graph.nodes
             if len(set(self.graph.predecessors(node)) | set(self.graph.successors(node))) >= 3
         )
+        self._intersections = IntersectionGeometry(self.graph, self._edges_by_id, self._junctions)
         self._reachable = self._build_reachable_nodes()
         self._reachable_mask = np.zeros(self._node_xy.shape[0], dtype=bool)
         self._reachable_mask[self._reachable[self._reachable < self._reachable_mask.size]] = True
@@ -552,6 +555,13 @@ class MapIndexImpl:
         if best is None:
             return None
         return best[1], best[2], _direction(best[2], at_end=True)
+
+    def intersections_on_route(
+        self, points: Sequence[tuple[float, float]], legs: Sequence[RouteLeg],
+        *, start_arc: float = 0.0, end_arc: float = math.inf,
+    ) -> list[RouteIntersection]:
+        """指定弧長範囲に重なる交差点の入口・出口と静的な候補進路の交錯区間を返す。"""
+        return self._intersections.on_route(points, legs, start_arc=start_arc, end_arc=end_arc)
 
     def signals_on_route(
         self, points: Sequence[tuple[float, float]], legs: Sequence[RouteLeg]

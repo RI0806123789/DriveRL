@@ -99,6 +99,53 @@ class RouteLeg:
     end_arc: float
 
 
+@dataclass(frozen=True)
+class IntersectionMovement:
+    """交差点の静的な候補進路と、観測位置を射影する車線点列。"""
+
+    node_id: int
+    entry_node: int
+    exit_node: int
+    incoming_edge_id: int
+    outgoing_edge_id: int
+    entry_heading: float
+    exit_heading: float
+    turn: str
+    road_width: float
+    exit_road_width: float
+    points: tuple[tuple[float, float], ...]
+    cum: tuple[float, ...]
+    entry_arc: float
+    exit_arc: float
+
+
+@dataclass(frozen=True)
+class IntersectionConflict:
+    """自車と候補進路の車体幅が重なる、それぞれの経路上の弧長区間。"""
+
+    movement: IntersectionMovement
+    ego_start_arc: float
+    ego_end_arc: float
+    other_start_arc: float
+    other_end_arc: float
+
+
+@dataclass(frozen=True)
+class RouteIntersection:
+    """経路が通る交差点の入口・出口と、他の進入路との静的な交錯区間。"""
+
+    node_id: int
+    entry_arc: float
+    exit_arc: float
+    entry_heading: float
+    exit_heading: float
+    turn: str
+    road_width: float
+    exit_road_width: float
+    conflicts: tuple[IntersectionConflict, ...]
+    movements: tuple[IntersectionMovement, ...] = ()
+
+
 @dataclass
 class MapBuilding:
     """建物のフットプリント。outline は閉じない（末尾と先頭は重複させない）。"""
@@ -311,6 +358,13 @@ class MapIndex(Protocol):
         """経路が通る辺の信号を (経路始点からの弧長 [m], MapData.signals の添字) で返す。"""
         ...
 
+    def intersections_on_route(
+        self, points: Sequence[tuple[float, float]], legs: Sequence[RouteLeg],
+        *, start_arc: float = 0.0, end_arc: float = math.inf,
+    ) -> list[RouteIntersection]:
+        """指定弧長範囲に重なる交差点の入口・出口と候補進路の交錯区間を静的な道路情報から返す。"""
+        ...
+
     def speed_limits_on_route(
         self, points: Sequence[tuple[float, float]], legs: Sequence[RouteLeg]
     ) -> list[tuple[float, float]]:
@@ -513,6 +567,32 @@ class SimParams:
 
 
 @dataclass
+class IntersectionDecision:
+    """交差点の進入判断と、その根拠・操作への反映。"""
+
+    node_id: int
+    state: str = "approaching"
+    reason: str = ""
+    source: str = "camera"
+    waiting_seconds: float = 0.0
+    gap_seconds: float | None = None
+    speed_cap: float = math.inf
+    imposed: bool = False
+
+    def to_wire(self) -> dict[str, Any]:
+        gap = self.gap_seconds
+        return {
+            "nodeId": int(self.node_id),
+            "state": self.state,
+            "reason": self.reason,
+            "source": self.source,
+            "waitingSeconds": round(self.waiting_seconds, 3),
+            "gapSeconds": round(gap, 3) if gap is not None and math.isfinite(gap) else None,
+            "imposed": self.imposed,
+        }
+
+
+@dataclass
 class VehicleSnapshot:
     id: int
     active: bool
@@ -543,6 +623,7 @@ class VehicleSnapshot:
     v2x_links: list[int] = field(default_factory=list)
     #: 階層型の方策がいま選んでいる意図（`config.HRL_OPTIONS` の名前）。方策が運転していない車は空
     current_option: str = ""
+    intersection: IntersectionDecision | None = None
     route: list[tuple[float, float]] | None = None
 
     def to_wire(self) -> dict[str, Any]:
@@ -572,6 +653,8 @@ class VehicleSnapshot:
             out["v2xConnectedIds"] = [int(v) for v in self.v2x_links]
         if self.current_option:
             out["currentOption"] = self.current_option
+        if self.intersection is not None:
+            out["intersection"] = self.intersection.to_wire()
         if self.route is not None:
             out["route"] = [[round(px, 2), round(py, 2)] for px, py in self.route]
         return out
