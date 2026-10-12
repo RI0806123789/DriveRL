@@ -21,6 +21,7 @@ from app.contracts import (
     RouteLeg,
     VehicleSnapshot,
 )
+from app.map.elevation import LEVEL_GAP_M, attitude_from_slopes, vertical_overlap
 from app.sim.pedestrians import PedestrianCrowd
 from app.sim.signals import (
     RED,
@@ -92,6 +93,9 @@ JUNCTION_SIGNAL_AFTER_M = 5.0
 #: 入口をこれだけ越えたら、その交差点は過ぎたとみなす [m]
 JUNCTION_PASSED_M = 0.5
 
+#: 立体の地図でノードへ寄せるとき、高さのずれ 1m を平面の距離に換算した重み [m]
+SNAP_LEVEL_WEIGHT_M = 10.0
+
 #: 経路が最初に曲がるまでに、少なくともまっすぐ進む距離 [m]
 LEAD_MIN_M = 12.0
 #: いまの速度から、曲がり始めるまでに要る距離を見込む減速度 [m/s²]
@@ -132,6 +136,8 @@ class ObstacleState:
     x: float
     y: float
     radius: float
+    #: 置かれた路面の高さ [m]。平面の地図では 0
+    z: float = 0.0
 
 
 @dataclass
@@ -142,6 +148,10 @@ class SlotState:
     route_cum: np.ndarray = field(default_factory=lambda: np.zeros(2, dtype=np.float32))
     route_progress: int = 0
     route_legs: tuple[RouteLeg, ...] = ()
+    #: 立体の地図でだけ持つ、経路点ごとの路面の高さ・進行方向の左が上がる横断勾配・縦断勾配
+    route_z: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.float32))
+    route_cross: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.float32))
+    route_grade: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.float32))
     intersections: tuple[RouteIntersection, ...] = ()
     intersections_from: float = math.inf
     intersections_until: float = -math.inf
@@ -188,8 +198,18 @@ class World:
         self.rng = rng
         self.fleet = VehicleFleet(config.MAX_VEHICLES, dynamics=dynamics)
         self.crowd = PedestrianCrowd(map_index, rng)
+        #: 高さを持つ地図か。偽なら高さ・姿勢・階層の判定をすべて飛ばす（平面の地図の振る舞いを変えない）
+        self.elevated = bool(getattr(map_index, "elevated", False))
+        edges = list(getattr(getattr(map_index, "data", None), "edges", []) or [])
+        #: 高さは不明でも OSM の layer が分かっている地図。layer の違う、端点を共有しない辺どうしは別の路面とみなす
+        self.layered = (not self.elevated) and any(int(getattr(e, "layer", 0)) != 0 for e in edges)
+        self._edge_layer = {int(e.id): int(getattr(e, "layer", 0)) for e in edges} if self.layered else {}
+        self._edge_ends = {int(e.id): (int(e.u), int(e.v)) for e in edges} if self.layered else {}
+        #: いま走っている辺（交差点のつなぎでは -1）。layer の判定だけに使う
+        self.current_edge = np.full(config.MAX_VEHICLES, -1, dtype=np.int64)
         #: 実用モードの徒歩キャラ (0, 2) か (1, 2)。**NPC 群衆とは別に持つ**
         self._player_xy = _NO_PLAYER
+        self._player_z = 0.0
         self._player_rev = 0
         self._people_key: tuple[int, int] | None = None
         self._people: np.ndarray = _NO_PLAYER
@@ -216,6 +236,10 @@ class World:
         self.lateral = np.zeros(n, dtype=np.float32)
         self.tangent = np.zeros(n, dtype=np.float32)
         self.arc_delta = np.zeros(n, dtype=np.float32)
+        #: 車体の下端の高さ [m]・ピッチ（機首上げが正）・ロール（左が上がるのが正）[rad]。平面の地図では 0
+        self.z = np.zeros(n, dtype=np.float32)
+        self.pitch = np.zeros(n, dtype=np.float32)
+        self.roll = np.zeros(n, dtype=np.float32)
 
         self.collided_flags = np.zeros(n, dtype=bool)
         self.reached_flags = np.zeros(n, dtype=bool)
@@ -232,15 +256,19 @@ class World:
 
         self._obstacle_xy = np.zeros((0, 2), dtype=np.float32)
         self._obstacle_r = np.zeros(0, dtype=np.float32)
+        self._obstacle_z = np.zeros(0, dtype=np.float32)
+        self._people_z = np.zeros(0, dtype=np.float64)
 
         map_data = getattr(map_index, "data", None)
         node_list = getattr(map_data, "nodes", None) if map_data is not None else None
         if node_list:
             self._node_xy = np.array([(nd.x, nd.y) for nd in node_list], dtype=np.float32)
             self._node_ids = np.array([nd.id for nd in node_list], dtype=np.int64)
+            self._node_z = np.array([float(getattr(nd, "z", 0.0)) for nd in node_list], dtype=np.float32)
         else:
             self._node_xy = np.zeros((0, 2), dtype=np.float32)
             self._node_ids = np.zeros(0, dtype=np.int64)
+            self._node_z = np.zeros(0, dtype=np.float32)
 
     def _route_from_nodes(self, src: int, dst: int) -> Route | None:
         """ノード ID の組から経路を作る。失敗したら None。"""
@@ -259,15 +287,18 @@ class World:
         """そのノードから、いちばん近い他車までの距離の二乗。他に誰もいなければ inf。"""
         if not (0 <= int(node) < self._node_xy.shape[0]):
             return -1.0
+        z = float(self._node_z[int(node)]) if self.elevated else None
         return self._point_clearance(
-            float(self._node_xy[int(node), 0]), float(self._node_xy[int(node), 1]), exclude
+            float(self._node_xy[int(node), 0]), float(self._node_xy[int(node), 1]), exclude, z
         )
 
-    def _point_clearance(self, x: float, y: float, exclude: int) -> float:
-        """その地点から、いちばん近い他車までの距離の二乗。他に誰もいなければ inf。"""
+    def _point_clearance(self, x: float, y: float, exclude: int, z: float | None = None) -> float:
+        """その地点から、いちばん近い他車までの距離の二乗。他に誰もいなければ inf。立体の地図では別の階の車を数えない。"""
         active = self.fleet.active.copy()
         if 0 <= exclude < active.shape[0]:
             active[exclude] = False
+        if z is not None and self.elevated:
+            active &= np.abs(self.z - np.float32(z)) < np.float32(LEVEL_GAP_M)
         idx = np.flatnonzero(active)
         if idx.size == 0:
             return float("inf")
@@ -311,11 +342,15 @@ class World:
         return None
 
     def _road_lead(
-        self, x: float, y: float, heading: float | None, speed: float
+        self, x: float, y: float, heading: float | None, speed: float, z: float | None = None
     ) -> RoadLead | None:
-        """いまいる道路を道なりに進み、曲がり始められるノードまでの道のり。"""
+        """いまいる道路を道なりに進み、曲がり始められるノードまでの道のり。立体の地図では `z` の路面を選ぶ。"""
         need = LEAD_MIN_M + max(0.0, float(speed)) ** 2 / (2.0 * LEAD_DECEL_MPS2)
         try:
+            if self.elevated:
+                if z is None:
+                    z = self._ground_hint(float(x), float(y))
+                return self.map_index.road_lead(float(x), float(y), heading, need, z=float(z))
             return self.map_index.road_lead(float(x), float(y), heading, need)
         except Exception:
             warn_once(
@@ -336,6 +371,11 @@ class World:
             return None
         return self._lane_route(node_path, lead)
 
+    def _ground_hint(self, x: float, y: float) -> float:
+        """高さの分からない地点（画面のクリック・徒歩キャラ）の路面の高さ。地面に近い路面を選ぶ。"""
+        surface = getattr(self.map_index, "surface_z", None)
+        return 0.0 if surface is None else float(surface(float(x), float(y)))
+
     def _route_from_point(
         self,
         x: float,
@@ -343,9 +383,10 @@ class World:
         *,
         heading: float | None = None,
         speed: float = 0.0,
+        z: float | None = None,
     ) -> Route | None:
         """指定座標から道なりに出て、到達可能な目的地へ向かう経路を作る。作れなければ None。"""
-        lead = self._road_lead(x, y, heading, speed)
+        lead = self._road_lead(x, y, heading, speed, z)
         if lead is None:
             return None
         return self._route_onward_from(x, y, lead)
@@ -385,13 +426,22 @@ class World:
         # ランダムな場所へは落とさない。指定した所と無関係な場所に車が出る（code_review Z-05）
         return route
 
-    def snap_to_road_node(self, x: float, y: float) -> tuple[float, float] | None:
-        """指定座標を最寄りの道路ノードへ寄せる（決定 7）。"""
-        if self._node_xy.shape[0] == 0:
-            return None
+    def _snap_node(self, x: float, y: float, z: float | None = None) -> int:
+        """指定座標に最も近い道路ノードの添字。立体の地図では高さの離れたノード（上下の階）を遠く数える。"""
         dx = self._node_xy[:, 0] - np.float32(x)
         dy = self._node_xy[:, 1] - np.float32(y)
-        i = int(np.argmin(dx * dx + dy * dy))
+        dist2 = dx * dx + dy * dy
+        if self.elevated:
+            want = self._ground_hint(x, y) if z is None else float(z)
+            dz = (self._node_z - np.float32(want)) * np.float32(SNAP_LEVEL_WEIGHT_M)
+            dist2 = dist2 + dz * dz
+        return int(np.argmin(dist2))
+
+    def snap_to_road_node(self, x: float, y: float, z: float | None = None) -> tuple[float, float] | None:
+        """指定座標を最寄りの道路ノードへ寄せる（決定 7）。立体の地図では `z`（省略時は地面に近い路面）の階のノード。"""
+        if self._node_xy.shape[0] == 0:
+            return None
+        i = self._snap_node(x, y, z)
         return float(self._node_xy[i, 0]), float(self._node_xy[i, 1])
 
     @staticmethod
@@ -416,10 +466,10 @@ class World:
         )
 
     def route_onward(
-        self, x: float, y: float, heading: float, speed: float = 0.0
+        self, x: float, y: float, heading: float, speed: float = 0.0, z: float | None = None
     ) -> Route | None:
         """いまいる場所から道なりに出て、その先の目的地への経路を作る（徴用の解除に使う）。"""
-        return self._route_from_point(x, y, heading=heading, speed=speed)
+        return self._route_from_point(x, y, heading=heading, speed=speed, z=z)
 
     def route_between(
         self,
@@ -428,15 +478,18 @@ class World:
         *,
         heading: float | None = None,
         speed: float = 0.0,
+        src_z: float | None = None,
+        dst_z: float | None = None,
     ) -> Route | None:
         """出発地から道なりに出て、道路ノードへ寄せた目的地までの走行経路を作る（決定 7・12）。"""
-        dst_snap = self.snap_to_road_node(*dst)
-        if dst_snap is None:
+        if self._node_xy.shape[0] == 0:
             return None
-        lead = self._road_lead(float(src[0]), float(src[1]), heading, speed)
+        node = self._snap_node(float(dst[0]), float(dst[1]), dst_z)
+        dst_snap = (float(self._node_xy[node, 0]), float(self._node_xy[node, 1]))
+        lead = self._road_lead(float(src[0]), float(src[1]), heading, speed, src_z)
         if lead is None:
             return None
-        dst_node = int(self.map_index.nearest_node(dst_snap[0], dst_snap[1]))
+        dst_node = int(self._node_ids[node]) if self.elevated else int(self.map_index.nearest_node(dst_snap[0], dst_snap[1]))
         route = self._route_from_lead(lead, dst_node)
         if route is None:
             return None
@@ -480,7 +533,7 @@ class World:
         )
 
     def set_player(self, at: tuple[float, float] | None) -> None:
-        """実用モードの徒歩キャラの位置を差し替える（None で消す）。"""
+        """実用モードの徒歩キャラの位置を差し替える（None で消す）。立体の地図では地面に近い路面に立つ。"""
         self._player_rev += 1
         if at is None:
             self._player_xy = _NO_PLAYER
@@ -492,6 +545,7 @@ class World:
         player = np.array([[x, y]], dtype=np.float64)
         player.flags.writeable = False
         self._player_xy = player
+        self._player_z = self._ground_hint(x, y) if self.elevated else 0.0
 
     @property
     def pedestrian_xy(self) -> np.ndarray:
@@ -509,7 +563,48 @@ class World:
             out.flags.writeable = False
         self._people_key = key
         self._people = out
+        if self.elevated:
+            heights = self.crowd.heights
+            if self._player_xy.shape[0]:
+                heights = np.concatenate((heights, [self._player_z]))
+            heights.flags.writeable = False
+            self._people_z = heights
         return out
+
+    @property
+    def pedestrian_z(self) -> np.ndarray:
+        """`pedestrian_xy` と同じ並びの足元の高さ (K,)。平面の地図ではすべて 0。"""
+        people = self.pedestrian_xy
+        if not self.elevated:
+            return np.zeros(people.shape[0], dtype=np.float64)
+        return self._people_z
+
+    def same_level_people(self, slot: int) -> np.ndarray:
+        """そのスロットの車と同じ階にいる歩行者の印（`pedestrian_xy` と同じ並び）。平面の地図ではすべて真。"""
+        people = self.pedestrian_xy
+        if self.layered:
+            return self._people_same_layer(int(self.current_edge[int(slot)]), people.shape[0])
+        if not self.elevated:
+            return np.ones(people.shape[0], dtype=bool)
+        return np.abs(self.pedestrian_z - float(self.z[int(slot)])) < LEVEL_GAP_M
+
+    def _people_same_layer(self, edge: int, count: int) -> np.ndarray:
+        """layer で見て、辺 `edge` と同じ路面にいる歩行者（NPC の歩道の辺で見る。徒歩キャラは同じとみなす）。"""
+        out = np.ones(count, dtype=bool)
+        idx = np.flatnonzero(self.crowd.active)
+        ids = self.crowd.net.edge_ids
+        for k, person in enumerate(idx[: count]):
+            out[k] = self._same_layer(edge, int(ids[self.crowd.edge[person]]))
+        return out
+
+    def same_level_vehicles(self, slot: int) -> np.ndarray:
+        """そのスロットの車と同じ階にいる車の印 (MAX_VEHICLES,)。平面の地図ではすべて真。"""
+        if self.layered:
+            own = int(self.current_edge[int(slot)])
+            return np.array([self._same_layer(own, int(e)) for e in self.current_edge], dtype=bool)
+        if not self.elevated:
+            return np.ones(config.MAX_VEHICLES, dtype=bool)
+        return np.abs(self.z - self.z[int(slot)]) < np.float32(LEVEL_GAP_M)
 
     def next_signal(self, slot: int) -> tuple[float, int]:
         """そのスロットの前方にある直近の信号を (停止線までの距離 [m], 灯色) で返す。"""
@@ -752,6 +847,10 @@ class World:
         )
         state.route_progress = 0
         state.route_speed_limit = self._build_speed_profile(state.route, state.route_cum)
+        if self.elevated:
+            state.route_z, state.route_cross, state.route_grade = self.map_index.route_profile(
+                state.route, state.route_cum, plan.legs
+            )
         state.arc_position = 0.0
         state.goal = (float(route[-1, 0]), float(route[-1, 1]))
         self._goal_x[slot] = np.float32(state.goal[0])
@@ -776,6 +875,8 @@ class World:
             self.arc[slot] = np.float32(0.0)
             self.lateral[slot] = np.float32(0.0)
             self.tangent[slot] = np.float32(heading)
+        if self.elevated:
+            self._update_attitude(np.array([slot], dtype=np.int64))
         self.collided_flags[slot] = False
         self.reached_flags[slot] = False
         self.stop_arc[slot] = np.inf
@@ -1044,25 +1145,32 @@ class World:
         return True
 
     def activate_at(
-        self, slot: int, at: tuple[float, float], *, clearance_m: float, heading: float | None = None
+        self, slot: int, at: tuple[float, float], *, clearance_m: float, heading: float | None = None,
+        z: float | None = None,
     ) -> str | None:
-        """スロットを指定地点の道路から起動する。出せなければ理由を返し、別の場所へは出さない。"""
+        """スロットを指定地点の道路から起動する。出せなければ理由を返し、別の場所へは出さない。立体の地図では `z` の路面を選ぶ。"""
         slot = int(slot)
         if not (0 <= slot < config.MAX_VEHICLES):
             return f"車両 ID が範囲外です: {slot}"
-        why = self._place_at(slot, (float(at[0]), float(at[1])), float(clearance_m), heading=heading)
+        why = self._place_at(slot, (float(at[0]), float(at[1])), float(clearance_m), heading=heading, z=z)
         self.fleet.active[slot] = why is None
         return why
 
-    def _place_at(self, slot: int, at: tuple[float, float], clearance_m: float, *, heading: float | None = None) -> str | None:
-        lead = self._road_lead(at[0], at[1], heading, 0.0)
+    def _place_at(
+        self, slot: int, at: tuple[float, float], clearance_m: float, *, heading: float | None = None, z: float | None = None,
+    ) -> str | None:
+        lead = self._road_lead(at[0], at[1], heading, 0.0, z)
         if lead is None or not lead.polylines or not lead.polylines[0]:
             return "指定地点の近くに道路が見つかりませんでした"
         sx, sy = lead.polylines[0][0]
         if math.hypot(sx - at[0], sy - at[1]) > SPAWN_AT_MAX_OFFSET_M:
             return f"指定地点から {SPAWN_AT_MAX_OFFSET_M:.0f}m 以内に道路がありません"
         # 経路を作る前に空きを見る（金沢では経路 1 本に数十 ms かかる）
-        if self._point_clearance(sx, sy, slot) < clearance_m * clearance_m:
+        level = None
+        if self.elevated and lead.edge_ids:
+            surface = getattr(self.map_index, "edge_surface_z", None)
+            level = float(surface(int(lead.edge_ids[0]), sx, sy)) if surface is not None else None
+        if self._point_clearance(sx, sy, slot, level) < clearance_m * clearance_m:
             return f"指定地点の {clearance_m:.0f}m 以内に別の車両がいます"
         route = self._route_onward_from(sx, sy, lead)
         if route is None or not self._install_route(slot, route):
@@ -1103,23 +1211,34 @@ class World:
                 [(o.x, o.y) for o in self.obstacles], dtype=np.float32
             )
             self._obstacle_r = np.array([o.radius for o in self.obstacles], dtype=np.float32)
+            self._obstacle_z = np.array([o.z for o in self.obstacles], dtype=np.float32)
         else:
             self._obstacle_xy = np.zeros((0, 2), dtype=np.float32)
             self._obstacle_r = np.zeros(0, dtype=np.float32)
+            self._obstacle_z = np.zeros(0, dtype=np.float32)
 
     @property
     def obstacle_xy(self) -> np.ndarray:
         """障害物座標のキャッシュ (M, 2) float32。"""
         return self._obstacle_xy
 
-    def add_obstacle(self, x: float, y: float, radius: float) -> int | None:
-        """障害物を追加して ID を返す。上限に達していれば None。"""
+    @property
+    def obstacle_z(self) -> np.ndarray:
+        """`obstacle_xy` と同じ並びの、置かれた路面の高さ (M,) float32。"""
+        return self._obstacle_z
+
+    def add_obstacle(self, x: float, y: float, radius: float, z: float | None = None) -> int | None:
+        """障害物を追加して ID を返す。上限に達していれば None。立体の地図では `z`（省略時は地面に近い路面）に置く。"""
         if len(self.obstacles) >= config.MAX_OBSTACLES:
             return None
         radius = float(np.clip(float(radius), 0.1, 5.0))
         obstacle_id = self._next_obstacle_id
         self._next_obstacle_id += 1
-        self.obstacles.append(ObstacleState(obstacle_id, float(x), float(y), radius))
+        height = 0.0
+        if self.elevated:
+            surface = getattr(self.map_index, "surface_z", None)
+            height = float(surface(float(x), float(y), z)) if surface is not None else 0.0
+        self.obstacles.append(ObstacleState(obstacle_id, float(x), float(y), radius, height))
         self._refresh_obstacle_cache()
         return obstacle_id
 
@@ -1189,7 +1308,54 @@ class World:
             self.lateral[slot] = np.float32(lateral)
             self.tangent[slot] = np.float32(tangent)
         self.arc_delta[:] = delta
+        if self.elevated:
+            self._update_attitude(np.flatnonzero(self.fleet.active))
+        if self.layered:
+            self._update_current_edges()
         return delta
+
+    def _update_current_edges(self) -> None:
+        """layer の分かる地図で、各車がいま走っている辺を経路の辺の列から引く。"""
+        self.current_edge[:] = -1
+        for slot in np.flatnonzero(self.fleet.active):
+            arc = float(self.arc[slot])
+            for leg in self.slots[int(slot)].route_legs:
+                if float(leg.start_arc) - 0.5 <= arc <= float(leg.end_arc) + 0.5:
+                    self.current_edge[slot] = int(leg.edge_id)
+                    break
+
+    def _same_layer(self, edge_a: int, edge_b: int) -> bool:
+        """layer で見て同じ路面か。どちらか不明・同じ layer・端点を共有する（取り付け部）なら同じとみなす。"""
+        if edge_a < 0 or edge_b < 0 or edge_a == edge_b:
+            return True
+        if self._edge_layer.get(edge_a, 0) == self._edge_layer.get(edge_b, 0):
+            return True
+        return bool(set(self._edge_ends.get(edge_a, ())) & set(self._edge_ends.get(edge_b, ())))
+
+    def _update_attitude(self, slots: np.ndarray) -> None:
+        """経路の路面の高さ・勾配から、車体の高さ・路面勾配・姿勢を作り、物理へ勾配を渡す（路面への拘束）。"""
+        for slot in slots:
+            slot = int(slot)
+            state = self.slots[slot]
+            if state.route_z.size != state.route.shape[0] or state.route.shape[0] < 2:
+                continue
+            arc = float(self.arc[slot])
+            cum = state.route_cum
+            center = float(np.interp(arc, cum, state.route_z))
+            cross = float(np.interp(arc, cum, state.route_cross))
+            grade = float(np.interp(arc, cum, state.route_grade))
+            # 経路は車線の中心なので、横ずれの分だけ横断勾配で上下する
+            self.z[slot] = np.float32(center + float(self.lateral[slot]) * cross)
+            # 経路の接線の座標で表した路面の勾配を、車体の前と左へ回す
+            delta = float(self.fleet.heading[slot]) - float(self.tangent[slot])
+            c, s = math.cos(delta), math.sin(delta)
+            slope_x = grade * c + cross * s
+            slope_y = -grade * s + cross * c
+            self.fleet.slope_x[slot] = np.float32(slope_x)
+            self.fleet.slope_y[slot] = np.float32(slope_y)
+            pitch, roll = attitude_from_slopes(slope_x, slope_y)
+            self.pitch[slot] = np.float32(pitch)
+            self.roll[slot] = np.float32(roll)
 
     def lookahead_points(self, offsets: np.ndarray) -> np.ndarray:
         """各スロットの現在弧長位置から offsets [m] 先の経路点。shape (N, P, 2)。"""
@@ -1269,7 +1435,10 @@ class World:
         if idx.size == 0:
             return hit
 
-        hit |= self.map_index.collides_with_buildings(self.fleet.corners(), active)
+        if self.elevated:
+            hit |= self.map_index.collides_with_buildings(self.fleet.corners(), active, z=self.z)
+        else:
+            hit |= self.map_index.collides_with_buildings(self.fleet.corners(), active)
 
         if idx.size >= 2:
             px = self.fleet.x[idx].astype(np.float64)
@@ -1287,6 +1456,17 @@ class World:
                 VEHICLE_HIT_SEMI_LAT_M,
             )
             close = np.triu(inside | inside.T, k=1)
+            if self.elevated and close.any():
+                # 立体交差の上と下は平面で重なっても当たらない。車体の高さの範囲が重なる組だけ
+                zz = self.z[idx].astype(np.float64)
+                close &= vertical_overlap(
+                    zz[:, None], zz[:, None] + config.VEHICLE_HEIGHT,
+                    zz[None, :], zz[None, :] + config.VEHICLE_HEIGHT,
+                )
+            if self.layered and close.any():
+                # 高さは不明でも、layer の違う、端点を共有しない辺どうしは立体交差の上と下
+                for a, b in zip(*np.nonzero(close)):
+                    close[a, b] = self._same_layer(int(self.current_edge[idx[a]]), int(self.current_edge[idx[b]]))
             if close.any():
                 rows, cols = np.nonzero(close)
                 hit[idx[rows]] = True
@@ -1298,14 +1478,19 @@ class World:
             cos_h = np.cos(self.fleet.heading[idx].astype(np.float64))[:, None]
             sin_h = np.sin(self.fleet.heading[idx].astype(np.float64))[:, None]
             radius = self._obstacle_r[None, :].astype(np.float64)
-            hit[idx] |= _in_body_ellipse(
+            touch = _in_body_ellipse(
                 self._obstacle_xy[None, :, 0] - px,
                 self._obstacle_xy[None, :, 1] - py,
                 cos_h,
                 sin_h,
                 np.float64(config.VEHICLE_LENGTH * 0.5) + radius,
                 np.float64(config.VEHICLE_WIDTH * 0.5) + radius,
-            ).any(axis=1)
+            )
+            if self.elevated:
+                vz = self.z[idx].astype(np.float64)[:, None]
+                oz = self._obstacle_z[None, :].astype(np.float64)
+                touch &= vertical_overlap(vz, vz + config.VEHICLE_HEIGHT, oz, oz + config.OBSTACLE_HEIGHT)
+            hit[idx] |= touch.any(axis=1)
 
         people = self.pedestrian_xy
         if people.shape[0] > 0:
@@ -1314,14 +1499,22 @@ class World:
             cos_h = np.cos(self.fleet.heading[idx].astype(np.float64))[:, None]
             sin_h = np.sin(self.fleet.heading[idx].astype(np.float64))[:, None]
             radius = np.float64(config.PEDESTRIAN_RADIUS)
-            struck = _in_body_ellipse(
+            touch = _in_body_ellipse(
                 people[None, :, 0] - px,
                 people[None, :, 1] - py,
                 cos_h,
                 sin_h,
                 np.float64(config.VEHICLE_LENGTH * 0.5) + radius,
                 np.float64(config.VEHICLE_WIDTH * 0.5) + radius,
-            ).any(axis=1)
+            )
+            if self.elevated:
+                vz = self.z[idx].astype(np.float64)[:, None]
+                pz = self.pedestrian_z[None, :].astype(np.float64)
+                touch &= vertical_overlap(vz, vz + config.VEHICLE_HEIGHT, pz, pz + config.PEDESTRIAN_HEIGHT)
+            elif self.layered and touch.any():
+                for row in np.flatnonzero(touch.any(axis=1)):
+                    touch[row] &= self._people_same_layer(int(self.current_edge[idx[row]]), people.shape[0])
+            struck = touch.any(axis=1)
             self.pedestrian_hits[idx] = struck
             hit[idx] |= struck
 
@@ -1337,8 +1530,11 @@ class World:
             state = self.slots[slot]
             emit_route = include_routes or state.route_dirty
             route: list[tuple[float, float]] | None = None
+            route_z: list[float] | None = None
             if emit_route and state.route.shape[0] >= 2:
                 route = [(float(px), float(py)) for px, py in state.route]
+                if self.elevated and state.route_z.size == state.route.shape[0]:
+                    route_z = [float(pz) for pz in state.route_z]
             if emit_route:
                 routed.append(slot)
             vehicles.append(
@@ -1365,10 +1561,17 @@ class World:
                     turn_signal=int(self.turn_signal[slot]),
                     reverse=bool(self.fleet.gear[slot] < 0),
                     route=route,
+                    z=float(self.z[slot]) if self.elevated else None,
+                    pitch=float(self.pitch[slot]) if self.elevated else 0.0,
+                    roll=float(self.roll[slot]) if self.elevated else 0.0,
+                    route_z=route_z,
                 )
             )
         obstacles = [
-            ObstacleSnapshot(id=o.id, x=o.x, y=o.y, radius=o.radius) for o in self.obstacles
+            ObstacleSnapshot(
+                id=o.id, x=o.x, y=o.y, radius=o.radius, z=o.z if self.elevated else None
+            )
+            for o in self.obstacles
         ]
         return FrameSnapshot(
             tick=int(tick),

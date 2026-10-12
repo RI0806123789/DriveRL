@@ -20,8 +20,9 @@ _VERSION_HEAD = re.compile(r'^\{"version":(\d+),')
 
 VERIFY_DIR = BACKEND_DIR / "verify"
 SCRIPTS = sorted(p.name for p in VERIFY_DIR.glob("verify_*.py"))
-ALL_PRESETS = tuple(p.id for p in list_presets())
-SMALL_PRESETS = tuple(p.id for p in list_presets() if p.radius_m <= LARGE_MAP_RADIUS_M)
+# 合成の地図（通信せずに作る検証コース）は実地図の検証に混ぜない。専用の verify_elevation.py で回す
+ALL_PRESETS = tuple(p.id for p in list_presets() if not p.synthetic)
+SMALL_PRESETS = tuple(p.id for p in list_presets() if not p.synthetic and p.radius_m <= LARGE_MAP_RADIUS_M)
 
 
 @dataclass(frozen=True)
@@ -68,7 +69,10 @@ def _stale_maps(presets: tuple[str, ...]) -> list[str]:
     """キャッシュが無いか版が古いプリセット（読むと Overpass から取り直しになる）。"""
     stale: list[str] = []
     for preset_id in presets:
-        path = cache_path_for(get_preset(preset_id))
+        preset = get_preset(preset_id)
+        if preset is not None and preset.synthetic:
+            continue
+        path = cache_path_for(preset)
         try:
             with path.open("r", encoding="utf-8") as fp:
                 head = _VERSION_HEAD.match(fp.read(64))

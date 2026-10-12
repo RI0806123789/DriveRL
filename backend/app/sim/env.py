@@ -26,6 +26,8 @@ from app.contracts import (
     TAXI_DRIVE_HURRY,
     TAXI_DRIVE_NORMAL,
 )
+from app.map.elevation import LEVEL_GAP_M
+from app.percep.elevated_view import drop_other_levels
 from app.percep.encoder import encode_observations
 from app.percep.occlusion import RAY_ANGLES, RAY_HALF_WIDTH, CameraInput, evaluate_occlusion
 from app.percep.types import (
@@ -427,6 +429,9 @@ class SimulationEnv:
             & (np.abs(lat) <= AUTOPILOT_LANE_HALF_WIDTH_M)
             & (same_way >= AUTOPILOT_SAME_WAY_COS)
         )
+        if self.world.elevated or self.world.layered:
+            # 立体交差の上（下）の階の車は前走車ではない
+            ahead &= self.world.same_level_vehicles(slot)[idx]
         if not ahead.any():
             return float("inf"), 0.0, -1
         nearest = int(np.flatnonzero(ahead)[np.argmin(lon[ahead])])
@@ -520,6 +525,10 @@ class SimulationEnv:
         people = self.world.pedestrian_xy
         if people.shape[0] == 0:
             return float("inf")
+        if self.world.elevated or self.world.layered:
+            people = people[self.world.same_level_people(slot)]
+            if people.shape[0] == 0:
+                return float("inf")
         fleet = self.world.fleet
         heading = float(fleet.heading[slot])
         cos_h = math.cos(heading)
@@ -599,6 +608,7 @@ class SimulationEnv:
             float(world.fleet.y[slot]),
             float(world.fleet.heading[slot]),
             float(world.fleet.speed[slot]),
+            z=float(world.z[slot]),
         )
         if route is None or not world.install_route(slot, route, keep_pose=True):
             world.respawn(slot)
@@ -1068,6 +1078,8 @@ class SimulationEnv:
             & (np.abs(lat) >= JAYWALK_LATERAL_M[0])
             & (np.abs(lat) <= JAYWALK_LATERAL_M[1])
         )
+        if self.world.elevated:
+            near &= np.abs(crowd.z[idx] - float(self.world.z[slot])) < LEVEL_GAP_M
         if not near.any():
             return -1
         pick = idx[near]
@@ -1150,6 +1162,18 @@ class SimulationEnv:
             raise ValueError(f"{key} が有限な数値ではありません: {raw!r}")
         return value
 
+    @staticmethod
+    def _optional_z(payload: dict[str, Any]) -> float | None:
+        """画面でクリックした路面の高さ（立体の地図で、重なった道路のどちらかを選ぶ）。無い・有限でなければ None。"""
+        raw = payload.get("z")
+        if raw is None or isinstance(raw, bool):
+            return None
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return None
+        return value if math.isfinite(value) else None
+
     def apply_event(self, event: InterventionEvent) -> str | None:
         """ユーザー介入を適用する。失敗理由の文字列、成功なら None を返す。"""
         kind = str(event.kind)
@@ -1164,7 +1188,7 @@ class SimulationEnv:
                 at = (self._finite(payload, "x"), self._finite(payload, "y"))
                 # 利用者が選んだ地点は、再スポーンと同じ空きを求める（真後ろの車が追突する）
                 why = self.world.activate_at(
-                    slot, at, clearance_m=math.sqrt(SPAWN_CLEARANCE_M2)
+                    slot, at, clearance_m=math.sqrt(SPAWN_CLEARANCE_M2), z=self._optional_z(payload)
                 )
                 if why is not None:
                     return why
@@ -1185,7 +1209,7 @@ class SimulationEnv:
             elif kind == "add_obstacle":
                 radius = self._finite(payload, "radius", config.OBSTACLE_RADIUS)
                 obstacle_id = self.world.add_obstacle(
-                    self._finite(payload, "x"), self._finite(payload, "y"), radius
+                    self._finite(payload, "x"), self._finite(payload, "y"), radius, z=self._optional_z(payload)
                 )
                 if obstacle_id is None:
                     return f"障害物の数が上限に達しています（最大 {config.MAX_OBSTACLES} 個）"
@@ -1436,6 +1460,11 @@ class SimulationEnv:
             perceptions = {slot: self._perception_transform(result, spec) for slot, result in perceptions.items()}
             cameras = {cam.key: cam for cam in SURROUND_CAMERAS}
             fresh = {slot: {key: self._perception_transform(result, cameras[key]) for key, result in views.items()} for slot, views in fresh.items()}
+        if self.world.elevated:
+            # 上下の階の車・人は、検出枠の下端と推定距離（カメラの画だけ）から見分けて外す
+            perceptions = {slot: drop_other_levels(result, spec) for slot, result in perceptions.items()}
+            cameras = {cam.key: cam for cam in SURROUND_CAMERAS}
+            fresh = {slot: {key: drop_other_levels(result, cameras[key]) for key, result in views.items()} for slot, views in fresh.items()}
 
         self.latest_perception = perceptions
         self._latest_freespace = freespace
@@ -1696,6 +1725,8 @@ class SimulationEnv:
                 return {}, {}
         if self._perception_transform is not None:
             fronts = {s: self._perception_transform(result, spec) for s, result in fronts.items()}
+        if self.world.elevated:
+            fronts = {s: drop_other_levels(result, spec) for s, result in fronts.items()}
         return fronts, frees
 
     def _encode_terminal_observations(self, slots: list[int]) -> np.ndarray:

@@ -149,9 +149,11 @@ class IntersectionSupervisor:
         fleet = world.fleet
         x, y = float(fleet.x[slot]), float(fleet.y[slot])
         actors: list[_Actor] = []
+        level = world.same_level_vehicles(slot)
+        people_level = world.same_level_people(slot)
         for other in np.flatnonzero(fleet.active):
             ox, oy = float(fleet.x[other]), float(fleet.y[other])
-            if int(other) == slot or math.hypot(ox - x, oy - y) > 75.0:
+            if int(other) == slot or not level[other] or math.hypot(ox - x, oy - y) > 75.0:
                 continue
             speed, heading = float(fleet.speed[other]), float(fleet.heading[other])
             intent = None
@@ -164,7 +166,7 @@ class IntersectionSupervisor:
                         intent = (incoming.exit_node, incoming.entry_node, outgoing.exit_node)
                         break
             actors.append(_Actor(DetClass.VEHICLE, ox, oy, now, speed * math.cos(heading), speed * math.sin(heading), True, intent))
-        actors.extend(_Actor(DetClass.PEDESTRIAN, float(px), float(py), now, measured=True) for px, py in world.pedestrian_xy if math.hypot(float(px) - x, float(py) - y) <= 50.0)
+        actors.extend(_Actor(DetClass.PEDESTRIAN, float(px), float(py), now, measured=True) for (px, py), same in zip(world.pedestrian_xy, people_level) if same and math.hypot(float(px) - x, float(py) - y) <= 50.0)
         return actors
 
     def _background_stop(self, world: World, slot: int, passage: RouteIntersection) -> bool:

@@ -153,6 +153,7 @@ class TaxiService:
             dropoff,
             heading=float(world.fleet.heading[slot]),
             speed=float(world.fleet.speed[slot]),
+            src_z=float(world.z[slot]),
         )
         if route is None or not world.install_route(slot, route, keep_pose=True):
             self.cancel(env, "降車地点までの経路を作れませんでした")
@@ -398,6 +399,7 @@ class TaxiService:
                 pickup,
                 heading=float(fleet.heading[slot]),
                 speed=float(fleet.speed[slot]),
+                src_z=float(world.z[slot]),
             )
             if route is not None and route.points.shape[0] >= 2:
                 return slot, route

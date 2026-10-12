@@ -13,6 +13,7 @@ __all__ = [
     "CameraPose",
     "NeighborIndex",
     "camera_pose",
+    "camera_pose_3d",
     "eye_position",
     "project_components",
     "project_points",
@@ -77,6 +78,8 @@ class CameraPose:
     sin_yaw: float
     cos_pitch: float
     sin_pitch: float
+    #: 視線の軸まわりの回転（左が上がるのが正）。平面の地図では 0 で、画を回さない
+    roll: float = 0.0
 
     @property
     def yaw(self) -> float:
@@ -111,6 +114,47 @@ def camera_pose(x: float, y: float, heading: float, spec: CameraSpec) -> CameraP
         cos_pitch=float(math.cos(pitch)),
         sin_pitch=float(math.sin(pitch)),
     )
+
+
+def camera_pose_3d(x: float, y: float, z: float, heading: float, pitch: float, roll: float, spec: CameraSpec) -> CameraPose:
+    """立体の地図で、車体の位置・方位・路面の姿勢からカメラの姿勢を作る（擬似カメラの描画の `camera_batch` と同じ式）。"""
+    body = _matmul(_matmul(_rz(heading), _ry_neg(pitch)), _rx(roll))
+    offset = (spec.forward, -spec.right, spec.eye_height)
+    eye = [x, y, z]
+    for i in range(3):
+        eye[i] += body[i][0] * offset[0] + body[i][1] * offset[1] + body[i][2] * offset[2]
+    cam = _matmul(body, _matmul(_rz(spec.yaw), _ry_neg(spec.pitch)))
+    yaw = math.atan2(cam[1][0], cam[0][0])
+    cam_pitch = math.asin(max(-1.0, min(1.0, cam[2][0])))
+    return CameraPose(
+        eye_x=float(eye[0]),
+        eye_y=float(eye[1]),
+        eye_z=float(eye[2]),
+        cos_yaw=math.cos(yaw),
+        sin_yaw=math.sin(yaw),
+        cos_pitch=math.cos(cam_pitch),
+        sin_pitch=math.sin(cam_pitch),
+        roll=float(math.atan2(cam[2][1], cam[2][2])),
+    )
+
+
+def _rz(a: float):
+    c, s = math.cos(a), math.sin(a)
+    return ((c, -s, 0.0), (s, c, 0.0), (0.0, 0.0, 1.0))
+
+
+def _ry_neg(a: float):
+    c, s = math.cos(a), math.sin(a)
+    return ((c, 0.0, -s), (0.0, 1.0, 0.0), (s, 0.0, c))
+
+
+def _rx(a: float):
+    c, s = math.cos(a), math.sin(a)
+    return ((1.0, 0.0, 0.0), (0.0, c, -s), (0.0, s, c))
+
+
+def _matmul(a, b):
+    return tuple(tuple(sum(a[i][k] * b[k][j] for k in range(3)) for j in range(3)) for i in range(3))
 
 
 def project_components(
@@ -148,9 +192,9 @@ def project_components(
 def project_points(
     pose: CameraPose, spec: CameraSpec, points: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """ワールド座標 (N, 3) をカメラ画像へ透視投影する。"""
+    """ワールド座標 (N, 3) をカメラ画像へ透視投影する。ロールがあれば主点まわりに回した画の座標を返す。"""
     pts = np.asarray(points, dtype=np.float64).reshape(-1, 3)
-    return project_components(
+    u, v, depth = project_components(
         pts[:, 0],
         pts[:, 1],
         pts[:, 2],
@@ -165,3 +209,10 @@ def project_points(
         spec.width * 0.5,
         spec.height * 0.5,
     )
+    if pose.roll != 0.0:
+        c, s = math.cos(pose.roll), math.sin(pose.roll)
+        du = u - spec.width * 0.5
+        dv = v - spec.height * 0.5
+        u = spec.width * 0.5 + c * du + s * dv
+        v = spec.height * 0.5 - s * du + c * dv
+    return u, v, depth

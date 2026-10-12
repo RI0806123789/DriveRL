@@ -163,6 +163,8 @@ def scatter_obstacles(
         x = float(env.world.fleet.x[slot])
         y = float(env.world.fleet.y[slot])
         heading = float(env.world.fleet.heading[slot])
+        # 立体の地図では、その車のいる路面（橋の上・坑内）に置く
+        level = float(env.world.z[slot]) if env.world.elevated else None
         for _ in range(per_vehicle):
             ahead = float(rng.uniform(6.0, reach))
             side = float(rng.uniform(-3.5, 3.5))
@@ -170,6 +172,7 @@ def scatter_obstacles(
                 x + np.cos(heading) * ahead - np.sin(heading) * side,
                 y + np.sin(heading) * ahead + np.cos(heading) * side,
                 float(config.OBSTACLE_RADIUS),
+                z=level,
             )
         # 後方・左右カメラの教師（後退 AEB はこれで後ろのパイロンに気づく）
         bearing = heading + float(rng.uniform(math.pi * 0.35, math.pi * 1.65))
@@ -178,6 +181,7 @@ def scatter_obstacles(
             x + math.cos(bearing) * away,
             y + math.sin(bearing) * away,
             float(config.OBSTACLE_RADIUS),
+            z=level,
         )
 
 

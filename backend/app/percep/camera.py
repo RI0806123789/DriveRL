@@ -10,6 +10,17 @@ import numpy as np
 
 from app import config
 from app.contracts import MapIndex
+from app.map.elevation import structure_level
+from app.percep.elevated_view import (
+    HIT_ROAD,
+    HIT_STRUCTURE,
+    HIT_TERRAIN,
+    SHAPE_DEPTH_TOLERANCE_M,
+    camera_batch,
+    render_ground,
+    roll_image,
+    vehicle_box_corners,
+)
 from app.percep.geometry import NeighborIndex, eye_position, project_components, view_heading
 from app.percep.types import (
     DEFAULT_CAMERA,
@@ -59,6 +70,8 @@ LBL_POLE = 16
 LBL_PEDESTRIAN = 17
 LBL_PEDESTRIAN_HEAD = 18
 LBL_SIGN_BLUE = 19
+#: 立体の地図の構造物（橋桁の下面・トンネルの天井と壁・坑口・擁壁）
+LBL_STRUCTURE = 20
 
 LABELS = {
     "ground": LBL_GROUND,
@@ -81,6 +94,7 @@ LABELS = {
     "pedestrian": LBL_PEDESTRIAN,
     "pedestrian_head": LBL_PEDESTRIAN_HEAD,
     "sign_blue": LBL_SIGN_BLUE,
+    "structure": LBL_STRUCTURE,
 }
 
 PALETTE = np.array(
@@ -105,6 +119,7 @@ PALETTE = np.array(
         (58, 104, 176),
         (216, 176, 140),
         (32, 80, 188),
+        (164, 160, 150),
     ],
     dtype=np.uint8,
 )
@@ -220,11 +235,14 @@ class PseudoCamera:
         self._far = float(spec.far)
 
         self._default_spec = spec
+        #: 直前に描いたラベル画 (台数, H, W)。描画と正解ラベルの突き合わせ（検証）に使う
+        self.last_labels: np.ndarray | None = None
         self._set_optics(spec)
         self._optics = {spec: self._optics_snapshot()}
         self._build_road_raster()
         self._prepare_signals()
         self._prepare_signs()
+        self._prepare_elevation()
 
     def _set_optics(self, spec: CameraSpec) -> None:
         self.spec = spec
@@ -460,12 +478,14 @@ class PseudoCamera:
         hw: list[float] = []
         ow: list[bool] = []
         arc: list[float] = []
+        lvl: list[int] = []
         for edge in self.map_index.data.edges:
             poly = edge.polyline
             if len(poly) < 2:
                 continue
             half = float(edge.width) * 0.5
             one = bool(edge.oneway)
+            level = structure_level(getattr(edge, "structure", "ground"))
             run = 0.0
             for i in range(len(poly) - 1):
                 x0, y0 = float(poly[i][0]), float(poly[i][1])
@@ -480,7 +500,9 @@ class PseudoCamera:
                 hw.append(half)
                 ow.append(one)
                 arc.append(run)
+                lvl.append(level)
                 run += length
+        self._segment_level = np.asarray(lvl, dtype=np.int8)
         if not ax:
             return None
 
@@ -641,6 +663,7 @@ class PseudoCamera:
         self._sig_heading = heading
         self._sig_stop_x = np.array([s.x for s in signals], dtype=np.float64)
         self._sig_stop_y = np.array([s.y for s in signals], dtype=np.float64)
+        self._sig_z = np.array([float(getattr(s, "z", 0.0)) for s in signals], dtype=np.float64)
         self._sig_grid = NeighborIndex(self._sig_x, self._sig_y, self._far)
 
     def _prepare_signs(self) -> None:
@@ -655,6 +678,7 @@ class PseudoCamera:
         heading = np.array([s.heading for s in signs], dtype=np.float64)
         self._sign_x = np.array([s.x for s in signs], dtype=np.float64)
         self._sign_y = np.array([s.y for s in signs], dtype=np.float64)
+        self._sign_z = np.array([float(getattr(s, "z", 0.0)) for s in signs], dtype=np.float64)
         cos_h = np.cos(heading)
         sin_h = np.sin(heading)
         self._sign_ax = -sin_h
@@ -691,6 +715,8 @@ class PseudoCamera:
             return np.zeros((0, h, w, 3), dtype=np.uint8)
         # 省略時は直前に描いた視点ではなく、構築時の視点に戻す
         self._use(self._default_spec if spec is None else spec)
+        if self._grids is not None:
+            return self._render_elevated(world, slots, weather, frame_index)
 
         fleet = world.fleet
         body = fleet.heading[slots].astype(np.float64)
@@ -730,9 +756,169 @@ class PseudoCamera:
             if part is not None:
                 specs.append(part)
         self._draw_shapes(label, depth, specs)
+        self.last_labels = label
 
         return apply_weather(
             PALETTE[label], depth, weather, far=self._far, frame_index=frame_index
+        )
+
+    def _prepare_elevation(self) -> None:
+        """立体の地図でだけ、固体判定グリッドと路面の階ごとのラスタ（地上・橋桁・坑内）を用意する。"""
+        self._grids = None
+        self._level_rasters: np.ndarray | None = None
+        self._view_ez: np.ndarray | None = None
+        self._view_cp: np.ndarray | None = None
+        self._view_sp: np.ndarray | None = None
+        if not bool(getattr(self.map_index, "elevated", False)):
+            return
+        grids_of = getattr(self.map_index, "solid_grids", None)
+        self._grids = grids_of() if grids_of is not None else None
+        if self._grids is None or self._segments is None or self._lazy:
+            return
+        t = _TILE_CELLS
+        rasters = np.zeros((3, self._tiles_y * t, self._tiles_x * t), dtype=np.uint8)
+        for level in range(3):
+            segs = np.flatnonzero(self._segment_level == level)
+            if segs.size:
+                self._paint(rasters[level], (0, 0), segs)
+        self._level_rasters = rasters
+
+    def _road_labels(self, level: np.ndarray, x: np.ndarray, y: np.ndarray) -> np.ndarray:
+        """路面の階ごとのラスタで、当たった点の路面・標示・地面を引く。"""
+        ci = ((x - self._rox) * self._rinv).astype(np.int64)
+        ri = ((y - self._roy) * self._rinv).astype(np.int64)
+        if self._level_rasters is None:
+            np.clip(ci, 0, self._rw - 1, out=ci)
+            np.clip(ri, 0, self._rh - 1, out=ri)
+            slot = (ri >> _TILE_SHIFT) * self._tiles_x + (ci >> _TILE_SHIFT)
+            if self._lazy:
+                self._ensure_tiles(np.unique(slot))
+                slot = np.maximum(self._tile_slot[slot], 0)
+            flat = (slot << (2 * _TILE_SHIFT)) + ((ri & _TILE_MASK) << _TILE_SHIFT) + (ci & _TILE_MASK)
+            return self._pool_flat[flat]
+        rasters = self._level_rasters
+        np.clip(ci, 0, rasters.shape[2] - 1, out=ci)
+        np.clip(ri, 0, rasters.shape[1] - 1, out=ri)
+        return rasters[level.astype(np.int64), ri, ci]
+
+    def _render_elevated(self, world: "World", slots: np.ndarray, weather: Weather, frame_index: int) -> np.ndarray:
+        """立体の地図の描画。カメラは路面の姿勢に追従し、地形・橋桁・トンネルで見えない所は描かない。"""
+        n = int(slots.size)
+        h, w = self._h, self._w
+        fleet = world.fleet
+        batch = camera_batch(
+            fleet.x[slots].astype(np.float64),
+            fleet.y[slots].astype(np.float64),
+            world.z[slots].astype(np.float64),
+            fleet.heading[slots].astype(np.float64),
+            world.pitch[slots].astype(np.float64),
+            world.roll[slots].astype(np.float64),
+            self.spec,
+        )
+        view = render_ground(self._grids, batch, self.spec)
+        label = np.where(view.looking_down, LBL_GROUND, LBL_SKY).astype(np.uint8)
+        road = view.kind == HIT_ROAD
+        if road.any():
+            label[road] = self._road_labels(view.level[road], view.hit_x[road], view.hit_y[road])
+        label[view.kind == HIT_STRUCTURE] = LBL_STRUCTURE
+        label[view.kind == HIT_TERRAIN] = LBL_GROUND
+        ground_depth = view.depth
+        depth: np.ndarray | None = None
+        if weather.needs_depth:
+            depth = np.where(np.isfinite(ground_depth), ground_depth, np.float32(self._far)).astype(np.float32)
+
+        heading = batch.yaw
+        cos_h = np.cos(heading)
+        sin_h = np.sin(heading)
+        self._view_ez = batch.eye_z
+        self._view_cp = np.cos(batch.pitch)
+        self._view_sp = np.sin(batch.pitch)
+        try:
+            specs = []
+            walls = self._collect_buildings_elevated(batch.eye_x, batch.eye_y, cos_h, sin_h)
+            if walls is not None:
+                specs.append(walls)
+            for part in (
+                self._collect_vehicles(world, slots, batch.eye_x, batch.eye_y, cos_h, sin_h),
+                self._collect_obstacles(world, batch.eye_x, batch.eye_y, cos_h, sin_h),
+                self._collect_pedestrians(world, batch.eye_x, batch.eye_y, cos_h, sin_h),
+                self._collect_signals(world, batch.eye_x, batch.eye_y, cos_h, sin_h, heading),
+                self._collect_signs(batch.eye_x, batch.eye_y, cos_h, sin_h, heading),
+            ):
+                if part is not None:
+                    specs.append(part)
+            self._draw_shapes(label, depth, specs, ground=ground_depth)
+        finally:
+            self._view_ez = self._view_cp = self._view_sp = None
+
+        shade = view.shade
+        rolled = [label, shade] + ([depth] if depth is not None else [])
+        roll_image(rolled, batch.roll, self._cx, self._cy)
+        self.last_labels = label
+        rgb = PALETTE[label]
+        if shade.any():
+            rgb[shade] = (rgb[shade].astype(np.float32) * np.float32(config.TUNNEL_LIGHT_FACTOR)).astype(np.uint8)
+        return apply_weather(rgb, depth, weather, far=self._far, frame_index=frame_index)
+
+    def _view_optics(self, sel):
+        """投影に使う (目の高さ, cos 俯角, sin 俯角)。立体の地図ではカメラごとの値を `sel` で並べ替える。"""
+        if self._view_ez is None or sel is None:
+            return self._eye_h, self._cp, self._sp
+        return self._view_ez[sel], self._view_cp[sel], self._view_sp[sel]
+
+    def _collect_buildings_elevated(self, eye_x, eye_y, cos_h, sin_h):
+        """立体の地図の建物。列ごとに建物を探し、足元の地面からの高さで壁を投影する（俯角はカメラごと）。"""
+        occ = self.map_index.occupancy
+        grid = occ.building
+        if grid.size == 0 or self._grids is None:
+            return None
+        n = eye_x.size
+        cp = self._view_cp[:, None]
+        sp = self._view_sp[:, None]
+        centers = self._col_centers.astype(np.float64)
+        a = ((centers - self._cx) / self._focal)[None, :]
+        length = np.sqrt(cp * cp + a * a)
+        col_a = a / length
+        col_f = cp / length
+        wx = col_f * cos_h[:, None] + col_a * sin_h[:, None]
+        wy = col_f * sin_h[:, None] - col_a * cos_h[:, None]
+        samples = self._ray_samples
+        xs = eye_x[:, None, None] + wx[:, :, None] * samples[None, None, :]
+        ys = eye_y[:, None, None] + wy[:, :, None] * samples[None, None, :]
+        hits = occ.sample_building(xs, ys)
+        any_hit = hits.any(axis=2)
+        if not any_hit.any():
+            return None
+        first = hits.argmax(axis=2)
+        dist = samples[first]
+        fwd = dist * col_f
+        bx = eye_x[:, None] + wx * dist
+        by = eye_y[:, None] + wy * dist
+        base = self._grids.floor_at(bx, by)
+        ez = self._view_ez[:, None]
+        z_bot = base - ez
+        z_top = base + _BUILDING_HEIGHT - ez
+        zc_bot = cp * fwd + sp * z_bot
+        zc_top = cp * fwd + sp * z_top
+        ok = any_hit & (zc_bot > self._near) & (zc_top > self._near)
+        if not ok.any():
+            return None
+        v_bot = self._cy - self._focal * (-sp * fwd + cp * z_bot) / zc_bot
+        v_top = self._cy - self._focal * (-sp * fwd + cp * z_top) / zc_top
+        cam = np.repeat(np.arange(n, dtype=np.int32), centers.size).reshape(n, -1)[ok]
+        cxf = np.broadcast_to(self._col_centers[None, :], ok.shape)[ok]
+        vb = v_bot[ok]
+        vt = v_top[ok]
+        return (
+            cam,
+            cxf.astype(np.float32),
+            ((vt + vb) * 0.5).astype(np.float32),
+            np.full(cam.size, self._column_step * 0.5, dtype=np.float32),
+            ((vb - vt) * 0.5).astype(np.float32),
+            np.zeros(cam.size, dtype=bool),
+            np.full(cam.size, LBL_BUILDING, dtype=np.uint8),
+            zc_bot[ok].astype(np.float32),
+            np.zeros(cam.size, dtype=np.int16),
         )
 
     def _draw_ground(
@@ -858,13 +1044,15 @@ class PseudoCamera:
         eye_y: np.ndarray,
         cos_h: np.ndarray,
         sin_h: np.ndarray,
+        sel=None,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """世界座標を画像座標へ落とす。戻り値は (u, v, 奥行き Zc)。"""
+        """世界座標を画像座標へ落とす。戻り値は (u, v, 奥行き Zc)。`sel` は立体の地図でカメラごとの値を並べる添字。"""
+        eye_z, cp, sp = self._view_optics(sel)
         return project_components(
             px, py, pz,
-            eye_x, eye_y, self._eye_h,
+            eye_x, eye_y, eye_z,
             cos_h, sin_h,
-            self._cp, self._sp,
+            cp, sp,
             self._focal, self._cx, self._cy,
         )
 
@@ -882,20 +1070,36 @@ class PseudoCamera:
         if active.size == 0:
             return None
         n = eye_x.size
-        corners = world.fleet.corners()[active].astype(np.float64)
         k = active.size
-
-        # 車体の外接直方体の 8 頂点 (n, k, 4 隅, 2 高さ)
-        heights = np.array([0.0, config.VEHICLE_HEIGHT], dtype=np.float64)
-        u, v, zc = self._project(
-            corners[None, :, :, 0, None],
-            corners[None, :, :, 1, None],
-            heights,
-            eye_x[:, None, None, None],
-            eye_y[:, None, None, None],
-            cos_h[:, None, None, None],
-            sin_h[:, None, None, None],
-        )
+        if self._view_ez is not None:
+            # 立体の地図では、路面の姿勢で傾いた車体の 8 頂点 (n, k, 8)
+            box = vehicle_box_corners(
+                world.fleet.x[active], world.fleet.y[active], world.z[active],
+                world.fleet.heading[active], world.pitch[active], world.roll[active],
+            )
+            u, v, zc = self._project(
+                box[None, :, :, 0],
+                box[None, :, :, 1],
+                box[None, :, :, 2],
+                eye_x[:, None, None],
+                eye_y[:, None, None],
+                cos_h[:, None, None],
+                sin_h[:, None, None],
+                sel=(slice(None), None, None),
+            )
+        else:
+            corners = world.fleet.corners()[active].astype(np.float64)
+            # 車体の外接直方体の 8 頂点 (n, k, 4 隅, 2 高さ)
+            heights = np.array([0.0, config.VEHICLE_HEIGHT], dtype=np.float64)
+            u, v, zc = self._project(
+                corners[None, :, :, 0, None],
+                corners[None, :, :, 1, None],
+                heights,
+                eye_x[:, None, None, None],
+                eye_y[:, None, None, None],
+                cos_h[:, None, None, None],
+                sin_h[:, None, None, None],
+            )
 
         flat_zc = zc.reshape(n, k, -1)
         in_front = flat_zc > self._near
@@ -961,23 +1165,28 @@ class PseudoCamera:
 
         ox = np.broadcast_to(xy[None, :, 0].astype(np.float64), (n, xy.shape[0]))
         oy = np.broadcast_to(xy[None, :, 1].astype(np.float64), (n, xy.shape[0]))
+        base = np.zeros_like(ox)
+        if self._view_ez is not None:
+            base = np.broadcast_to(world.obstacle_z[None, :].astype(np.float64), ox.shape)
         u_top, v_top, zc = self._project(
             ox,
             oy,
-            np.full_like(ox, config.OBSTACLE_HEIGHT),
+            base + config.OBSTACLE_HEIGHT,
             eye_x[:, None],
             eye_y[:, None],
             cos_h[:, None],
             sin_h[:, None],
+            sel=(slice(None), None),
         )
         _u_bot, v_bot, _z = self._project(
             ox,
             oy,
-            np.zeros_like(ox),
+            base,
             eye_x[:, None],
             eye_y[:, None],
             cos_h[:, None],
             sin_h[:, None],
+            sel=(slice(None), None),
         )
         visible = (zc > self._near) & (zc < self._far)
         if not visible.any():
@@ -1019,17 +1228,21 @@ class PseudoCamera:
         cos_col = cos_h[:, None]
         sin_col = sin_h[:, None]
 
+        foot_z = np.zeros_like(px)
+        if self._view_ez is not None:
+            foot_z = np.broadcast_to(world.pedestrian_z[None, :].astype(np.float64), px.shape)
         _u, v_foot, zc = self._project(
-            px, py, np.zeros_like(px), eye_col_x, eye_col_y, cos_col, sin_col
+            px, py, foot_z, eye_col_x, eye_col_y, cos_col, sin_col, sel=(slice(None), None)
         )
         u_head, v_head, _z = self._project(
             px,
             py,
-            np.full_like(px, PEDESTRIAN_HEAD_Z),
+            foot_z + PEDESTRIAN_HEAD_Z,
             eye_col_x,
             eye_col_y,
             cos_col,
             sin_col,
+            sel=(slice(None), None),
         )
         visible = (zc > self._near) & (zc < self._far)
         if not visible.any():
@@ -1118,10 +1331,12 @@ class PseudoCamera:
         ax = self._sig_ax[sig]
         ay = self._sig_ay[sig]
         z = np.full(hx.shape, SIGNAL_HEAD_Z)
+        if self._view_ez is not None:
+            z = z + self._sig_z[sig]
 
         half = SIGNAL_HOUSING_W * 0.5
-        u_l, _v_l, zc = self._project(hx + ax * half, hy + ay * half, z, ex, ey, ch, sh)
-        u_r, v_c, zc_r = self._project(hx - ax * half, hy - ay * half, z, ex, ey, ch, sh)
+        u_l, _v_l, zc = self._project(hx + ax * half, hy + ay * half, z, ex, ey, ch, sh, sel=cam)
+        u_r, v_c, zc_r = self._project(hx - ax * half, hy - ay * half, z, ex, ey, ch, sh, sel=cam)
         visible = (zc > self._near) & (zc_r > self._near) & (zc < self._far)
         if not visible.any():
             return None
@@ -1164,7 +1379,7 @@ class PseudoCamera:
         for role in range(3):
             offset = (1 - role) * SIGNAL_LAMP_PITCH
             u_k, v_k, _z = self._project(
-                hx + ax * offset, hy + ay * offset, z, ex, ey, ch, sh
+                hx + ax * offset, hy + ay * offset, z, ex, ey, ch, sh, sel=cam
             )
             lamp_cam.append(cam)
             lamp_cx.append(u_k)
@@ -1234,12 +1449,14 @@ class PseudoCamera:
         ay = self._sign_ay[sgn]
         half_w = self._sign_half[sgn, 0]
         zc_center = np.full(sx.shape, SIGN_BOARD_Z)
+        if self._view_ez is not None:
+            zc_center = zc_center + self._sign_z[sgn]
 
         u_l, v_c, zc = self._project(
-            sx + ax * half_w, sy + ay * half_w, zc_center, ex, ey, ch, sh
+            sx + ax * half_w, sy + ay * half_w, zc_center, ex, ey, ch, sh, sel=cam
         )
         u_r, _v, zc_r = self._project(
-            sx - ax * half_w, sy - ay * half_w, zc_center, ex, ey, ch, sh
+            sx - ax * half_w, sy - ay * half_w, zc_center, ex, ey, ch, sh, sel=cam
         )
         visible = (zc > self._near) & (zc_r > self._near) & (zc < self._far)
         if not visible.any():
@@ -1261,8 +1478,9 @@ class PseudoCamera:
         board_hw = np.maximum(np.abs(u_r - u_l) * 0.5, 0.1)
         board_hh = self._sign_half[sgn, 1] * scale
 
+        ground_z = np.zeros_like(sx) if self._view_ez is None else self._sign_z[sgn]
         _up, v_ground, _z2 = self._project(
-            sx, sy, np.zeros_like(sx), ex, ey, ch, sh
+            sx, sy, ground_z, ex, ey, ch, sh, sel=cam
         )
         v_bottom = v_c + board_hh
         pole_hw = np.maximum(config.SPEED_SIGN_POLE_RADIUS * scale, 0.05)
@@ -1432,9 +1650,9 @@ class PseudoCamera:
         )
 
     def _draw_shapes(
-        self, label: np.ndarray, depth_buf: np.ndarray | None, specs: list
+        self, label: np.ndarray, depth_buf: np.ndarray | None, specs: list, ground: np.ndarray | None = None
     ) -> None:
-        """矩形／楕円のスパンを、奥から手前へ一括で塗る。"""
+        """矩形／楕円のスパンを、奥から手前へ一括で塗る。`ground` があれば、それより奥（坂の頂上・橋桁の陰）の画素は塗らない。"""
         if not specs:
             return
         cam = np.concatenate([s[0] for s in specs]).astype(np.int32)
@@ -1468,7 +1686,7 @@ class PseudoCamera:
         hh = hh[idx]
         ell = ell[idx]
         lbl = lbl[idx]
-        if depth_buf is not None:
+        if depth_buf is not None or ground is not None:
             depth = depth[idx]
         y0 = np.clip(y0[idx], 0, h - 1)
         y1 = np.clip(y1[idx], 0, h - 1)
@@ -1503,6 +1721,15 @@ class PseudoCamera:
         start = cam[obj].astype(np.int64) * (h * w) + rows * w + sx0
         pixels = _ragged_range(start, lens)
         values = np.repeat(lbl[obj], lens)
+        if ground is not None:
+            shape_depth = np.repeat(depth[obj], lens)
+            front = shape_depth < ground.reshape(-1)[pixels] + np.float32(SHAPE_DEPTH_TOLERANCE_M)
+            pixels = pixels[front]
+            values = values[front]
+            label.reshape(-1)[pixels] = values
+            if depth_buf is not None:
+                depth_buf.reshape(-1)[pixels] = shape_depth[front]
+            return
         label.reshape(-1)[pixels] = values
         if depth_buf is not None:
             depth_buf.reshape(-1)[pixels] = np.repeat(depth[obj], lens)

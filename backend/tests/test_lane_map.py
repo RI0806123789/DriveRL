@@ -131,7 +131,7 @@ def test_permission_cache_and_wire_roundtrip(allowed):
     payload = _to_cache_dict(data)
     preset = MapPreset(data.preset_id, data.name, "", 0, 0, data.radius_m)
     restored = _from_cache_dict(payload, preset)
-    assert payload["version"] == CACHE_VERSION == 13
+    assert payload["version"] == CACHE_VERSION == 14
     assert restored.edges[0].lane_change_allowed is allowed
     assert restored.to_wire()["edges"][0]["laneChangeAllowed"] is allowed
 

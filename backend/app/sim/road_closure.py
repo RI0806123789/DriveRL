@@ -29,9 +29,12 @@ class _Search:
     map_index: object
 
 
-def _detour(world: World, start: tuple[float, float], goal: tuple[float, float], heading: float, closed: frozenset[int]) -> Route | None:
-    """閉鎖辺と車体幅での建物重なりを含む候補を検索側で拒否する。"""
-    route = world.route_between(start, goal, heading=heading, speed=0.0)
+def _detour(
+    world: World, start: tuple[float, float], goal: tuple[float, float], heading: float, closed: frozenset[int],
+    start_z: float | None = None, goal_z: float | None = None,
+) -> Route | None:
+    """閉鎖辺と車体幅での建物重なりを含む候補を検索側で拒否する。立体の地図では出発・目的地の階を保つ。"""
+    route = world.route_between(start, goal, heading=heading, speed=0.0, src_z=start_z, dst_z=goal_z)
     if route is None or any(leg.edge_id in closed for leg in route.legs):
         return None
     cum = world._cumulative_length(route.points)
@@ -118,7 +121,10 @@ class RoadClosureSupervisor:
                     start = (float(world.fleet.x[slot]), float(world.fleet.y[slot]))
                     goal = world.slots[slot].goal
                     heading = float(world.fleet.heading[slot])
-                    future = _SEARCH.submit(_detour, world, start, goal, heading, closed)
+                    route_z = world.slots[slot].route_z
+                    start_z = float(world.z[slot]) if world.elevated else None
+                    goal_z = float(route_z[-1]) if world.elevated and route_z.size else None
+                    future = _SEARCH.submit(_detour, world, start, goal, heading, closed, start_z, goal_z)
                     self._pending[slot] = _Search(key[1], generation, future, start, world.map_index)
                     submitted = True
         return tuple(installed)

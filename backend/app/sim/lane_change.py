@@ -10,6 +10,7 @@ import numpy as np
 
 from app import config
 from app.contracts import LaneChangeDecision, LaneCorridor, RouteLeg
+from app.map.elevation import LEVEL_GAP_M
 from app.percep.occlusion import RAY_ANGLES
 from app.percep.types import CAMERA_RIG, DetClass, OcclusionResult, PerceptionResult
 from app.sim.intersection import FRESH_SEC, IntersectionSupervisor, _Actor, _State, _project
@@ -108,13 +109,16 @@ class LaneChangeSupervisor:
         fleet = world.fleet
         x, y = float(fleet.x[slot]), float(fleet.y[slot])
         actors = []
+        level = world.same_level_vehicles(slot)
+        people_level = world.same_level_people(slot)
+        own_z = float(world.z[slot])
         for other in np.flatnonzero(fleet.active):
-            if other == slot or math.hypot(float(fleet.x[other]) - x, float(fleet.y[other]) - y) > 80.0:
+            if other == slot or not level[other] or math.hypot(float(fleet.x[other]) - x, float(fleet.y[other]) - y) > 80.0:
                 continue
             speed, heading = float(fleet.speed[other]), float(fleet.heading[other])
             actors.append(_Actor(DetClass.VEHICLE, float(fleet.x[other]), float(fleet.y[other]), now, speed * math.cos(heading), speed * math.sin(heading), True))
-        actors.extend(_Actor(DetClass.OBSTACLE, o.x, o.y, now, measured=True, radius=o.radius) for o in world.obstacles if math.hypot(o.x - x, o.y - y) <= 80.0)
-        actors.extend(_Actor(DetClass.PEDESTRIAN, float(px), float(py), now, measured=True, radius=config.PEDESTRIAN_RADIUS) for px, py in world.pedestrian_xy if math.hypot(float(px) - x, float(py) - y) <= 60.0)
+        actors.extend(_Actor(DetClass.OBSTACLE, o.x, o.y, now, measured=True, radius=o.radius) for o in world.obstacles if math.hypot(o.x - x, o.y - y) <= 80.0 and (not world.elevated or abs(o.z - own_z) < LEVEL_GAP_M))
+        actors.extend(_Actor(DetClass.PEDESTRIAN, float(px), float(py), now, measured=True, radius=config.PEDESTRIAN_RADIUS) for (px, py), same in zip(world.pedestrian_xy, people_level) if same and math.hypot(float(px) - x, float(py) - y) <= 60.0)
         return actors
 
     def evaluate(self, world: World, now: float, front: dict[int, PerceptionResult], surround: dict[int, dict[str, PerceptionResult]], ages: dict[int, dict[str, float]], poses: dict[int, dict[str, tuple[float, float, float]]], occlusion: dict[int, OcclusionResult], background: frozenset[int] = frozenset()) -> None:

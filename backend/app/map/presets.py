@@ -38,6 +38,15 @@ _PRESET_LIST: tuple[MapPreset, ...] = (
         radius_m=6000.0,
         signals_at_all_intersections=False,
     ),
+    MapPreset(
+        id="terrain_lab",
+        name="検証・坂と立体交差（合成）",
+        description="高さを明示した合成コース。坂の頂上・片勾配のカーブ・大通りをまたぐ高架と接続ランプ・山を抜けるトンネル",
+        center_lat=36.5606,
+        center_lon=136.6555,
+        radius_m=420.0,
+        synthetic=True,
+    ),
 )
 
 PRESETS: dict[str, MapPreset] = {p.id: p for p in _PRESET_LIST}

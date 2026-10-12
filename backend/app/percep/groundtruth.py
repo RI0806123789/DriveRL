@@ -10,10 +10,13 @@ from typing import TYPE_CHECKING, Sequence
 import numpy as np
 
 from app import config
+from app.map.elevation import LEVEL_GAP_M
+from app.percep.elevated_view import freespace_3d, vehicle_box_corners, visible_3d
 from app.percep.geometry import (
     CameraPose,
     NeighborIndex,
     camera_pose,
+    camera_pose_3d,
     project_points,
     view_heading,
 )
@@ -166,7 +169,7 @@ def _build_static_scene(map_index) -> _StaticScene:
         offset = float(sig.road_width) * 0.25
         head[i, 0] = cx + cos_h * beyond + left_x * offset
         head[i, 1] = cy + sin_h * beyond + left_y * offset
-        head[i, 2] = SIGNAL_HEAD_Z
+        head[i, 2] = SIGNAL_HEAD_Z + float(getattr(sig, "z", 0.0))
         across_sig[i] = (left_x, left_y)
         heading_sig[i] = float(sig.heading)
         stop[i] = (float(sig.x), float(sig.y))
@@ -181,7 +184,7 @@ def _build_static_scene(map_index) -> _StaticScene:
     for i, sgn in enumerate(signs):
         cos_h = math.cos(float(sgn.heading))
         sin_h = math.sin(float(sgn.heading))
-        board[i] = (float(sgn.x), float(sgn.y), SIGN_BOARD_Z)
+        board[i] = (float(sgn.x), float(sgn.y), SIGN_BOARD_Z + float(getattr(sgn, "z", 0.0)))
         across_sgn[i] = (-sin_h, cos_h)
         heading_sgn[i] = float(sgn.heading)
         limit[i] = float(sgn.speed_limit)
@@ -224,8 +227,10 @@ def _blocked_by_fleet(
     targets: np.ndarray,
     viewer: int,
     exclude: np.ndarray | None = None,
+    eye_z: float | None = None,
+    targets_z: np.ndarray | None = None,
 ) -> np.ndarray:
-    """視線が**他車の車体**で遮られているターゲットを True で返す。"""
+    """視線が**他車の車体**で遮られているターゲットを True で返す。立体の地図では、交点での視線の高さが車体の高さの範囲かも見る。"""
     t = int(targets.shape[0])
     if t == 0:
         return np.zeros(0, dtype=bool)
@@ -254,6 +259,11 @@ def _blocked_by_fleet(
     hit &= (tt > eps) & (tt < 1.0 - eps) & (uu >= 0.0) & (uu <= 1.0)
     if exclude is not None:
         hit &= owner[None, :] != exclude[:, None]
+    if eye_z is not None and targets_z is not None and getattr(world, "elevated", False):
+        # 立体交差の上下の車は、平面で視線と交わっても高さが違えば遮らない
+        los_z = float(eye_z) + (np.asarray(targets_z, dtype=np.float64)[:, None] - float(eye_z)) * np.where(np.isfinite(tt), tt, 0.0)
+        base = world.z[owner].astype(np.float64)[None, :]
+        hit &= (los_z >= base) & (los_z <= base + float(config.VEHICLE_HEIGHT))
     return hit.any(axis=1)
 
 
@@ -289,6 +299,46 @@ def _line_of_sight(
         )
         return np.ones(m, dtype=bool)
     return ~np.asarray(blocked, dtype=bool).reshape(m, -1).any(axis=1)
+
+
+def _solid_grids(world: "World"):
+    """立体の地図の固体判定グリッド。平面の地図・作れない地図では None（従来の 2 次元の判定を使う）。"""
+    if not getattr(world, "elevated", False):
+        return None
+    grids_of = getattr(world.map_index, "solid_grids", None)
+    return grids_of() if grids_of is not None else None
+
+
+def _visible(world: "World", pose: CameraPose, targets2: np.ndarray, targets_z: np.ndarray, span: float | None = None) -> np.ndarray:
+    """目から目標点が見えるか。立体の地図では地形・橋桁・山と建物の高さを見る。平面の地図は従来どおり建物だけ。"""
+    grids = _solid_grids(world)
+    if grids is None:
+        return _line_of_sight(world.map_index, (pose.eye_x, pose.eye_y), targets2, span)
+    pts = np.column_stack((np.asarray(targets2, dtype=np.float64).reshape(-1, 2), np.asarray(targets_z, dtype=np.float64).reshape(-1)))
+    try:
+        return visible_3d(
+            grids, getattr(world.map_index, "occupancy", None), (pose.eye_x, pose.eye_y, pose.eye_z), pts,
+            float(config.DEFAULT_BUILDING_HEIGHT),
+        )
+    except Exception:
+        warn_once(
+            "percep.groundtruth.visible_3d",
+            "立体の見通し判定に失敗しました。以後この画では遮蔽を考えず、坂の向こうや橋桁の陰の物体にも正解ラベルが付きます（初回のみ記録）",
+        )
+        return np.ones(pts.shape[0], dtype=bool)
+
+
+def _visible_body(world: "World", pose: CameraPose, targets2: np.ndarray, base_z: np.ndarray, height: float, span: float | None = None) -> np.ndarray:
+    """物体が見えるか。立体の地図では中心か上端のどちらかが見えれば見えるとする（橋桁の縁・坂の頂上の上に屋根だけ見える）。"""
+    base_z = np.asarray(base_z, dtype=np.float64)
+    center = _visible(world, pose, targets2, base_z + height * 0.5, span)
+    if _solid_grids(world) is None or bool(center.all()):
+        return center
+    hidden = np.flatnonzero(~center)
+    top = _visible(world, pose, np.asarray(targets2)[hidden], base_z[hidden] + height * 0.95, span)
+    out = center.copy()
+    out[hidden[top]] = True
+    return out
 
 
 def _in_view(
@@ -339,7 +389,11 @@ def _detect_signals(
     if keep.size == 0:
         return out
 
-    keep = keep[_line_of_sight(world.map_index, eye, stop[keep])]
+    if _solid_grids(world) is None:
+        keep = keep[_line_of_sight(world.map_index, eye, stop[keep])]
+    else:
+        # 立体の地図では、描いて枠を付ける灯器そのものが見えるかで決める（坂の頂上・橋桁の陰）
+        keep = keep[_visible(world, pose, head[keep, :2], head[keep, 2])]
 
     phases = world.signal_phases
     half_w = SIGNAL_HOUSING_W * 0.5
@@ -400,7 +454,7 @@ def _detect_signs(
     if keep.size == 0:
         return out
 
-    keep = keep[_line_of_sight(world.map_index, eye, board[keep, :2])]
+    keep = keep[_visible(world, pose, board[keep, :2], board[keep, 2])]
 
     for k in keep:
         i = int(candidates[k])
@@ -464,10 +518,12 @@ def _detect_vehicles(
     if near.size == 0:
         return out
 
-    visible = _line_of_sight(
-        world.map_index,
-        eye,
+    visible = _visible_body(
+        world,
+        pose,
         np.column_stack((fleet.x[near], fleet.y[near])).astype(np.float64),
+        world.z[near].astype(np.float64),
+        float(config.VEHICLE_HEIGHT),
         span,
     )
     near = near[visible]
@@ -475,19 +531,31 @@ def _detect_vehicles(
         return out
 
     centers = np.column_stack((fleet.x[near], fleet.y[near])).astype(np.float64)
-    near = near[~_blocked_by_fleet(world, eye, centers, slot, exclude=near.astype(np.int64))]
+    near = near[
+        ~_blocked_by_fleet(
+            world, eye, centers, slot, exclude=near.astype(np.int64),
+            eye_z=pose.eye_z, targets_z=world.z[near].astype(np.float64) + float(config.VEHICLE_HEIGHT) * 0.5,
+        )
+    ]
     if near.size == 0:
         return out
 
+    elevated = getattr(world, "elevated", False)
     corners_all = fleet.corners()
     height = float(config.VEHICLE_HEIGHT)
     for other in near:
-        flat = corners_all[int(other)].astype(np.float64)
-        pts = np.empty((8, 3), dtype=np.float64)
-        pts[:4, :2] = flat
-        pts[:4, 2] = 0.0
-        pts[4:, :2] = flat
-        pts[4:, 2] = height
+        if elevated:
+            # 描画と同じく、路面の姿勢で傾いた車体の 8 頂点
+            pts = vehicle_box_corners(
+                fleet.x[other], fleet.y[other], world.z[other], fleet.heading[other], world.pitch[other], world.roll[other],
+            )[0]
+        else:
+            flat = corners_all[int(other)].astype(np.float64)
+            pts = np.empty((8, 3), dtype=np.float64)
+            pts[:4, :2] = flat
+            pts[:4, 2] = 0.0
+            pts[4:, :2] = flat
+            pts[4:, 2] = height
         box = _box_from_points(pose, spec, pts, require_all_in_front=False)
         if box is None:
             continue
@@ -540,10 +608,11 @@ def _detect_obstacles(
     near = near[_in_view(spec, eye, look, xy[near, 0], xy[near, 1], radius[near])]
     if near.size == 0:
         return out
-    near = near[_line_of_sight(world.map_index, eye, xy[near].astype(np.float64), span)]
+    base_z = world.obstacle_z.astype(np.float64) if getattr(world, "elevated", False) else np.zeros(xy.shape[0])
+    near = near[_visible_body(world, pose, xy[near].astype(np.float64), base_z[near], height, span)]
     if near.size:
         pts = xy[near].astype(np.float64)
-        near = near[~_blocked_by_fleet(world, eye, pts, slot)]
+        near = near[~_blocked_by_fleet(world, eye, pts, slot, eye_z=pose.eye_z, targets_z=base_z[near] + height * 0.5)]
 
     for i in near:
         i = int(i)
@@ -553,12 +622,13 @@ def _detect_obstacles(
         r = float(radius[i])
         ax, ay = -dy[i] / d, dx[i] / d
         cx, cy = float(xy[i, 0]), float(xy[i, 1])
+        z0 = float(base_z[i])
         pts = np.array(
             [
-                [cx - ax * r, cy - ay * r, 0.0],
-                [cx + ax * r, cy + ay * r, 0.0],
-                [cx - ax * r, cy - ay * r, height],
-                [cx + ax * r, cy + ay * r, height],
+                [cx - ax * r, cy - ay * r, z0],
+                [cx + ax * r, cy + ay * r, z0],
+                [cx - ax * r, cy - ay * r, z0 + height],
+                [cx + ax * r, cy + ay * r, z0 + height],
             ],
             dtype=np.float64,
         )
@@ -605,9 +675,10 @@ def _detect_pedestrians(
     near = near[_in_view(spec, eye, look, xy[near, 0], xy[near, 1], PEDESTRIAN_HALF_WIDTH)]
     if near.size == 0:
         return out
-    near = near[_line_of_sight(world.map_index, eye, xy[near], span)]
+    foot = np.asarray(world.pedestrian_z, dtype=np.float64) if getattr(world, "elevated", False) else np.zeros(xy.shape[0])
+    near = near[_visible_body(world, pose, xy[near], foot[near], PEDESTRIAN_HEIGHT, span)]
     if near.size:
-        near = near[~_blocked_by_fleet(world, eye, xy[near], slot)]
+        near = near[~_blocked_by_fleet(world, eye, xy[near], slot, eye_z=pose.eye_z, targets_z=foot[near] + PEDESTRIAN_HEIGHT * 0.5)]
 
     for i in near:
         i = int(i)
@@ -616,12 +687,13 @@ def _detect_pedestrians(
             continue
         ax, ay = -dy[i] / d, dx[i] / d
         cx, cy = float(xy[i, 0]), float(xy[i, 1])
+        z0 = float(foot[i])
         pts = np.array(
             [
-                [cx - ax * PEDESTRIAN_HALF_WIDTH, cy - ay * PEDESTRIAN_HALF_WIDTH, 0.0],
-                [cx + ax * PEDESTRIAN_HALF_WIDTH, cy + ay * PEDESTRIAN_HALF_WIDTH, 0.0],
-                [cx - ax * PEDESTRIAN_HALF_WIDTH, cy - ay * PEDESTRIAN_HALF_WIDTH, PEDESTRIAN_HEIGHT],
-                [cx + ax * PEDESTRIAN_HALF_WIDTH, cy + ay * PEDESTRIAN_HALF_WIDTH, PEDESTRIAN_HEIGHT],
+                [cx - ax * PEDESTRIAN_HALF_WIDTH, cy - ay * PEDESTRIAN_HALF_WIDTH, z0],
+                [cx + ax * PEDESTRIAN_HALF_WIDTH, cy + ay * PEDESTRIAN_HALF_WIDTH, z0],
+                [cx - ax * PEDESTRIAN_HALF_WIDTH, cy - ay * PEDESTRIAN_HALF_WIDTH, z0 + PEDESTRIAN_HEIGHT],
+                [cx + ax * PEDESTRIAN_HALF_WIDTH, cy + ay * PEDESTRIAN_HALF_WIDTH, z0 + PEDESTRIAN_HEIGHT],
             ],
             dtype=np.float64,
         )
@@ -674,7 +746,11 @@ def _detect_lane(
     left = np.stack([cx + lx * LANE_HALF_WIDTH_M, cy + ly * LANE_HALF_WIDTH_M], axis=1)
     right = np.stack([cx - lx * LANE_HALF_WIDTH_M, cy - ly * LANE_HALF_WIDTH_M], axis=1)
     pts = np.concatenate([left, right], axis=0)
-    pts3 = np.concatenate([pts, np.zeros((pts.shape[0], 1), dtype=np.float64)], axis=1)
+    heights = np.zeros(pts.shape[0], dtype=np.float64)
+    if getattr(world, "elevated", False) and state.route_z.size == route.shape[0]:
+        cz = np.interp(targets, cum, state.route_z)
+        heights = np.concatenate([cz, cz])
+    pts3 = np.concatenate([pts, heights[:, None]], axis=1)
 
     box = _box_from_points(pose, spec, pts3, require_all_in_front=False)
     if box is None:
@@ -742,9 +818,16 @@ def detect_ground_truth_views(
     signal_candidates = _within(scene.signal_head, scene.signal_grid.query(x, y), x, y)
     sign_candidates = _within(scene.sign_board, scene.sign_grid.query(x, y), x, y)
 
+    elevated = _solid_grids(world) is not None
     for result, spec in zip(results, specs):
-        pose = camera_pose(x, y, heading, spec)
-        look = float(view_heading(heading, spec))
+        if elevated:
+            pose = camera_pose_3d(
+                x, y, float(world.z[slot]), heading, float(world.pitch[slot]), float(world.roll[slot]), spec
+            )
+            look = math.atan2(pose.sin_yaw, pose.cos_yaw)
+        else:
+            pose = camera_pose(x, y, heading, spec)
+            look = float(view_heading(heading, spec))
         reach = weather.visibility_m(float(spec.far))
 
         per_class: dict[DetClass, list[Detection]] = {c: [] for c in DetClass}
@@ -826,22 +909,40 @@ def freespace_ground_truth_views(
     origin = np.empty((count, 2), dtype=np.float64)
     angles = np.empty((count, config.OBS_FREESPACE_DIM), dtype=np.float64)
     owner = np.empty(count, dtype=np.int64)
+    eye_z = np.zeros(count, dtype=np.float64)
+    grids = _solid_grids(world)
     for p, (_i, j, s) in enumerate(pairs):
         heading = float(fleet.heading[s])
-        pose = camera_pose(float(fleet.x[s]), float(fleet.y[s]), heading, specs[j])
+        if grids is not None:
+            pose = camera_pose_3d(
+                float(fleet.x[s]), float(fleet.y[s]), float(world.z[s]), heading,
+                float(world.pitch[s]), float(world.roll[s]), specs[j],
+            )
+            look = math.atan2(pose.sin_yaw, pose.cos_yaw)
+        else:
+            pose = camera_pose(float(fleet.x[s]), float(fleet.y[s]), heading, specs[j])
+            look = float(view_heading(heading, specs[j]))
         origin[p] = (pose.eye_x, pose.eye_y)
-        angles[p] = (float(view_heading(heading, specs[j])) + FREESPACE_ANGLES).astype(np.float64)
+        eye_z[p] = pose.eye_z
+        angles[p] = (look + FREESPACE_ANGLES).astype(np.float64)
         owner[p] = s
 
     rows = np.full((count, config.OBS_FREESPACE_DIM), max_d, dtype=np.float32)
     try:
-        hit = world.map_index.raycast(
-            origin[:, 0].astype(np.float32),
-            origin[:, 1].astype(np.float32),
-            angles.astype(np.float32),
-            max_d,
-            1.0,
-        )
+        if grids is not None:
+            # 立体の地図：建物に加え、路肩の落差・壁・低い天井と、目から見えない路面（坂の頂上の先）で止める
+            hit = freespace_3d(
+                grids, getattr(world.map_index, "occupancy", None), origin, eye_z,
+                world.z[owner].astype(np.float64), angles, max_d, 1.0,
+            )
+        else:
+            hit = world.map_index.raycast(
+                origin[:, 0].astype(np.float32),
+                origin[:, 1].astype(np.float32),
+                angles.astype(np.float32),
+                max_d,
+                1.0,
+            )
         rows[:] = np.asarray(hit, dtype=np.float32).reshape(count, -1)
     except Exception:
         warn_once(
@@ -876,6 +977,16 @@ def freespace_ground_truth_views(
         owners.append(np.full(walkers.shape[0], -1, dtype=np.int64))
     circles = np.concatenate(parts, axis=0)
     circle_owner = np.concatenate(owners)
+    same_level = None
+    if grids is not None:
+        # 立体交差の上下の物体は、同じ路面の上の障害ではない
+        heights = [world.z[active].astype(np.float64)]
+        if world.obstacles:
+            heights.append(world.obstacle_z.astype(np.float64))
+        if walkers.size:
+            heights.append(np.asarray(world.pedestrian_z, dtype=np.float64))
+        circle_z = np.concatenate(heights)
+        same_level = np.abs(circle_z[None, :] - world.z[owner].astype(np.float64)[:, None]) < LEVEL_GAP_M
     if circles.shape[0]:
         dirs = np.stack([np.cos(angles), np.sin(angles)], axis=2)
         rel = circles[None, :, :2] - origin[:, None, :]
@@ -887,6 +998,8 @@ def freespace_ground_truth_views(
             & (perp2 <= radius2)
             & (circle_owner[None, None, :] != owner[:, None, None])
         )
+        if same_level is not None:
+            crosses &= same_level[:, None, :]
         if crosses.any():
             back = np.sqrt(np.maximum(radius2 - perp2, 0.0))
             entry = np.where(crosses, np.maximum(along - back, 0.0), np.inf)

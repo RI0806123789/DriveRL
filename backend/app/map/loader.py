@@ -15,7 +15,11 @@ import numpy as np
 
 from app import config
 from app.contracts import (
+    ROAD_STRUCTURES,
     SIGNAL_MERGE_M,
+    STRUCTURE_BRIDGE,
+    STRUCTURE_GROUND,
+    STRUCTURE_TUNNEL,
     Bounds,
     MapBuilding,
     MapData,
@@ -34,8 +38,15 @@ class MapLoadError(RuntimeError):
     """OSM の取得・正規化に失敗したときに投げる。"""
 
 
-CACHE_VERSION = 13
-COMPATIBLE_CACHE_VERSIONS = frozenset((12, CACHE_VERSION))
+CACHE_VERSION = 14
+#: 版 12・13 は道路構造（bridge / tunnel / layer）と ele・incline を持たない。読むときは不明（地上・layer 0・平面）として扱う
+COMPATIBLE_CACHE_VERSIONS = frozenset((12, 13, CACHE_VERSION))
+
+#: 道路構造の境目で辺を分けるタグ（簡略化で橋と取り付け道路が 1 本にまとまらないように）
+_STRUCTURE_TAGS = ("bridge", "tunnel", "layer")
+_INCLINE_TAG = "incline"
+_ELE_TAG = "ele"
+_LAYER_LIMIT = 5
 
 _LANE_CHANGE_TAGS = ("change:lanes", "change:lanes:forward", "change:lanes:backward")
 
@@ -113,6 +124,10 @@ _MAX_LANES = 10
 
 def load_map(preset: MapPreset, *, force_refresh: bool = False) -> MapData:
     """プリセット 1 件分のマップを読み込む。"""
+    if preset.synthetic:
+        from app.map.synthetic import build_synthetic_map
+
+        return build_synthetic_map(preset)
     cache_path = _cache_path(preset)
 
     if not force_refresh:
@@ -139,8 +154,8 @@ def _fetch_and_normalize(preset: MapPreset) -> MapData:
 
     ox.settings.use_cache = True
     ox.settings.cache_folder = str(config.OSMNX_CACHE_DIR)
-    ox.settings.useful_tags_node = list(dict.fromkeys(ox.settings.useful_tags_node + list(_SIGN_TAGS)))
-    ox.settings.useful_tags_way = list(dict.fromkeys(ox.settings.useful_tags_way + list(_SIGN_TAGS) + list(_PARKING_SIGN_TAGS) + list(_LANE_CHANGE_TAGS)))
+    ox.settings.useful_tags_node = list(dict.fromkeys(ox.settings.useful_tags_node + list(_SIGN_TAGS) + [_ELE_TAG]))
+    ox.settings.useful_tags_way = list(dict.fromkeys(ox.settings.useful_tags_way + list(_SIGN_TAGS) + list(_PARKING_SIGN_TAGS) + list(_LANE_CHANGE_TAGS) + list(_STRUCTURE_TAGS) + [_INCLINE_TAG]))
 
     center = (preset.center_lat, preset.center_lon)
     dist = float(preset.radius_m)
@@ -166,7 +181,7 @@ def _fetch_and_normalize(preset: MapPreset) -> MapData:
         graph = ox.simplify_graph(
             graph,
             node_attrs_include=["driverl_sign"],
-            edge_attrs_differ=["traffic_sign", "traffic_sign:forward", "traffic_sign:backward", "traffic_sign:direction", "stop:direction", "direction", *_PARKING_SIGN_TAGS, *_LANE_CHANGE_TAGS],
+            edge_attrs_differ=["traffic_sign", "traffic_sign:forward", "traffic_sign:backward", "traffic_sign:direction", "stop:direction", "direction", *_PARKING_SIGN_TAGS, *_LANE_CHANGE_TAGS, *_STRUCTURE_TAGS],
         )
         projected = ox.project_graph(graph)
         crs = projected.graph["crs"]
@@ -207,7 +222,7 @@ def _fetch_and_normalize(preset: MapPreset) -> MapData:
     if not raw_edges:
         raise MapLoadError(f"走行可能なエッジが 1 本も得られませんでした（preset={preset.id}）")
 
-    nodes, edges, remap = _renumber(raw_node_xy, raw_edges)
+    nodes, edges, remap = _renumber(raw_node_xy, raw_edges, _collect_node_ele(nodes_gdf))
 
     if len(nodes) < 5:
         raise MapLoadError(
@@ -253,6 +268,67 @@ def _collect_node_xy(
     for osmid, px, py in zip(nodes_gdf.index, xs, ys):
         out[int(osmid)] = (float(px) - origin_x, float(py) - origin_y)
     return out
+
+
+def _collect_node_ele(nodes_gdf: Any) -> dict[int, float]:
+    """osmid -> OSM の ele（海抜 [m]）。付いている節点はまばらなので、路面の高さには使わず記録だけする。"""
+    column = _column_or_none(nodes_gdf, _ELE_TAG)
+    if column is None:
+        return {}
+    out: dict[int, float] = {}
+    for osmid, value in zip(nodes_gdf.index, column):
+        parsed = _parse_float_tag(value)
+        if parsed is not None and math.isfinite(parsed):
+            out[int(osmid)] = float(parsed)
+    return out
+
+
+def _parse_structure(bridge: Any, tunnel: Any) -> str:
+    """OSM の bridge / tunnel から道路構造を決める。"no" と欠落は地上。トンネルの中の橋は無いものとしてトンネルを優先する。"""
+    def present(value: Any) -> bool:
+        return any(str(v).strip().lower() not in ("", "no", "false", "0") for v in _iter_tag_values(value))
+
+    if present(tunnel):
+        return STRUCTURE_TUNNEL
+    if present(bridge):
+        return STRUCTURE_BRIDGE
+    return STRUCTURE_GROUND
+
+
+def _parse_layer(value: Any) -> int:
+    """OSM の layer（上下の順序）を整数にする。まとめられた道で値が複数あるときは、絶対値の大きいほうを選ぶ（並びに依らない）。"""
+    found: list[int] = []
+    for item in _iter_tag_values(value):
+        for token in str(item).replace(",", ";").split(";"):
+            try:
+                found.append(int(round(float(token.strip()))))
+            except ValueError:
+                continue
+    if not found:
+        return 0
+    best = max(found, key=lambda v: (abs(v), v))
+    return int(min(max(best, -_LAYER_LIMIT), _LAYER_LIMIT))
+
+
+def _parse_incline(value: Any, reversed_: bool) -> float | None:
+    """OSM の incline を、辺の向き（u→v）の勾配の比にする。向きだけ（up / down）や読めない値は None。"""
+    for item in _iter_tag_values(value):
+        text = str(item).strip().lower().replace(" ", "")
+        if not text or text in ("up", "down", "yes", "no"):
+            continue
+        try:
+            if text.endswith("%"):
+                ratio = float(text[:-1]) / 100.0
+            elif text.endswith("°"):
+                ratio = math.tan(math.radians(float(text[:-1])))
+            else:
+                ratio = float(text) / 100.0
+        except ValueError:
+            continue
+        if not math.isfinite(ratio) or abs(ratio) > 1.0:
+            continue
+        return -ratio if reversed_ else ratio
+    return None
 
 
 def _collect_edges(
@@ -305,6 +381,9 @@ def _collect_edges(
             "length": float(length),
             "sign_tags": {tag: row.get(tag) for tag in _SIGN_TAGS + _PARKING_SIGN_TAGS},
             "reversed": _tag_is_reversed(row.get("reversed")),
+            "structure": _parse_structure(row.get("bridge"), row.get("tunnel")),
+            "layer": _parse_layer(row.get("layer")),
+            "incline": _parse_incline(row.get(_INCLINE_TAG), _tag_is_reversed(row.get("reversed"))),
         }
 
     return best
@@ -376,6 +455,7 @@ def _edge_polyline(
 def _renumber(
     node_xy: dict[int, tuple[float, float]],
     raw_edges: dict[tuple[int, int], dict[str, Any]],
+    node_ele: dict[int, float] | None = None,
 ) -> tuple[list[MapNode], list[MapEdge], dict[int, int]]:
     """osmid を 0 始まりの連番に振り直す。"""
     used: set[int] = set()
@@ -386,8 +466,9 @@ def _renumber(
     ordered = sorted(used)
     remap = {osmid: i for i, osmid in enumerate(ordered)}
 
+    ele = node_ele or {}
     nodes = [
-        MapNode(id=remap[osmid], x=node_xy[osmid][0], y=node_xy[osmid][1])
+        MapNode(id=remap[osmid], x=node_xy[osmid][0], y=node_xy[osmid][1], ele=ele.get(osmid))
         for osmid in ordered
     ]
 
@@ -405,6 +486,9 @@ def _renumber(
                 polyline=attrs["polyline"],
                 length=attrs["length"],
                 lane_change_allowed=attrs.get("lane_change_allowed"),
+                structure=attrs.get("structure", STRUCTURE_GROUND),
+                layer=int(attrs.get("layer", 0)),
+                incline=attrs.get("incline"),
             )
         )
     return nodes, edges, remap
@@ -563,14 +647,16 @@ def _build_signals(
                 )
             )
 
-    return _merge_phases(signals)
+    layer_of = {int(e.id): int(e.layer) for e in edges}
+    return _merge_phases(signals, [layer_of.get(int(sg.edge_id), 0) for sg in signals])
 
 
-def _merge_phases(signals: list[MapSignal]) -> list[MapSignal]:
-    """近接した灯器を 1 つの交差点とみなし、現示（位相と群）を揃える。"""
+def _merge_phases(signals: list[MapSignal], levels: Sequence[int] | None = None) -> list[MapSignal]:
+    """近接した灯器を 1 つの交差点とみなし、現示（位相と群）を揃える。`levels`（layer）の違う灯器はまとめない。"""
     n = len(signals)
     if n == 0:
         return signals
+    level = list(levels) if levels is not None else [0] * n
 
     parent = list(range(n))
 
@@ -608,7 +694,7 @@ def _merge_phases(signals: list[MapSignal]) -> list[MapSignal]:
                     if same_cell and j <= i:
                         continue
                     a, b = signals[i], signals[j]
-                    if (a.x - b.x) ** 2 + (a.y - b.y) ** 2 <= reach:
+                    if level[i] == level[j] and (a.x - b.x) ** 2 + (a.y - b.y) ** 2 <= reach:
                         union(i, j)
 
     leader: dict[int, int] = {}
@@ -1209,7 +1295,10 @@ def _to_cache_dict(data: MapData) -> dict[str, Any]:
             "maxX": data.bounds.max_x,
             "maxY": data.bounds.max_y,
         },
-        "nodes": [[n.id, round(n.x, 3), round(n.y, 3)] for n in data.nodes],
+        "nodes": [
+            [n.id, round(n.x, 3), round(n.y, 3)] + ([round(n.ele, 2)] if n.ele is not None else [])
+            for n in data.nodes
+        ],
         "edges": [
             {
                 "id": e.id,
@@ -1222,6 +1311,7 @@ def _to_cache_dict(data: MapData) -> dict[str, Any]:
                 "speedLimit": round(e.speed_limit, 3),
                 "length": round(e.length, 3),
                 "polyline": [[round(px, 3), round(py, 3)] for px, py in e.polyline],
+                **_cache_structure(e),
             }
             for e in data.edges
         ],
@@ -1274,7 +1364,10 @@ def _from_cache_dict(payload: dict[str, Any], preset: MapPreset) -> MapData:
         max_y=float(bounds_raw["maxY"]),
     )
 
-    nodes = [MapNode(id=int(n[0]), x=float(n[1]), y=float(n[2])) for n in payload["nodes"]]
+    nodes = [
+        MapNode(id=int(n[0]), x=float(n[1]), y=float(n[2]), ele=float(n[3]) if len(n) > 3 else None)
+        for n in payload["nodes"]
+    ]
 
     edges: list[MapEdge] = []
     for e in payload["edges"]:
@@ -1291,6 +1384,9 @@ def _from_cache_dict(payload: dict[str, Any], preset: MapPreset) -> MapData:
                 polyline=polyline,
                 length=float(e["length"]),
                 lane_change_allowed=None if payload.get("version") == 12 else _cache_lane_change(e.get("laneChangeAllowed")),
+                structure=_cache_structure_value(e.get("structure", STRUCTURE_GROUND)),
+                layer=int(e.get("layer", 0)),
+                incline=None if e.get("incline") is None else float(e["incline"]),
             )
         )
 
@@ -1350,6 +1446,25 @@ def _from_cache_dict(payload: dict[str, Any], preset: MapPreset) -> MapData:
         signals=signals,
         signs=signs,
     )
+
+
+def _cache_structure(edge: MapEdge) -> dict[str, Any]:
+    """道路構造と OSM の layer・incline を、既定値でないときだけ保存する（金沢のキャッシュを太らせない）。"""
+    out: dict[str, Any] = {}
+    if edge.structure != STRUCTURE_GROUND:
+        out["structure"] = edge.structure
+    if edge.layer != 0:
+        out["layer"] = int(edge.layer)
+    if edge.incline is not None:
+        out["incline"] = round(float(edge.incline), 4)
+    return out
+
+
+def _cache_structure_value(value: Any) -> str:
+    """保存形式の道路構造を受け付ける。知らない値はキャッシュの破損として扱う。"""
+    if value not in ROAD_STRUCTURES:
+        raise ValueError(f"道路構造が不正です: {value!r}")
+    return str(value)
 
 
 def _cache_lane_change(value: Any) -> bool | None:

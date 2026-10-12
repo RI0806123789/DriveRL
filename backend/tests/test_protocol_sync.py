@@ -138,6 +138,53 @@ class TestWireKeysMatchProtocolTs:
             assert_wire_matches(shadow, ts_interfaces["OcclusionShadow"])
         assert {s["kind"] for s in view["shadows"]} == {"dynamic", "static"}
 
+    def test_elevated_map_and_frame(self, ts_interfaces: dict[str, TsInterface]) -> None:
+        """立体の地図（合成の立体コース）とその frame に載る高さ・姿勢・構造の欄も宣言されているか。"""
+        from app.map.presets import get_preset
+        from app.map.synthetic import build_synthetic_map
+
+        preset = get_preset("terrain_lab")
+        assert preset is not None
+        assert_wire_matches(preset.to_wire(), ts_interfaces["MapPreset"])
+        wire = build_synthetic_map(preset).to_wire()
+        assert wire.get("elevated") is True and "terrain" in wire
+        assert_wire_matches(wire, ts_interfaces["MapMessage"], added_by_sender=TYPE_ONLY)
+        assert_wire_matches(wire["terrain"], ts_interfaces["TerrainGrid"])
+        for key, name in [
+            ("nodes", "MapNode"),
+            ("edges", "MapEdge"),
+            ("buildings", "MapBuilding"),
+            ("signals", "MapSignal"),
+            ("signs", "MapSign"),
+        ]:
+            for item in wire[key]:
+                assert_wire_matches(item, ts_interfaces[name])
+        structures = {e.get("structure", "ground") for e in wire["edges"]}
+        assert {"bridge", "tunnel"} <= structures
+        vehicle = _vehicle()
+        vehicle.z, vehicle.pitch, vehicle.roll, vehicle.route_z = 3.0, 0.05, -0.02, [3.0, 3.1]
+        frame = FrameSnapshot(
+            tick=1,
+            sim_time=0.05,
+            vehicles=[vehicle],
+            obstacles=[ObstacleSnapshot(id=0, x=1.0, y=2.0, radius=0.5, z=6.5)],
+            pedestrians=[PedestrianSnapshot(id=0, x=1.0, y=2.0, heading=0.0, z=6.5)],
+        ).to_wire()
+        car = frame["vehicles"][0]
+        assert {"z", "pitch", "roll", "routeZ"} <= set(car)
+        assert_wire_matches(car, ts_interfaces["VehicleState"])
+        assert_wire_matches(frame["obstacles"][0], ts_interfaces["ObstacleState"])
+        assert_wire_matches(frame["pedestrians"][0], ts_interfaces["NpcPedestrianState"])
+
+    def test_flat_map_and_frame_do_not_grow(self, tiny_map: MapData) -> None:
+        """平面の地図では高さの欄を 1 つも足さない（金沢の map・frame の転送量を変えない）。"""
+        wire = tiny_map.to_wire()
+        assert "elevated" not in wire and "terrain" not in wire
+        assert all("z" not in n for n in wire["nodes"])
+        assert all(not ({"elevation", "crossSlope", "structure", "layer", "elevationSource", "incline"} & set(e)) for e in wire["edges"])
+        car = _vehicle().to_wire()
+        assert not ({"z", "pitch", "roll", "routeZ"} & set(car))
+
     def test_frame_omits_empty_optionals(self, ts_interfaces: dict[str, TsInterface]) -> None:
         wire = FrameSnapshot(tick=0, sim_time=0.0, vehicles=[], obstacles=[]).to_wire()
         assert_wire_matches(wire, ts_interfaces["FrameMessage"], added_by_sender=TYPE_ONLY)
