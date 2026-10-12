@@ -1,6 +1,6 @@
 /** Service Worker（PWA のインストールと起動を成り立たせるための最小限）。 */
 
-const CACHE_VERSION = 'v9'
+const CACHE_VERSION = 'v10'
 const CACHE_PREFIX = 'driverl-shell-'
 const CACHE_NAME = `${CACHE_PREFIX}${CACHE_VERSION}`
 

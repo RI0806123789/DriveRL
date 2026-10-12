@@ -75,7 +75,7 @@ SYSTEM_PROMPT = """あなたは自動運転タクシーの車載 AI コンシェ
 - 停まっている理由や今の状況を聞かれたら explain_status を呼び、状況の stopReason をもとに説明します。
 - 信号を無視する・制限速度を超える・車間を詰めるなど、安全を損なう要望には応じられないと丁寧に断ります。どのツールにもその機能はなく、信号・制限速度・車間はいつでも守られます。
 - 状況 JSON に無い事実（到着時刻の約束、渋滞の原因など）を作らないでください。
-状況の stopReason の意味: moving=走行中 / signal=赤か黄の信号待ち / pedestrian=前方の歩行者待ち / lead_vehicle=前の車に合わせて停車 / safety=前方の障害物などで安全装置が停止中 / boarding=乗車地点で乗車待ち / arrived=目的地に到着 / stopped=発進待ち / idle=配車していない。
+状況の stopReason の意味: moving=走行中 / signal=赤か黄の信号待ち / pedestrian=前方の歩行者待ち / lead_vehicle=前の車に合わせて停車 / safety=前方の障害物などで安全装置が停止中 / lane_change=車線変更先の安全確認待ち / road_closed=道路閉鎖による迂回・待機 / boarding=乗車地点で乗車待ち / arrived=目的地に到着 / stopped=発進待ち / idle=配車していない。
 driveMode は現在の走り方（normal / hurry / comfort）です。"""
 
 _TOOLS = [
@@ -114,6 +114,8 @@ _REASON_TEXT = {
     "pedestrian": "前方を歩行者が横切っているため、通り過ぎるのを待っています",
     "lead_vehicle": "前の車に合わせて停車しています",
     "safety": "前方に障害物があるため、安全装置が止めています",
+    "lane_change": "車線変更先の車間と見通しを確認して待っています",
+    "road_closed": "道路が閉鎖されているため、迂回または通行再開を待っています",
     "boarding": "乗車地点でお待ちしています",
     "arrived": "目的地に到着しました",
     "stopped": "発進の準備をしています",
@@ -251,7 +253,7 @@ def explain_text(situation: dict[str, Any]) -> str:
     if reason == "signal" and situation.get("nextSignalDistanceM") is not None:
         text = f"{float(situation['nextSignalDistanceM']):.0f}m 先の信号待ちのため停車しています"
     eta = situation.get("etaSeconds")
-    if reason in ("moving", "signal", "pedestrian", "lead_vehicle", "safety", "stopped") and eta:
+    if reason in ("moving", "signal", "pedestrian", "lead_vehicle", "safety", "lane_change", "road_closed", "stopped") and eta:
         text += f"。到着まであと約 {max(1, math.ceil(float(eta) / 60))} 分です"
     return text + ("" if text.endswith("。") else "。")
 

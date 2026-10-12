@@ -11,8 +11,9 @@ import {
   type SurroundDetections,
   type VehicleState,
 } from '../types/protocol'
-import { assistSummary, intersectionSummary, paneAssist } from './assistLabels'
+import { assistSummary, intersectionSummary, laneChangeSummary, paneAssist } from './assistLabels'
 import { IntersectionStatus } from '../panel/IntersectionStatus'
+import { LaneChangeStatus } from '../panel/LaneChangeStatus'
 import { detectionFrameColor, detectionLabel } from './detectionLabels'
 import { projectBox } from './detectionProjection'
 import { PANE_LABELS, QUAD_PANES, paneFov, quadPaneRect, type QuadPane } from './quadLayout'
@@ -134,7 +135,12 @@ function QuadPanes({
   const vehicle = tracked.vehicle
   const summary = assistSummary(vehicle?.assist)
   const intersection = intersectionSummary(vehicle?.intersection)
-  const showAssist = summary && (!intersection || !vehicle?.assist?.startsWith('intersection_'))
+  const laneChange = laneChangeSummary(vehicle?.laneChange)
+  const levels = [summary?.level, intersection?.level, laneChange?.level]
+  const level = levels.includes('stop') ? 'stop' : levels.includes('warn') ? 'warn' : 'info'
+  const showAssist = summary
+    && (!intersection || !vehicle?.assist?.startsWith('intersection_'))
+    && (!laneChange || (!vehicle?.assist?.startsWith('lane_') && vehicle?.assist !== 'road_closed'))
   return (
     <>
       {QUAD_PANES.map((pane, index) => {
@@ -165,10 +171,11 @@ function QuadPanes({
           </div>
         )
       })}
-      {(summary || intersection) && (
-        <div className={`quad-summary quad-badge--${summary?.level ?? intersection?.level}`}>
+      {(summary || intersection || laneChange) && (
+        <div className={`quad-summary quad-badge--${level}`}>
           {showAssist && <span>{summary.text}</span>}
           <IntersectionStatus decision={vehicle?.intersection} />
+          <LaneChangeStatus decision={vehicle?.laneChange} />
         </div>
       )}
     </>

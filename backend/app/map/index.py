@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import math
+from bisect import bisect_right
+from collections import OrderedDict
+from dataclasses import replace
 from typing import Any, Sequence
 
 import networkx as nx
@@ -18,6 +21,7 @@ from app.contracts import (
     BRANCH_LEFT,
     BRANCH_RIGHT,
     SIGNAL_MERGE_M,
+    LaneCorridor,
     MapData,
     MapEdge,
     OccupancyGrid,
@@ -28,7 +32,7 @@ from app.contracts import (
 
 __all__ = ["MapIndexImpl", "build_map_index"]
 
-from app.map.lanes import RouteSegment, build_lane_route
+from app.map.lanes import RouteSegment, build_lane_route, lane_corridors
 from app.map.intersections import IntersectionGeometry
 from app.warn import warn_once
 
@@ -85,6 +89,10 @@ class MapIndexImpl:
         }
 
         self._edges_by_id: dict[int, MapEdge] = {e.id: e for e in data.edges}
+        self.closed_edges: frozenset[int] = frozenset()
+        self.closure_generation = 0
+        self._physical_edges = self._physical_edge_aliases(data.edges)
+        self._lane_corridor_cache: OrderedDict[tuple[int, int], tuple[Any, Any, list[LaneCorridor], list[float]]] = OrderedDict()
 
         self.graph = self._build_graph(data)
         # 3 方向以上に道がつながるノード（向きを問わず、隣のノードの数で数える）
@@ -150,6 +158,37 @@ class MapIndexImpl:
             if not edge.oneway:
                 graph.add_edge(edge.v, edge.u, length=edge.length, edge_id=edge.id)
         return graph
+
+    @staticmethod
+    def _physical_edge_aliases(edges: Sequence[MapEdge]) -> dict[int, frozenset[int]]:
+        """同じ端点と中心線を持つ正逆方向の辺をまとめる。"""
+        groups: dict[tuple[int, int], list[MapEdge]] = {}
+        for edge in edges:
+            groups.setdefault(tuple(sorted((int(edge.u), int(edge.v)))), []).append(edge)
+        aliases = {int(edge.id): frozenset((int(edge.id),)) for edge in edges}
+        for group in groups.values():
+            if len(group) < 2:
+                continue
+            for edge in group:
+                if len(edge.polyline) < 2:
+                    continue
+                line = LineString(edge.polyline)
+                aliases[int(edge.id)] = frozenset(
+                    int(other.id) for other in group
+                    if len(other.polyline) >= 2 and line.equals(LineString(other.polyline))
+                )
+        return aliases
+
+    def set_closed_edges(self, edge_ids: frozenset[int]) -> bool:
+        """閉鎖する物理道路を正逆方向に展開し、変更があれば世代を進める。"""
+        if any(edge_id not in self._edges_by_id for edge_id in edge_ids):
+            raise ValueError("通行止めの道路IDが地図に存在しません")
+        closed = frozenset(alias for edge_id in edge_ids for alias in self._physical_edges[edge_id])
+        if closed == self.closed_edges:
+            return False
+        self.closed_edges = closed
+        self.closure_generation += 1
+        return True
 
     def _build_reachable_nodes(self) -> np.ndarray:
         """互いに行き来できるノードの添字（最大の強連結成分）。"""
@@ -295,6 +334,8 @@ class MapIndexImpl:
             heading = float(arrive_heading)
 
             def weight(u: int, v: int, attrs: dict) -> float | None:
+                if int(attrs["edge_id"]) in self.closed_edges:
+                    return None
                 if u == src and self._turns_back(u, attrs, heading):
                     return None
                 return attrs["cost"]
@@ -304,9 +345,14 @@ class MapIndexImpl:
             except (nx.NetworkXNoPath, nx.NodeNotFound):
                 pass
         try:
-            return self._search(src, dst, "cost")
+            weight = self._open_edge_cost if self.closed_edges else "cost"
+            return self._search(src, dst, weight)
         except (nx.NetworkXNoPath, nx.NodeNotFound):
             return None
+
+    def _open_edge_cost(self, u: int, v: int, attrs: dict) -> float | None:
+        """閉鎖された辺を探索から除外する。"""
+        return None if int(attrs["edge_id"]) in self.closed_edges else float(attrs["cost"])
 
     def _search(self, src: int, dst: int, weight: Any) -> list[int]:
         """主成分の中どうしは A*、それ以外は双方向 Dijkstra で探す。"""
@@ -421,6 +467,29 @@ class MapIndexImpl:
             if span is not None
         ]
         return route, legs
+
+    def lane_corridor(
+        self, points: Sequence[tuple[float, float]], legs: Sequence[RouteLeg], arc: float,
+    ) -> LaneCorridor | None:
+        """現経路が一定車線を通る同方向2車線の直線区間と規制を返す。"""
+        key = (id(points), id(legs))
+        cached = self._lane_corridor_cache.get(key)
+        if cached is None or cached[0] is not points or cached[1] is not legs:
+            corridors = lane_corridors(points, legs, self._edges_by_id, self._junctions)
+            cached = (points, legs, corridors, [item.begin_arc for item in corridors])
+            self._lane_corridor_cache[key] = cached
+            if len(self._lane_corridor_cache) > 64:
+                self._lane_corridor_cache.popitem(last=False)
+        else:
+            self._lane_corridor_cache.move_to_end(key)
+        corridors, starts = cached[2], cached[3]
+        i = bisect_right(starts, float(arc)) - 1
+        if i < 0 or float(arc) > corridors[i].end_arc:
+            return None
+        corridor = corridors[i]
+        if corridor.edge_id in self.closed_edges:
+            return replace(corridor, allowed=False, reason="blocked")
+        return corridor
 
     def _lead_hops(self, lead: RoadLead) -> list[tuple[int, int]]:
         """道なりの出だしが通る辺ごとの (入口のノード, 出口のノード)。"""
@@ -542,7 +611,7 @@ class MapIndexImpl:
         best: tuple[float, MapEdge, list[tuple[float, float]]] | None = None
         for _n, succ, attrs in self.graph.out_edges(node, data=True):
             edge = self._edges_by_id.get(int(attrs["edge_id"]))
-            if edge is None or int(edge.id) in seen or len(edge.polyline) < 2:
+            if edge is None or int(edge.id) in seen or int(edge.id) in self.closed_edges or len(edge.polyline) < 2:
                 continue
             if not (0 <= int(succ) < self._reachable_mask.size and self._reachable_mask[int(succ)]):
                 continue

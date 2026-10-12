@@ -375,6 +375,10 @@ p {
   position: absolute;
   left: 50%;
   top: 50%;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: min(80%, 480px);
   transform: translate(-50%, -50%);
   padding: 6px 14px;
   border-radius: var(--m3-shape-md);
@@ -396,20 +400,27 @@ p {
   background: color-mix(in srgb, #e5322b 92%, transparent);
 }
 
-.intersection-status {
+.intersection-status,
+.lane-change-status {
   display: inline-flex;
   flex-direction: column;
   gap: 3px;
   white-space: normal;
 }
-.intersection-status-detail {
+.intersection-status-detail,
+.lane-change-status-detail {
   font-size: 10px;
   font-weight: 400;
 }
-.app-hud .intersection-status--stop {
+.lane-change-status {
+  max-width: min(70vw, 480px);
+}
+.app-hud .intersection-status--stop,
+.app-hud .lane-change-status--stop {
   color: var(--m3-error);
 }
-.app-hud .intersection-status--warn {
+.app-hud .intersection-status--warn,
+.app-hud .lane-change-status--warn {
   color: var(--m3-warning);
 }
 

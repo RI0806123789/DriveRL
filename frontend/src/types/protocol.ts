@@ -158,6 +158,8 @@ export interface MapEdge {
   /** メートル。道路メッシュの全幅 */
   width: number
   oneway: boolean
+  /** 車線変更の規制。省略・null は規制不明で変更を許可しない */
+  laneChangeAllowed?: boolean | null
   /** m/s */
   speedLimit: number
   /** [x, y] の列。始点 = u、終点 = v */
@@ -274,6 +276,8 @@ export interface VehicleState {
   assist?: AssistKind
   /** 交差点の進入判断。対象の交差点が無いときは省略し、前回値を保持しない */
   intersection?: IntersectionDecision
+  /** 車線変更・復帰の判断。対象が無いときは省略し、前回値を保持しない */
+  laneChange?: LaneChangeDecision
   /** V2X でこの車がメッセージを受け取った相手（近い順）。いなければ省略 */
   v2xConnectedIds?: number[]
   /** 階層型の方策がいま選んでいる意図（protocol.md 2.3）。方策が運転していない車は省略 */
@@ -302,6 +306,10 @@ export type AssistKind =
   | 'intersection_stop'
   | 'intersection_exit'
   | 'intersection_visibility'
+  | 'lane_change'
+  | 'lane_wait'
+  | 'lane_return'
+  | 'road_closed'
 
 /** 交差点の進入判断と、その根拠・操作への反映（protocol.md 2.3）。 */
 export interface IntersectionDecision {
@@ -312,6 +320,25 @@ export interface IntersectionDecision {
   waitingSeconds: number
   gapSeconds: number | null
   imposed: boolean
+}
+
+/** 車線変更・復帰の判断と、車間・運動量・操作への反映（protocol.md 2.3）。 */
+export interface LaneChangeDecision {
+  state: 'waiting' | 'changing' | 'passing' | 'returning' | 'complete' | 'blocked' | 'rerouting'
+  reason: '' | 'gap' | 'visibility' | 'regulation' | 'unknown_regulation' | 'traffic' | 'blocked' | 'no_detour' | 'obstacle'
+  source: 'camera' | 'background' | 'road_event'
+  /** 車線変更の向き。-1=右 / +1=左 / 0=変更なし。turnSignal とは符号が逆 */
+  direction: -1 | 0 | 1
+  imposed: boolean
+  /** 変更先の前後車との最小車間 [m]。比較対象が無い・推定できない場合は null */
+  minGap: number | null
+  /** 変更先の後続車に要求する減速度 [m/s²] */
+  rearDecel: number
+  /** 横加速度 [m/s²] */
+  lateralAccel: number
+  /** 横方向のジャーク [m/s³] */
+  lateralJerk: number
+  completed: number
 }
 
 /** 周囲カメラのキー。**バックエンドの `percep/types.py` の CAMERA_RIG と同じ値** */
@@ -641,6 +668,20 @@ export type TaxiPhase = 'idle' | 'approaching' | 'waiting' | 'riding' | 'arrived
 
 /** 配車中の車の走り方（`contracts.TAXI_DRIVE_MODES`）。AI コンシェルジュが切り替える */
 export type TaxiDriveMode = 'normal' | 'hurry' | 'comfort'
+
+/** AIコンシェルジュへ渡す停車理由（POST /api/taxi/concierge の situation.stopReason）。 */
+export type TaxiStopReason =
+  | 'moving'
+  | 'signal'
+  | 'pedestrian'
+  | 'lead_vehicle'
+  | 'safety'
+  | 'lane_change'
+  | 'road_closed'
+  | 'boarding'
+  | 'arrived'
+  | 'stopped'
+  | 'idle'
 
 /** その段階で車に乗っているか。**`arrived` も乗ったまま**（降車は alight_taxi で確定する） */
 export function isRidingPhase(phase: TaxiPhase): boolean {

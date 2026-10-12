@@ -238,6 +238,7 @@ class SafetySupervisor:
     def __init__(self) -> None:
         self._state = [_SlotSafety() for _ in range(config.MAX_VEHICLES)]
         self.commands = [SafetyCommand() for _ in range(config.MAX_VEHICLES)]
+        self._lane_managed: frozenset[int] = frozenset()
 
     def _release(self, slot: int) -> None:
         """安全ギミックを掛けなくなった車の介入を解く。経路の差し替えは `_evaluate_slot` が通し番号で見る。"""
@@ -266,8 +267,10 @@ class SafetySupervisor:
         ages: dict[int, dict[str, float]],
         rear_free: dict[int, np.ndarray],
         occlusion: dict[int, OcclusionResult] | None = None,
+        lane_managed: frozenset[int] = frozenset(),
     ) -> None:
         """認識結果から介入の指示を作り直し、介入の根拠になった検出に危険度を付ける。"""
+        self._lane_managed = lane_managed
         for result in front.values():
             for det in result.detections:
                 det.hazard = None
@@ -306,6 +309,8 @@ class SafetySupervisor:
         if self._state[slot].route_serial != serial:
             self._state[slot] = _SlotSafety(route_serial=serial)
         st = self._state[slot]
+        if slot in self._lane_managed and int(world.fleet.gear[slot]) >= 0:
+            st.mode = _MODE_DRIVE
         self._update_tracks(world, slot, now, cams)
         if st.mode == _MODE_CHECK:
             return self._check(world, slot, now, cams, rear_free)
@@ -350,6 +355,7 @@ class SafetySupervisor:
             demand.extend((REAR_CAMERA.key, LEFT_CAMERA.key, RIGHT_CAMERA.key))
             if (
                 now - st.stuck_since >= STUCK_SEC
+                and slot not in self._lane_managed
                 and now >= st.retry_at
                 and st.attempts < MAX_ATTEMPTS
             ):

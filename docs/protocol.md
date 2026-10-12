@@ -106,6 +106,7 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
       "lanes": 2,
       "width": 7.0,            // メートル。道路メッシュの全幅
       "oneway": false,
+      "laneChangeAllowed": null, // true=変更許可、false=禁止。省略・null=規制不明で変更を許可しない
       "speedLimit": 13.9,      // m/s
       "polyline": [[12.3, -45.6], [30.1, -40.2]]   // [x, y] の列。始点=u、終点=v
     }
@@ -250,6 +251,18 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
         "waitingSeconds": 2.45,
         "gapSeconds": 1.2,
         "imposed": true
+      },
+      "laneChange": {        // 車線変更・復帰の判断。対象が無いときは省略（前回値を保持しない）
+        "state": "waiting",
+        "reason": "gap",
+        "source": "camera",
+        "direction": -1,
+        "imposed": false,
+        "minGap": 8.5,
+        "rearDecel": 1.2,
+        "lateralAccel": 0.0,
+        "lateralJerk": 0.0,
+        "completed": 0
       },
       "v2xConnectedIds": [2, 5],  // V2X でメッセージを受け取った相手（近い順）。いなければ省略
       "currentOption": "CRUISE",  // 階層型の方策がいま選んでいる意図（下の表）。方策が運転していない車は省略
@@ -487,6 +500,10 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
 | `intersection_stop` | 交差点の一時停止を完了するまで進入を抑えている |
 | `intersection_exit` | 出口が塞がっているので、交差点内へ進入しない |
 | `intersection_visibility` | 交錯区間のカメラ情報が不足・古い、または見通しが悪いため進入を抑えている |
+| `lane_change` | 安全を確認した同方向の隣車線へ移動している |
+| `lane_wait` | 車間・見通し・通行規制などを確認し、車線変更の手前で待っている |
+| `lane_return` | 障害物を車体全体で通過し、元の車線へ戻っている |
+| `road_closed` | 全車線閉鎖に対して、迂回または安全な待機を適用している |
 
 介入するのは**経路追従で走っている車**（実用モードの全車・配車中の車）と、`safetyAssist`（2.5）が
 true のときの学習中の車だけ。判断は検出枠と推定距離から行い、報酬と終了条件は従来どおり真値で決まる。
@@ -510,6 +527,30 @@ true のときの学習中の車だけ。判断は検出枠と推定距離から
 
 画面は判断の状態・理由・待機時間・根拠・操作介入の有無を表示する。
 `intersection` は `frameBuffer` から読む。20Hz の frame を zustand へ入れない。
+
+**`laneChange`（車線変更・復帰の判断）**
+
+回避・変更待ち・閉鎖への対応を判断した車に載る任意の欄。省略時は前回値を保持しない。
+`source: "camera"` の前後車間・障害物・見通しはカメラ結果に基づく。
+道路の車線数・方向・変更規制はナビの情報であり、規制不明の区間を変更可能とは扱わない。
+`imposed: false` は判定だけで、方策の操作を引き受けた成績と区別する。
+
+| 欄 | 意味 |
+|---|---|
+| `state` | `waiting`=変更待ち、`changing`=変更中、`passing`=障害物を通過中、`returning`=元の車線へ復帰中、`complete`=回避完了、`blocked`=通過不可、`rerouting`=迂回経路へ変更 |
+| `reason` | `""`=理由なし、`gap`=前後車間、`visibility`=カメラ情報・見通し不足、`regulation`=変更禁止、`unknown_regulation`=変更規制不明、`traffic`=信号待ち・渋滞、`blocked`=全車線閉塞、`no_detour`=迂回路なし、`obstacle`=回避対象の障害物 |
+| `source` | `camera`=走行車のカメラ判断、`background`=背景交通の真値判断、`road_event`=既知の道路閉鎖規制。背景交通の真値を学習車へ混ぜない |
+| `direction` | 変更する向き。`-1`=右、`+1`=左、`0`=変更なし。既存の `turnSignal` は `-1`=左、`+1`=右で、符号が逆 |
+| `imposed` | このステップで判断を操作に実際に反映したか |
+| `minGap` | 変更先の前後車との最小車間 [m]。比較対象なし・推定不能は `null` |
+| `rearDecel` | 変更先の後続車に要求する減速度 [m/s²] |
+| `lateralAccel` | 横加速度 [m/s²] |
+| `lateralJerk` | 横方向のジャーク [m/s³] |
+| `completed` | この車のエピソード内で回避・復帰を完了した累計回数 |
+
+判断の状態・理由・根拠・介入有無と運動量をHUDと4分割で表示する。
+HUDは250msごとに `frameBuffer` から採取し、4分割は既存のフレーム参照を使う。
+回避・復帰・迂回後の経路は既存の `vehicles[].route` 差分で配信し、取得されるまで差分を維持する。
 
 表示名（「信号機：赤」「速度標識：30km/h」など）は転送量を減らすため送られてこない。
 組み立て規則は `backend/app/percep/types.py` の `Detection.label` にあり、
@@ -1169,6 +1210,8 @@ Optuna が入っていない・いまの重みに NaN / Inf がある、のど�
 指定方向の認識を足す。**66・75・79・87 次元の重みは入力を 0 で足して読み込める**。
 交差点の進入判断（`frame.vehicles[].intersection` と `assist` の `intersection_*`）は任意の欄・表示の追加なので 3 のまま据え置く。
 古いクライアントは `intersection` を無視し、知らない介入を表示しない。観測の次元・行動空間・モデルの形式は変えない。
+車線変更・復帰の判断（`frame.vehicles[].laneChange` と `assist` の `lane_change`・`lane_wait`・`lane_return`・`road_closed`）も
+任意の欄・表示の追加なので3のまま据え置く。古いクライアントは追加の欄・介入を無視できる。観測111次元・行動空間・モデル形式は維持する。
 
 不正なメッセージには `error` (`INVALID_MESSAGE`) を返し、接続は維持する。
 
@@ -1366,7 +1409,8 @@ TorchScript・torch.export（`.pt2`）・Keras 形式を渡した場合は、そ
 - **Gemini が呼べるツールは 3 つだけ**: `set_driving_mode(mode)`・`request_emergency_stop()`（`cancel_taxi` の `halt` と同じ）・
   `explain_status()`。信号・制限速度・車間を緩めるツールは無いので、「赤信号でも進んで」と頼まれても安全の判定
   （`constrain_accel`）は変わらない。走り方が変えるのは経路追従自身のアクセルと、前走車・歩行者の手前に**足す**余裕だけ
-- `stopReason`: `moving` / `signal` / `pedestrian` / `lead_vehicle` / `safety` / `boarding` / `arrived` / `stopped` / `idle`
+- `stopReason`: `moving` / `signal` / `pedestrian` / `lead_vehicle` / `safety` / `lane_change` / `road_closed` / `boarding` / `arrived` / `stopped` / `idle`。
+  `lane_change` は車線変更先の安全確認・空き待ち、`road_closed` は道路閉鎖による迂回・待機を表す。
 - `rideId` は `taxi.rideId` を送り、状況取得時に一致しなければ `409`。省略時は取得した状況の配車へ操作を束縛する。
   操作の適用直前にも照合し、終了・新規配車・モード変更後の古い操作を捨てる。迎車の引き継ぎでは同じ ID を維持する。
   フロントは配車 ID の変更・モード変更で会話と問い合わせ世代を初期化し、旧応答による履歴・pending の更新を捨てる。

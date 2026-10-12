@@ -122,7 +122,7 @@ class TestQuickReply:
         assert reply.calls == []
 
     def test_every_stop_reason_has_a_sentence(self) -> None:
-        for reason in ("moving", "signal", "pedestrian", "lead_vehicle", "safety", "boarding", "arrived", "stopped", "idle"):
+        for reason in ("moving", "signal", "pedestrian", "lead_vehicle", "safety", "lane_change", "road_closed", "boarding", "arrived", "stopped", "idle"):
             text = concierge.explain_text({"stopReason": reason})
             assert text.endswith("。")
             if reason != "stopped":
