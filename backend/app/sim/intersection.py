@@ -42,6 +42,7 @@ class _Actor:
     movement: tuple[int, int, int] | None = None
     history: tuple[tuple[float, float, float], ...] = ()
     heading: float | None = None
+    radius: float = 0.9
 
     def position(self, now: float) -> tuple[float, float]:
         """短い遮蔽の間だけ位置を外挿する。"""
@@ -180,11 +181,13 @@ class IntersectionSupervisor:
         self, world: World, slot: int, state: _State, now: float,
         front: PerceptionResult | None, surround: dict[str, PerceptionResult],
         ages: dict[str, float], poses: dict[str, tuple[float, float, float]],
+        classes: tuple[DetClass, ...] = (DetClass.VEHICLE, DetClass.PEDESTRIAN, DetClass.STOP_SIGN),
     ) -> None:
         """同じ古い画像を速度測定に使い直さず、撮影時の自車姿勢で追跡する。"""
         fleet = world.fleet
         current = (float(fleet.x[slot]), float(fleet.y[slot]), float(fleet.heading[slot]))
         samples: list[tuple[DetClass, float, float, float, frozenset[str]]] = []
+        radii: list[tuple[float, float, float]] = []
         for camera in CAMERA_RIG:
             result = front if camera.key == "front" else surround.get(camera.key)
             age = 0.0 if camera.key == "front" else ages.get(camera.key, math.inf)
@@ -196,12 +199,15 @@ class IntersectionSupervisor:
             px, py, heading = current if camera.key == "front" else poses.get(camera.key, current)
             ch, sh = math.cos(heading), math.sin(heading)
             for detection in result.detections:
-                if detection.confidence < 0.35 or detection.cls not in (DetClass.VEHICLE, DetClass.PEDESTRIAN, DetClass.STOP_SIGN):
+                if detection.confidence < 0.35 or detection.cls not in classes:
                     continue
                 fx, fy, distance = local_xy(detection, camera)
                 if not all(math.isfinite(v) for v in (fx, fy, distance)) or distance > 75.0:
                     continue
                 x, y = px + ch * fx - sh * fy, py + sh * fx + ch * fy
+                if detection.cls == DetClass.OBSTACLE:
+                    radius = max(0.3, min(6.0, (detection.x1 - detection.x0) * camera.width * distance / (2.0 * camera.focal_px)))
+                    radii.append((x, y, radius))
                 if detection.cls == DetClass.STOP_SIGN:
                     if camera.key == "front" and fx > 0.0 and abs(fy) <= 8.0:
                         route = world.slots[slot]
@@ -222,6 +228,8 @@ class IntersectionSupervisor:
             candidates = [(math.hypot(x - a.position(stamp)[0], y - a.position(stamp)[1]), i) for i, a in enumerate(previous) if i not in used and a.cls == cls and stamp >= a.at]
             distance, index = min(candidates, default=(math.inf, -1))
             actor = _Actor(cls, x, y, stamp)
+            if cls == DetClass.OBSTACLE:
+                actor.radius = min(radii, key=lambda r: math.hypot(x - r[0], y - r[1]))[2]
             actor.history = ((stamp, x, y),)
             if index >= 0 and distance < 4.0 + 15.0 * max(0.0, stamp - previous[index].at):
                 old = previous[index]

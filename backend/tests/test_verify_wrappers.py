@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from app.map.loader import CACHE_VERSION, cache_path_for
+from app.map.loader import COMPATIBLE_CACHE_VERSIONS, cache_path_for
 from app.map.presets import get_preset, list_presets
 
 from .conftest import BACKEND_DIR
@@ -41,6 +41,7 @@ PLANS: dict[str, Plan] = {
     "verify_hierarchical_policy.py": Plan(),
     "verify_occlusion.py": Plan(),
     "verify_intersection_priority.py": Plan(),
+    "verify_lane_change.py": Plan(),
     "verify_publish_routes.py": Plan(maps=("ginza",)),
     "verify_signal_phases.py": Plan(maps=ALL_PRESETS, per_preset=True, fast_presets=SMALL_PRESETS),
     "verify_route_start.py": Plan(maps=ALL_PRESETS, per_preset=True),
@@ -73,7 +74,7 @@ def _stale_maps(presets: tuple[str, ...]) -> list[str]:
                 head = _VERSION_HEAD.match(fp.read(64))
         except OSError:
             head = None
-        if head is None or int(head.group(1)) != CACHE_VERSION:
+        if head is None or int(head.group(1)) not in COMPATIBLE_CACHE_VERSIONS:
             stale.append(preset_id)
     return stale
 

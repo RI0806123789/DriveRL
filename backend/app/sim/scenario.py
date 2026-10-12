@@ -230,7 +230,7 @@ class ScenarioTraffic:
 
     def prepare(self, env: SimulationEnv, *, initial: bool = False) -> bool:
         """台数は指定時刻で切り替え、新しく出る背景車の道路を重みで選ぶ。"""
-        changed = False
+        changed = self.sync_closures(env)
         attempts = 0
         count = self.scenario.traffic_count(env.sim_time)
         for i, slot in enumerate(np.flatnonzero(self.mask)):
@@ -254,9 +254,26 @@ class ScenarioTraffic:
             env.world.project_all()
         return changed
 
+    def sync_closures(self, env: SimulationEnv) -> bool:
+        """再スポーンの前に、開始・終了した全幅閉鎖だけを探索へ反映する。"""
+        closed = frozenset(
+            int(edge.id) for event, edge in self.events
+            if event.kind == "closure" and event.start_sec <= env.sim_time < event.start_sec + event.duration_sec
+        )
+        return env.map_index.set_closed_edges(closed)
+
     def spawn(self, env: SimulationEnv, slot: int) -> bool:
         if self.roads:
-            edge = self.roads[int(self.rng.choice(len(self.roads), p=self.weights))]
+            if env.map_index.closed_edges:
+                available = np.array([i for i, edge in enumerate(self.roads) if edge.id not in env.map_index.closed_edges], dtype=np.int64)
+                weights = self.weights[available]
+                if not weights.size or float(weights.sum()) <= 0.0:
+                    warn_once("scenario.closed_spawn", "指定道路が通行止めのため背景車の出現を待っています")
+                    env.world.deactivate(slot)
+                    return False
+                edge = self.roads[int(self.rng.choice(available, p=weights / weights.sum()))]
+            else:
+                edge = self.roads[int(self.rng.choice(len(self.roads), p=self.weights))]
             x, y, tx, ty = self.road_point(edge, float(self.rng.uniform(0.15, 0.85)))
             why = env.world.activate_at(slot, (x, y), clearance_m=config.VEHICLE_LENGTH * 4, heading=math.atan2(ty, tx))
             if why is not None:

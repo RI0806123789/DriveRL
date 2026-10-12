@@ -6,8 +6,9 @@ import { frameBuffer } from '../store/frameBuffer'
 import { useSimStore } from '../store/simStore'
 import { OptionBadge } from '../panel/OptionBadge'
 import { IntersectionStatus } from '../panel/IntersectionStatus'
-import type { IntersectionDecision } from '../types/protocol'
-import { intersectionSummary } from './assistLabels'
+import { LaneChangeStatus } from '../panel/LaneChangeStatus'
+import type { IntersectionDecision, LaneChangeDecision } from '../types/protocol'
+import { intersectionSummary, laneChangeSummary } from './assistLabels'
 
 interface HudState {
   tick: number
@@ -20,6 +21,7 @@ interface HudState {
   /** 追跡中の車が選んでいる意図。追跡していない・意図が無ければ空 */
   option: string
   intersection: IntersectionDecision | undefined
+  laneChange: LaneChangeDecision | undefined
 }
 
 const EMPTY_HUD: HudState = {
@@ -32,6 +34,7 @@ const EMPTY_HUD: HudState = {
   notice: '',
   option: '',
   intersection: undefined,
+  laneChange: undefined,
 }
 
 /** 要求倍速に対してこの割合を下回ったら「追いつけていない」と見なす */
@@ -40,6 +43,7 @@ const SPEED_SHORTFALL_RATIO = 0.9
 /** 表示に使う桁だけを並べた署名。これが同じなら再レンダリングしても見た目は変わらない */
 function hudSignature(h: HudState): string {
   const intersection = intersectionSummary(h.intersection)
+  const laneChange = laneChangeSummary(h.laneChange)
   return [
     h.tick,
     h.simTime.toFixed(1),
@@ -51,6 +55,8 @@ function hudSignature(h: HudState): string {
     h.option,
     intersection?.text ?? '',
     intersection?.detail ?? '',
+    laneChange?.text ?? '',
+    laneChange?.detail ?? '',
   ].join('|')
 }
 
@@ -95,6 +101,7 @@ export function StageHud() {
         notice: currentCameraNotice(),
         option: tracked?.currentOption ?? '',
         intersection: tracked?.intersection,
+        laneChange: tracked?.laneChange,
       }
       const sig = hudSignature(next)
       if (sig === lastSignature.current) return
@@ -126,6 +133,11 @@ export function StageHud() {
       {hud.intersection && (
         <div className="app-hud-item">
           <IntersectionStatus decision={hud.intersection} />
+        </div>
+      )}
+      {hud.laneChange && (
+        <div className="app-hud-item">
+          <LaneChangeStatus decision={hud.laneChange} />
         </div>
       )}
       <div className="app-hud-item">

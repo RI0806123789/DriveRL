@@ -70,6 +70,7 @@ class MapEdge:
     speed_limit: float
     polyline: list[tuple[float, float]]
     length: float
+    lane_change_allowed: bool | None = None
 
 
 @dataclass
@@ -97,6 +98,20 @@ class RouteLeg:
     #: 経路の始点から測った、この辺の車線に入る弧長と出る弧長 [m]（交差点のつなぎは含まない）
     start_arc: float
     end_arc: float
+
+
+@dataclass(frozen=True)
+class LaneCorridor:
+    """同方向2車線の直線区間と、現経路から隣車線へ移るための横方向の幅。"""
+
+    edge_id: int
+    lane_index: int
+    lane_width: float
+    neighbor_offset: float
+    begin_arc: float
+    end_arc: float
+    allowed: bool
+    reason: str
 
 
 @dataclass(frozen=True)
@@ -229,6 +244,7 @@ class MapData:
                     "lanes": e.lanes,
                     "width": round(e.width, 2),
                     "oneway": e.oneway,
+                    "laneChangeAllowed": e.lane_change_allowed,
                     "speedLimit": round(e.speed_limit, 2),
                     "polyline": [[round(px, 3), round(py, 3)] for px, py in e.polyline],
                 }
@@ -308,6 +324,12 @@ class MapIndex(Protocol):
 
     data: MapData
     occupancy: OccupancyGrid
+    closed_edges: frozenset[int]
+    closure_generation: int
+
+    def set_closed_edges(self, edge_ids: frozenset[int]) -> bool:
+        """同じ物理道路の逆方向も閉鎖し、変更があった場合に世代を進めてTrueを返す。"""
+        ...
 
     def is_intersection(self, node_id: int) -> bool:
         """3 方向以上に道がつながるノードか。"""
@@ -344,6 +366,12 @@ class MapIndex(Protocol):
         lead: RoadLead | None = None,
     ) -> tuple[list[tuple[float, float]], list[RouteLeg]]:
         """左側通行の車線に沿った走行経路と、それが通る辺の列を返す。`lead` があれば車の位置から道なりに始める。"""
+        ...
+
+    def lane_corridor(
+        self, points: Sequence[tuple[float, float]], legs: Sequence[RouteLeg], arc: float,
+    ) -> LaneCorridor | None:
+        """現在弧長にある同方向2車線の直線区間と変更規制を返し、対象外ではNoneにする。"""
         ...
 
     def road_lead(
@@ -593,6 +621,36 @@ class IntersectionDecision:
 
 
 @dataclass
+class LaneChangeDecision:
+    """車線変更・復帰の判断と、車間・運動量・操作への反映。"""
+
+    state: str = "waiting"
+    reason: str = ""
+    source: str = "camera"
+    direction: int = 0
+    imposed: bool = False
+    min_gap: float = math.inf
+    rear_decel: float = 0.0
+    lateral_accel: float = 0.0
+    lateral_jerk: float = 0.0
+    completed: int = 0
+
+    def to_wire(self) -> dict[str, Any]:
+        return {
+            "state": self.state,
+            "reason": self.reason,
+            "source": self.source,
+            "direction": int(self.direction),
+            "imposed": self.imposed,
+            "minGap": round(self.min_gap, 3) if math.isfinite(self.min_gap) else None,
+            "rearDecel": round(self.rear_decel, 3),
+            "lateralAccel": round(self.lateral_accel, 3),
+            "lateralJerk": round(self.lateral_jerk, 3),
+            "completed": int(self.completed),
+        }
+
+
+@dataclass
 class VehicleSnapshot:
     id: int
     active: bool
@@ -624,6 +682,7 @@ class VehicleSnapshot:
     #: 階層型の方策がいま選んでいる意図（`config.HRL_OPTIONS` の名前）。方策が運転していない車は空
     current_option: str = ""
     intersection: IntersectionDecision | None = None
+    lane_change: LaneChangeDecision | None = None
     route: list[tuple[float, float]] | None = None
 
     def to_wire(self) -> dict[str, Any]:
@@ -655,6 +714,8 @@ class VehicleSnapshot:
             out["currentOption"] = self.current_option
         if self.intersection is not None:
             out["intersection"] = self.intersection.to_wire()
+        if self.lane_change is not None:
+            out["laneChange"] = self.lane_change.to_wire()
         if self.route is not None:
             out["route"] = [[round(px, 2), round(py, 2)] for px, py in self.route]
         return out

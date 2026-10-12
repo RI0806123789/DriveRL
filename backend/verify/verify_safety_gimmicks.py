@@ -9,6 +9,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from unittest.mock import Mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 for st in (sys.stdout, sys.stderr):
@@ -190,6 +191,7 @@ def verify_stuck(index, preset: str, trials: int, *, behind: bool) -> None:
     aeb_stops = 0
     for trial in range(trials):
         env = make_env(index, seed=11 + trial)
+        env.lane_changes.evaluate = Mock()
         env.autopilot_all = True
         slot = 0
         start = straight_start(env, slot, PYLON_AHEAD_M + 40.0)

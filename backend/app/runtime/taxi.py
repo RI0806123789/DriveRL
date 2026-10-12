@@ -117,6 +117,7 @@ class TaxiService:
         self._speed_avg = max(0.0, float(world.fleet.speed[slot]))
         self._handovers = 0
         self._tried = {slot}
+        self._route_serial = int(world.route_serial[slot])
         self._reset_stall()
         self.status = TaxiStatus(
             phase=TAXI_PHASE_APPROACHING,
@@ -159,6 +160,7 @@ class TaxiService:
         world.set_stop_target(slot, float(world.route_total[slot]))
 
         self.status.phase = TAXI_PHASE_RIDING
+        self._route_serial = int(world.route_serial[slot])
         self.status.route = [(float(px), float(py)) for px, py in route.points]
         self.status.route_revision += 1
         self.status.message = "目的地へ向かっています"
@@ -264,6 +266,11 @@ class TaxiService:
             self._failed(env, "事故が起きたため", halt=True)
             return
 
+        serial = int(world.route_serial[slot])
+        if serial != getattr(self, "_route_serial", serial):
+            self._route_serial = serial
+            self.status.route = [(float(px), float(py)) for px, py in world.slots[slot].route]
+            self.status.route_revision += 1
         self._refresh_progress(env)
 
         if self._stalled(env):
@@ -325,6 +332,7 @@ class TaxiService:
         self.status.phase = TAXI_PHASE_APPROACHING
         self.status.vehicle_id = slot
         self.status.route = [(float(px), float(py)) for px, py in route.points]
+        self._route_serial = int(world.route_serial[slot])
         self.status.route_revision += 1
         self.status.message = (
             f"車両 #{old} が来られなくなったため、車両 #{slot} が向かっています"

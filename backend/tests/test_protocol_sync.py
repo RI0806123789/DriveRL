@@ -15,6 +15,7 @@ from app.contracts import (
     AutotuneTrial,
     FrameSnapshot,
     IntersectionDecision,
+    LaneChangeDecision,
     MapData,
     MetricsSnapshot,
     ObstacleSnapshot,
@@ -61,6 +62,7 @@ def _vehicle() -> VehicleSnapshot:
         v2x_links=[2],
         current_option="STOP",
         intersection=IntersectionDecision(node_id=1, state="waiting", reason="oncoming"),
+        lane_change=LaneChangeDecision(state="waiting", reason="gap"),
         route=[(0.0, 0.0), (1.0, 1.0)],
     )
 
@@ -124,6 +126,7 @@ class TestWireKeysMatchProtocolTs:
         assert_wire_matches(wire, ts_interfaces["FrameMessage"], added_by_sender=TYPE_ONLY)
         assert_wire_matches(wire["vehicles"][0], ts_interfaces["VehicleState"])
         assert_wire_matches(wire["vehicles"][0]["intersection"], ts_interfaces["IntersectionDecision"])
+        assert_wire_matches(wire["vehicles"][0]["laneChange"], ts_interfaces["LaneChangeDecision"])
         assert_wire_matches(wire["obstacles"][0], ts_interfaces["ObstacleState"])
         assert_wire_matches(wire["pedestrians"][0], ts_interfaces["NpcPedestrianState"])
         view = wire["occlusion"]["0"]

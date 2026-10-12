@@ -34,7 +34,10 @@ class MapLoadError(RuntimeError):
     """OSM の取得・正規化に失敗したときに投げる。"""
 
 
-CACHE_VERSION = 12
+CACHE_VERSION = 13
+COMPATIBLE_CACHE_VERSIONS = frozenset((12, CACHE_VERSION))
+
+_LANE_CHANGE_TAGS = ("change:lanes", "change:lanes:forward", "change:lanes:backward")
 
 _SIGN_TAGS = (
     "traffic_sign", "traffic_sign:forward", "traffic_sign:backward",
@@ -137,7 +140,7 @@ def _fetch_and_normalize(preset: MapPreset) -> MapData:
     ox.settings.use_cache = True
     ox.settings.cache_folder = str(config.OSMNX_CACHE_DIR)
     ox.settings.useful_tags_node = list(dict.fromkeys(ox.settings.useful_tags_node + list(_SIGN_TAGS)))
-    ox.settings.useful_tags_way = list(dict.fromkeys(ox.settings.useful_tags_way + list(_SIGN_TAGS) + list(_PARKING_SIGN_TAGS)))
+    ox.settings.useful_tags_way = list(dict.fromkeys(ox.settings.useful_tags_way + list(_SIGN_TAGS) + list(_PARKING_SIGN_TAGS) + list(_LANE_CHANGE_TAGS)))
 
     center = (preset.center_lat, preset.center_lon)
     dist = float(preset.radius_m)
@@ -163,7 +166,7 @@ def _fetch_and_normalize(preset: MapPreset) -> MapData:
         graph = ox.simplify_graph(
             graph,
             node_attrs_include=["driverl_sign"],
-            edge_attrs_differ=["traffic_sign", "traffic_sign:forward", "traffic_sign:backward", "traffic_sign:direction", "stop:direction", "direction", *_PARKING_SIGN_TAGS],
+            edge_attrs_differ=["traffic_sign", "traffic_sign:forward", "traffic_sign:backward", "traffic_sign:direction", "stop:direction", "direction", *_PARKING_SIGN_TAGS, *_LANE_CHANGE_TAGS],
         )
         projected = ox.project_graph(graph)
         crs = projected.graph["crs"]
@@ -296,6 +299,7 @@ def _collect_edges(
             "lanes": total_lanes,
             "width": float(width),
             "oneway": bool(oneway),
+            "lane_change_allowed": _parse_lane_change(row, bool(oneway), total_lanes),
             "speed_limit": float(speed_limit),
             "polyline": polyline,
             "length": float(length),
@@ -304,6 +308,38 @@ def _collect_edges(
         }
 
     return best
+
+
+def _parse_lane_change(tags: Any, oneway: bool, lanes: int) -> bool | None:
+    """2車線間の両方向の変更許可が明示された場合だけ許可する。"""
+    if lanes != (2 if oneway else 4):
+        return None
+
+    def direction(value: Any) -> bool | None:
+        values = list(_iter_tag_values(value))
+        if not values:
+            return None
+        parsed: list[bool | None] = []
+        for item in values:
+            tokens = str(item).strip().lower().split("|")
+            if len(tokens) != 2 or any(token not in ("yes", "no", "not_left", "not_right") for token in tokens):
+                parsed.append(None)
+            else:
+                parsed.append(tokens[0] in ("yes", "not_left") and tokens[1] in ("yes", "not_right"))
+        return True if all(value is True for value in parsed) else False if any(value is False for value in parsed) else None
+
+    common = direction(tags.get("change:lanes"))
+    forward = direction(tags.get("change:lanes:forward"))
+    backward = direction(tags.get("change:lanes:backward"))
+    if oneway:
+        direction_tag = "change:lanes:backward" if _tag_is_reversed(tags.get("reversed")) else "change:lanes:forward"
+        directed = backward if direction_tag.endswith("backward") else forward
+        return directed if list(_iter_tag_values(tags.get(direction_tag))) else common
+    if forward is False or backward is False or common is False:
+        return False
+    if forward is True and backward is True:
+        return True
+    return None
 
 
 def _edge_polyline(
@@ -368,6 +404,7 @@ def _renumber(
                 speed_limit=attrs["speed_limit"],
                 polyline=attrs["polyline"],
                 length=attrs["length"],
+                lane_change_allowed=attrs.get("lane_change_allowed"),
             )
         )
     return nodes, edges, remap
@@ -1121,7 +1158,7 @@ def _read_cache(path: Path, preset: MapPreset) -> MapData | None:
 
     if not isinstance(payload, dict):
         return None
-    if payload.get("version") != CACHE_VERSION:
+    if type(payload.get("version")) is not int or payload["version"] not in COMPATIBLE_CACHE_VERSIONS:
         return None
     if payload.get("presetId") != preset.id:
         return None
@@ -1181,6 +1218,7 @@ def _to_cache_dict(data: MapData) -> dict[str, Any]:
                 "lanes": e.lanes,
                 "width": round(e.width, 3),
                 "oneway": e.oneway,
+                "laneChangeAllowed": e.lane_change_allowed,
                 "speedLimit": round(e.speed_limit, 3),
                 "length": round(e.length, 3),
                 "polyline": [[round(px, 3), round(py, 3)] for px, py in e.polyline],
@@ -1252,6 +1290,7 @@ def _from_cache_dict(payload: dict[str, Any], preset: MapPreset) -> MapData:
                 speed_limit=float(e["speedLimit"]),
                 polyline=polyline,
                 length=float(e["length"]),
+                lane_change_allowed=None if payload.get("version") == 12 else _cache_lane_change(e.get("laneChangeAllowed")),
             )
         )
 
@@ -1311,6 +1350,13 @@ def _from_cache_dict(payload: dict[str, Any], preset: MapPreset) -> MapData:
         signals=signals,
         signs=signs,
     )
+
+
+def _cache_lane_change(value: Any) -> bool | None:
+    """規制不明と真偽値だけを保存形式から受け付ける。"""
+    if value is None or type(value) is bool:
+        return value
+    raise ValueError("車線変更規制はtrue / false / nullにしてください")
 
 
 def _close(value: Any, expected: float, tol: float) -> bool:

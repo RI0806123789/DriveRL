@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import math
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
 from typing import Sequence
 
-from app.contracts import MapEdge
+from app.contracts import LaneCorridor, MapEdge, RouteLeg
 
 __all__ = [
     "RouteSegment",
@@ -14,6 +15,7 @@ __all__ = [
     "build_lane_route",
     "lane_count_for_direction",
     "lane_offset_left",
+    "lane_corridors",
 ]
 
 Point = tuple[float, float]
@@ -60,6 +62,79 @@ def lane_offset_left(edge: MapEdge, lane_index: int) -> float:
     lane_width = lane_width_for_direction(edge)
     idx = min(max(int(lane_index), 0), n - 1)
     return edge.width / 2.0 - lane_width * (idx + 0.5)
+
+
+def lane_corridors(
+    points: Sequence[Point], legs: Sequence[RouteLeg], edges: dict[int, MapEdge],
+    junctions: frozenset[int],
+) -> list[LaneCorridor]:
+    """経路が一定の車線中心を通る、直線2車線区間だけを抽出する。"""
+    if len(points) < 2:
+        return []
+    cum = _cumulative(points)
+    out: list[LaneCorridor] = []
+    for leg in legs:
+        edge = edges.get(int(leg.edge_id))
+        if edge is None or edge.lanes != (2 if edge.oneway else 4) or len(edge.polyline) < 2:
+            continue
+        if {int(leg.entry_node), int(leg.exit_node)} != {int(edge.u), int(edge.v)}:
+            continue
+        road = edge.polyline if leg.entry_node == edge.u else edge.polyline[::-1]
+        if edge.oneway and leg.entry_node != edge.u:
+            continue
+        dx, dy = road[-1][0] - road[0][0], road[-1][1] - road[0][1]
+        length = math.hypot(dx, dy)
+        if length <= 1e-6:
+            continue
+        tx, ty = dx / length, dy / length
+        if any(
+            abs(-(px - road[0][0]) * ty + (py - road[0][1]) * tx) > 0.2
+            for px, py in road
+        ):
+            continue
+        if any(
+            ((bx - ax) * tx + (by - ay) * ty) < math.cos(math.radians(5.0)) * math.dist((ax, ay), (bx, by))
+            for (ax, ay), (bx, by) in zip(road[:-1], road[1:])
+        ):
+            continue
+        width = lane_width_for_direction(edge)
+        if width < 2.5:
+            continue
+        begin = max(0.0, float(leg.start_arc))
+        end = min(cum[-1], float(leg.end_arc))
+        if not math.isfinite(begin) or not math.isfinite(end) or begin > end:
+            continue
+        if leg.entry_node in junctions:
+            begin += 5.0
+        if leg.exit_node in junctions:
+            end -= 5.0
+        first, last = bisect_left(cum, begin - 1e-6), bisect_right(cum, end + 1e-6)
+        offsets = (lane_offset_left(edge, 0), lane_offset_left(edge, 1))
+        for lane_index, center in enumerate(offsets):
+            run: list[float] = []
+            for i in range(first, last):
+                px, py = points[i]
+                lateral = -(float(px) - road[0][0]) * ty + (float(py) - road[0][1]) * tx
+                if abs(lateral - center) <= 0.15:
+                    run.append(cum[i])
+                else:
+                    _append_corridor(out, edge, lane_index, width, run)
+                    run = []
+            _append_corridor(out, edge, lane_index, width, run)
+    return sorted(out, key=lambda item: item.begin_arc)
+
+
+def _append_corridor(
+    out: list[LaneCorridor], edge: MapEdge, lane_index: int, width: float, run: list[float],
+) -> None:
+    if len(run) < 2 or run[-1] - run[0] < 1.0:
+        return
+    allowed = edge.lane_change_allowed is True
+    reason = "allowed" if allowed else "regulation" if edge.lane_change_allowed is False else "unknown_regulation"
+    out.append(LaneCorridor(
+        int(edge.id), lane_index, float(width), float(width if lane_index else -width),
+        float(run[0]), float(run[-1]), allowed, reason,
+    ))
 
 
 def _cumulative(points: Sequence[Point]) -> list[float]:

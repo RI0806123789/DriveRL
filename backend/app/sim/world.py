@@ -326,6 +326,9 @@ class World:
 
     def _route_from_lead(self, lead: RoadLead, dst: int) -> Route | None:
         """道なりの出だし `lead` の先を、目的ノード `dst` まで最短経路でつなぐ。"""
+        closed = getattr(self.map_index, "closed_edges", frozenset())
+        if any(edge_id in closed for edge_id in lead.edge_ids):
+            return None
         node_path = self.map_index.shortest_path(
             int(lead.exit_node), int(dst), arrive_heading=float(lead.exit_heading)
         )
@@ -971,6 +974,27 @@ class World:
         if not (0 <= slot < config.MAX_VEHICLES):
             return False
         return self._install_route(slot, route, keep_pose=keep_pose)
+
+    def revise_route(self, slot: int, route: Route) -> bool:
+        """走行中の経路だけを更新し、物理状態とエピソードの採点を維持する。"""
+        state = self.slots[slot]
+        saved = {key: getattr(state, key) for key in ("steps", "violations", "lane_departures", "outside_lane", "speed_violations", "over_speed", "collided", "reached_goal")}
+        stop = float(self.stop_arc[slot])
+        at_goal = math.isfinite(stop) and abs(stop - float(self.route_total[slot])) < 0.5
+        stop_point = (float(np.interp(stop, state.route_cum, state.route[:, 0])), float(np.interp(stop, state.route_cum, state.route[:, 1]))) if math.isfinite(stop) else None
+        collided, reached = bool(self.collided_flags[slot]), bool(self.reached_flags[slot])
+        if not self._install_route(slot, route, keep_pose=True):
+            return False
+        for key, value in saved.items():
+            setattr(state, key, value)
+        self.collided_flags[slot], self.reached_flags[slot] = collided, reached
+        if at_goal:
+            self.stop_arc[slot] = float(self.route_total[slot])
+        elif stop_point is not None:
+            from app.sim.intersection import _project
+
+            self.stop_arc[slot] = _project(state.route, state.route_cum, *stop_point)[0]
+        return True
 
     def set_stop_target(self, slot: int, arc: float) -> None:
         """その弧長で止まらせる（乗降地点）。赤信号と同じ式で速度上限を掛ける。"""
