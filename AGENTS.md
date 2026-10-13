@@ -298,4 +298,3 @@ cd backend
   交差点・曲線・規制不明では変更しない。変更軌道は滑らかな五次多項式風で接続し、隣車線の後続車との車間・減速・横加加速度（RMS 0.8 以下）を担保。
   安全ギミック介入ステップは PPO 学習から除外する（`learn`）。道路全幅閉鎖時は非同期で迂回路を探索（`road_closure.py`）。
   検査は `backend/tests/test_lane_change.py` と `backend/verify/verify_lane_change.py`
-

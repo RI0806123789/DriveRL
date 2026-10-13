@@ -605,6 +605,10 @@ class PPOTrainer:
         self._last_meta = None
         self.scheduler.restart()
         self._drop_pending()
+        self._clear_update_diagnostics()
+
+    def _clear_update_diagnostics(self) -> None:
+        """重みを差し替えたときに前の方策の更新統計を捨てる。"""
         self._last_grad_norms = {}
         self._last_grad_total = 0.0
         self._last_grad_clip_rate = 0.0
@@ -697,6 +701,7 @@ class PPOTrainer:
         self.optimizer = prepared.optimizer
         self._updates = prepared.updates
         self.reset_rollout()
+        self._clear_update_diagnostics()
         self.widened_from = prepared.obs_dim if prepared.obs_dim != self.obs_dim else None
         self.upgraded_flat = prepared.flat
         if prepared.flat:
