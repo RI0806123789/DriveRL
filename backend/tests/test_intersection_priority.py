@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -12,7 +13,7 @@ from app.contracts import IntersectionDecision, SimParams
 from app.map.index import build_map_index
 from app.percep.types import CAMERA_RIG, DetClass, Detection, PerceptionResult
 from app.sim.env import SimulationEnv
-from app.sim.intersection import IntersectionSupervisor
+from app.sim.intersection import IntersectionSupervisor, _Actor, _State, _project
 from app.sim.world import Route, World
 from tests.test_map_intersections import cross_map
 
@@ -392,3 +393,57 @@ def test_snapshot_keeps_intersection_decision_before_next_step_mutates_it() -> N
     vehicle = next(v for v in wire["vehicles"] if v["id"] == 0)
     assert vehicle["intersection"]["imposed"] is True
     assert vehicle["intersection"]["reason"] == "oncoming"
+
+
+@pytest.mark.parametrize("count", [0, 1])
+def test_projection_without_segment(count: int) -> None:
+    points = np.array([(3.0, 4.0)])[:count]
+    cum = np.array([7.0])[:count]
+    arc, distance, heading = _project(points, cum, 6.0, 8.0)
+    assert arc == (7.0 if count else 0.0)
+    assert distance == (5.0 if count else math.inf)
+    assert heading == 0.0
+
+
+@pytest.mark.parametrize("x,y,expected", [
+    (2.0, 7.0, (10.0, 3.0, math.pi / 2)),
+    (5.0, 0.0, (7.0, 4.0, math.pi / 2)),
+    (5.0, 11.0, (12.0, 2.0, math.pi / 2)),
+])
+def test_projection_two_points_and_endpoints(x, y, expected) -> None:
+    points = np.array([(5.0, 4.0), (5.0, 9.0)])
+    assert _project(points, np.array([7.0, 12.0]), x, y) == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("count", [0, 1])
+def test_intersection_without_route_segment_waits(count: int) -> None:
+    world = fixture_world()
+    route = world.slots[0]
+    passage = route.intersections[0]
+    route.route, route.route_cum = route.route[:count], route.route_cum[:count]
+    controller = IntersectionSupervisor()
+    front, surround, ages, poses = camera_views(world, [(DetClass.VEHICLE, 20.0, -1.75)])
+    controller.evaluate(world, 0.0, front, surround, ages, poses, {})
+    decision = controller.decisions[0]
+    assert decision.node_id == passage.node_id
+    assert decision.speed_cap == 0.0 and decision.reason == "visibility"
+    assert decision.state == "waiting"
+
+
+@pytest.mark.parametrize("passed", [False, True])
+@pytest.mark.parametrize("arc_offset", [0.0, 1.0])
+def test_intersection_short_window_uses_last_segment(passed: bool, arc_offset: float) -> None:
+    world = fixture_world()
+    route = world.slots[0]
+    end = float(route.route_cum[-1])
+    passage = replace(route.intersections[0], entry_arc=end - 3.0, exit_arc=end)
+    place(world, 0, end + arc_offset)
+    if passed:
+        passage = replace(passage, entry_arc=1.0, exit_arc=2.0)
+    point = route.route[-1]
+    actor = _Actor(DetClass.PEDESTRIAN, float(point[0]), float(point[1]), 0.0)
+    decision = IntersectionSupervisor()._decide(world, 0, passage, _State(), [actor], 0.0, True, None, {}, None)
+    assert decision.state == "committed"
+    risk = not passed and arc_offset == 0.0
+    assert decision.reason == ("pedestrian" if risk else "")
+    assert decision.speed_cap == (0.0 if risk else math.inf)

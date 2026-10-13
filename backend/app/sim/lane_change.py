@@ -15,6 +15,7 @@ from app.percep.occlusion import RAY_ANGLES
 from app.percep.types import CAMERA_RIG, DetClass, OcclusionResult, PerceptionResult
 from app.sim.intersection import FRESH_SEC, IntersectionSupervisor, _Actor, _State, _project
 from app.sim.signals import stop_speed_limit
+from app.warn import warn_once
 
 if TYPE_CHECKING:
     from app.sim.world import World
@@ -160,7 +161,12 @@ class LaneChangeSupervisor:
         corridor = state.corridor
         lo = max(0, int(np.searchsorted(state.cum, corridor.begin_arc)) - 1)
         hi = min(len(state.cum), int(np.searchsorted(state.cum, corridor.end_arc)) + 2)
+        if hi - lo < 2:
+            lo = max(0, min(lo, len(state.points) - 2))
+            hi = min(len(state.points), lo + 2)
         points, cum = state.points[lo:hi], state.cum[lo:hi]
+        if len(points) < 2:
+            return float(cum[0]) if len(cum) else 0.0, math.inf, 0.0
         arc, _, heading = _project(points, cum, x, y)
         px, py = np.interp(arc, cum, points[:, 0]), np.interp(arc, cum, points[:, 1])
         return arc, -math.sin(heading) * (x - px) + math.cos(heading) * (y - py), heading
@@ -216,6 +222,11 @@ class LaneChangeSupervisor:
     def _evaluate_slot(self, world: World, slot: int, state: _LaneState, actors: list[_Actor], now: float, background: bool, front: PerceptionResult | None, surround: dict[str, PerceptionResult], ages: dict[str, float], occlusion: OcclusionResult | None) -> None:
         fleet = world.fleet
         arc, lateral, road_heading = self._frame(state, float(fleet.x[slot]), float(fleet.y[slot]))
+        if not math.isfinite(lateral):
+            warn_once("lane_change.short_route", "車線変更の経路に線分がないため、安全確認待ちにします。")
+            self.commands[slot] = LaneCommand(speed_cap=0.0)
+            self.decisions[slot] = LaneChangeDecision(reason="visibility", source="background" if background else "camera", completed=state.completed)
+            return
         speed = max(0.0, float(fleet.speed[slot]))
         corridor = state.corridor
         if not state.active:

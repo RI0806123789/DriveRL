@@ -286,3 +286,72 @@ def test_taxi_route_revision_tracks_revised_world_once_without_changing_ride() -
     service.update(env)
     assert service.status.route_revision == 8
     assert service.status.to_wire(include_route=True)["routeRevision"] == 8
+
+
+@pytest.mark.parametrize("length", [0.01, 0.249, 0.25, 0.251, 0.5])
+@pytest.mark.parametrize("heading", [0.0, math.pi / 4, math.pi / 2])
+def test_short_detour_checks_both_endpoints_and_body_width(length, heading, monkeypatch) -> None:
+    world = world_on_route()
+    start = np.array([20.0, 1.625])
+    along = np.array([math.cos(heading), math.sin(heading)])
+    left = np.array([-along[1], along[0]])
+    candidate = Route(np.array([start, start + length * along]), ())
+    monkeypatch.setattr(world, "route_between", lambda *args, **kwargs: candidate)
+    probes = []
+
+    def sample_building(x, y):
+        probes.append(np.column_stack((x, y)))
+        return np.zeros(len(x), dtype=bool)
+
+    monkeypatch.setattr(world.map_index.occupancy, "sample_building", sample_building)
+    assert road_closure._detour(world, tuple(start), tuple(candidate.points[-1]), heading, frozenset()) is candidate
+    assert len(probes) == 3
+    width = road_closure.config.VEHICLE_WIDTH / 2.0 + 0.3
+    for points, side in zip(probes, (-width, 0.0, width)):
+        np.testing.assert_allclose((points - start) @ left, side, atol=1e-7)
+        if length <= 0.25:
+            np.testing.assert_allclose((points - start) @ along, [0.0, length], atol=1e-7)
+
+
+@pytest.mark.parametrize("heading", [0.0, math.pi / 2])
+def test_short_detour_rejects_building_at_endpoint_body_edge(heading, monkeypatch) -> None:
+    world = world_on_route()
+    start = np.array([20.0, 1.625])
+    along = np.array([math.cos(heading), math.sin(heading)])
+    left = np.array([-along[1], along[0]])
+    candidate = Route(np.array([start, start + 0.1 * along]), ())
+    monkeypatch.setattr(world, "route_between", lambda *args, **kwargs: candidate)
+
+    def sample_building(x, y):
+        delta = np.column_stack((x, y)) - start
+        return (delta @ along >= 0.09) & (delta @ left > road_closure.config.VEHICLE_WIDTH / 2.0 + 0.2)
+
+    monkeypatch.setattr(world.map_index.occupancy, "sample_building", sample_building)
+    assert road_closure._detour(world, tuple(start), tuple(candidate.points[-1]), heading, frozenset()) is None
+
+
+@pytest.mark.parametrize("points", [[], [(20.0, 1.625)], [(20.0, 1.625)] * 2,
+                                   [(20.0, 1.625), (math.nan, 1.625)]])
+def test_detour_without_finite_segment_is_rejected(points, monkeypatch) -> None:
+    world = world_on_route()
+    candidate = Route(np.array(points).reshape(-1, 2), ())
+    monkeypatch.setattr(world, "route_between", lambda *args, **kwargs: candidate)
+    assert road_closure._detour(world, (20.0, 1.625), (20.0, 1.625), 0.0, frozenset()) is None
+
+
+def test_short_async_detour_is_installed_without_permanent_failed_search(searches, monkeypatch) -> None:
+    world = world_on_route()
+    close_ahead(world)
+    start = (float(world.fleet.x[0]), float(world.fleet.y[0]))
+    goal = (start[0] + 0.1, start[1])
+    world.slots[0].goal = goal
+    candidate = Route(np.array([start, goal], dtype=np.float32), ())
+    monkeypatch.setattr(world, "route_between", lambda *args, **kwargs: candidate)
+    supervisor = RoadClosureSupervisor()
+    serial = int(world.route_serial[0])
+    supervisor.evaluate(world, frozenset((0,)))
+    assert searches.finish() is candidate
+    assert supervisor.evaluate(world, frozenset((0,))) == (0,)
+    assert int(world.route_serial[0]) == serial + 1
+    assert not supervisor._failed and not supervisor._pending
+    assert supervisor.decisions[0].state == "rerouting"

@@ -35,10 +35,15 @@ def _detour(
 ) -> Route | None:
     """閉鎖辺と車体幅での建物重なりを含む候補を検索側で拒否する。立体の地図では出発・目的地の階を保つ。"""
     route = world.route_between(start, goal, heading=heading, speed=0.0, src_z=start_z, dst_z=goal_z)
-    if route is None or any(leg.edge_id in closed for leg in route.legs):
+    if route is None or len(route.points) < 2 or any(leg.edge_id in closed for leg in route.legs):
         return None
     cum = world._cumulative_length(route.points)
-    marks = np.arange(0.0, float(cum[-1]) + 0.25, 0.5)
+    length = float(cum[-1])
+    if not math.isfinite(length) or length <= 1e-9:
+        return None
+    marks = np.arange(0.0, length + 0.25, 0.5)
+    if len(marks) < 2:
+        marks = np.array([0.0, length])
     points = np.column_stack((np.interp(marks, cum, route.points[:, 0]), np.interp(marks, cum, route.points[:, 1])))
     tangent = np.gradient(points, axis=0)
     norm = np.maximum(np.linalg.norm(tangent, axis=1), 1e-9)
