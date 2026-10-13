@@ -102,6 +102,10 @@ HTTP 側で消すと、時間切れ（504）を返した後にエンジンが読
 `uploads/` を消しても取り戻せます。退避できなかったときは読み込まずに失敗を返します
 （退避の無いまま元の重みを上書きしない）。
 
+ウォームスタートCLI（`backend/warmstart_policy.py`）も、既存のチェックポイントを読み込む前に
+`shared_policy.pt.before-warmstart` へ退避します。読み込めないファイルも退避し、退避に失敗したら回帰・保存を実行しません。
+新規ファイルには退避を作らず、`--no-backup` を明示したときだけ退避を省略します。
+
 `osmnx_cache/` と `map_cache/` は自動削除しません。地図の再取得には
 Overpass API へのアクセスが要るため、意図的に残しています。
 
@@ -140,7 +144,7 @@ GET 以外のリクエストも素通しします。WebSocket（`/ws`）も Serv
 
 | 手口 | 対策 |
 |---|---|
-| 開いた別のサイトが `ws://127.0.0.1:8000/ws` へ接続する（CORS は WebSocket に効かない）| WebSocket は `Origin` が同じオリジンか、開発用の `http://localhost:5173` / `http://127.0.0.1:5173` のときだけ受け付ける（それ以外は 1008 で閉じる）|
+| 開いた別のサイトが `ws://127.0.0.1:8000/ws` へ接続する（CORS は WebSocket に効かない）| WebSocket は `Origin` が同じオリジンか、開発用の `http://localhost:5173` / `http://127.0.0.1:5173` / `http://[::1]:5173` のときだけ受け付ける（唯一の出典: `backend/app/config.py` の `CORS_ORIGINS`。それ以外は 1008 で閉じる）|
 | 別のサイトがフォームで `POST /api/import` などを送る | 状態を変える HTTP（POST / PUT / PATCH / DELETE）も同じ条件で `Origin` を確かめ、違えば 403 |
 | DNS リバインディング（攻撃者のドメイン名を 127.0.0.1 に向け直し、同じオリジンに見せかける）| `Host` が IP アドレスそのもの・`localhost`・`DRIVERL_ALLOWED_HOSTS` に書いた名前でなければ、HTTP も WebSocket も 403 |
 
