@@ -43,6 +43,7 @@ PLANS: dict[str, Plan] = {
     "verify_occlusion.py": Plan(),
     "verify_intersection_priority.py": Plan(),
     "verify_lane_change.py": Plan(),
+    "verify_elevation.py": Plan(),
     "verify_publish_routes.py": Plan(maps=("ginza",)),
     "verify_signal_phases.py": Plan(maps=ALL_PRESETS, per_preset=True, fast_presets=SMALL_PRESETS),
     "verify_route_start.py": Plan(maps=ALL_PRESETS, per_preset=True),

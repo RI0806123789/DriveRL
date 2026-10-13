@@ -333,9 +333,16 @@ class SolidGrids:
 
     def solid(self, x, y, z, building_height: float | None = None) -> np.ndarray:
         """点 (x, y, z) が固体（地面の下・橋桁の中・トンネルの空洞の外の地山。`building_height` があれば建物）の中か。"""
-        z = np.asarray(z, dtype=np.float64)
-        fx = np.clip((np.asarray(x, dtype=np.float64) - self.origin_x) / self.cell, 0.0, self.width - 1.000001)
-        fy = np.clip((np.asarray(y, dtype=np.float64) - self.origin_y) / self.cell, 0.0, self.height - 1.000001)
+        x, y, z = np.broadcast_arrays(
+            np.asarray(x, dtype=np.float64), np.asarray(y, dtype=np.float64), np.asarray(z, dtype=np.float64)
+        )
+        shape = z.shape
+        x, y, z = x.reshape(-1), y.reshape(-1), z.reshape(-1)
+        return self._solid_flat(x, y, z, building_height).reshape(shape)
+
+    def _solid_flat(self, x: np.ndarray, y: np.ndarray, z: np.ndarray, building_height: float | None) -> np.ndarray:
+        fx = np.clip((x - self.origin_x) / self.cell, 0.0, self.width - 1.000001)
+        fy = np.clip((y - self.origin_y) / self.cell, 0.0, self.height - 1.000001)
         ix = fx.astype(np.int64)
         iy = fy.astype(np.int64)
         tx = fx - ix
@@ -353,12 +360,11 @@ class SolidGrids:
         structured = marks != 0
         if structured.any():
             sel = np.flatnonzero(structured)
-            cells = near.reshape(-1)[sel]
-            zs = z.reshape(-1)[sel] if z.shape == near.shape else np.broadcast_to(z, near.shape).reshape(-1)[sel]
+            cells = near[sel]
+            zs = z[sel]
             in_cavity = (zs >= self.cavity_lo.reshape(-1)[cells]) & (zs <= self.cavity_hi.reshape(-1)[cells])
             in_slab = (zs >= self.slab_lo.reshape(-1)[cells]) & (zs <= self.slab_hi.reshape(-1)[cells])
-            flat = out.reshape(-1)
-            flat[sel] = (flat[sel] & ~in_cavity) | in_slab
+            out[sel] = (out[sel] & ~in_cavity) | in_slab
         return out
 
 

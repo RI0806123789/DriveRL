@@ -348,9 +348,11 @@ class World:
         need = LEAD_MIN_M + max(0.0, float(speed)) ** 2 / (2.0 * LEAD_DECEL_MPS2)
         try:
             if self.elevated:
-                if z is None:
-                    z = self._ground_hint(float(x), float(y))
-                return self.map_index.road_lead(float(x), float(y), heading, need, z=float(z))
+                if z is not None:
+                    return self.map_index.road_lead(float(x), float(y), heading, need, z=float(z))
+                # 高さの分からない地点（クリック・徒歩キャラ）は地面に近い路面を選び、無ければ（坑内など）平面で最寄りの道路
+                lead = self.map_index.road_lead(float(x), float(y), heading, need, z=self._ground_hint(float(x), float(y)))
+                return lead if lead is not None else self.map_index.road_lead(float(x), float(y), heading, need)
             return self.map_index.road_lead(float(x), float(y), heading, need)
         except Exception:
             warn_once(

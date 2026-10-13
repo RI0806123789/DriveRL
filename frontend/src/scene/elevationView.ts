@@ -146,8 +146,9 @@ export function surfaceZAt(model: ElevationModel | null, x: number, y: number, h
   if (!model) return 0
   const ground = terrainZ(model.terrain, x, y)
   const want = hint ?? ground
+  // 地面（桁下・坑口の外）も候補として比べる
   let best = ground
-  let bestScore = Infinity
+  let bestScore = Math.abs(ground - want)
   for (const profile of model.profiles.values()) {
     const p = projectOnProfile(profile, x, y)
     if (p.dist > profile.edge.width / 2 + 1) continue

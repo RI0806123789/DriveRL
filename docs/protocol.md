@@ -17,7 +17,9 @@
 - 原点: 選択中プリセットの中心（緯度経度）
 - `x` = 東方向（East）が正
 - `y` = 北方向（North）が正
-- 高さは `z`（ただしシミュレーションは 2D なので車両は常に z=0 平面上）
+- 高さは `z`（地図の原点の地面から上向き [m]）。**平面の地図（`map.elevated` が無い）では常に 0** で、
+  `z` の欄そのものを送らない。立体の地図（2.2 の「高さと立体構造」）では、ノード・信号・標識・車両・歩行者・
+  障害物・経路に `z` が載る
 - 実体は OSMnx が投影した **UTM 座標から中心点の UTM 座標を引いたもの**。
   400m 圏ではスケール歪みは 0.1% 未満なので ENU とみなして扱う。
 
@@ -26,12 +28,17 @@
 - `heading`: ラジアン。**+x 軸（東）から反時計回り**。
 - 進行方向ベクトルは `(cos(heading), sin(heading))`。
 - 値域は正規化せず送る場合があるため、フロント側は `atan2(sin, cos)` で `(-pi, pi]` に畳むこと。
+- 立体の地図では、路面の姿勢 `pitch`（機首上げが正）と `roll`（左が上がるのが正）[rad] も載る。車体の回転は
+  ENU で **R = Rz(heading)·Ry(−pitch)·Rx(roll)**（列が車体の前・左・上）。バックエンドの
+  `map/elevation.py`（`attitude_from_slopes`）・`percep/elevated_view.py`（`body_rotation`）とフロントの
+  `scene/elevationView.ts`（`attitudeAxes`）が同じ式を使う。`pitch` / `roll` は**路面の勾配だけ**で、
+  加減速による車体の沈み込みは含まない（フロントが見た目として足す）
 
 ### 1.3 フロントエンド（Three.js / 右手系 Y-up）への変換
 
 ```
 three.position.x =  enu.x
-three.position.y =  height        // 地面は 0
+three.position.y =  enu.z         // 高さ。平面の地図では 0
 three.position.z = -enu.y         // 符号反転に注意
 ```
 
@@ -62,6 +69,7 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
       "centerLat": 35.6717,
       "centerLon": 139.765,
       "radiusM": 400
+      // "synthetic": true      // 通信せずに作る検証用の合成地図だけ（例: terrain_lab）。省略時は実地図
     }
   ],
   "config": {
@@ -146,6 +154,41 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
 
 - `buildings[].outline` はサーバー側で簡略化（simplify）済み。
 - 建物数が数千件になるため、フロントは **必ずジオメトリをマージして 1 メッシュ**にすること。
+
+**高さと立体構造について（#136。任意欄で、平面の地図では送らない）**
+
+```jsonc
+{
+  "elevated": true,                 // 高さを持つ地図。真のときだけ載る
+  "terrain": {                      // 地面（道路以外も含む）の高さの格子。無ければ道路以外は z=0
+    "originX": -400.0, "originY": -260.0, "cellSize": 2.0,
+    "width": 401, "height": 261,
+    "z": [0.0, 0.0, ...],           // 行（y）優先。セルの中心の高さ [m]。双一次で補間する
+    "source": "synthetic"
+  },
+  "nodes": [ { "id": 0, "x": 12.3, "y": -45.6, "z": 6.5, "ele": 31.2 } ],  // z は elevated のときだけ。ele は OSM の海抜（記録のみ）
+  "edges": [ {
+    "elevation": [0.0, 1.3, ...],  // polyline の頂点ごとの中心線の高さ [m]。省略時は端点の nodes[].z を弧長で結ぶ
+    "crossSlope": -0.06,           // 横断勾配（u→v の左が上がる向きが正の比）。省略時は 0
+    "structure": "bridge",         // ground / bridge / tunnel。省略時は ground
+    "layer": 1,                    // OSM の layer（上下の順序。実測の高さではない）。省略時は 0
+    "elevationSource": "synthetic",// none（不明・平面）/ synthetic / osm_ele。省略時は none
+    "incline": 0.04                // OSM の incline を u→v の勾配の比にした値。記録だけで、高さは作らない
+  } ],
+  "buildings": [ { "baseZ": 2.4 } ],// 足元の高さ [m]。省略時は 0
+  "signals": [ { "z": 6.5 } ],      // 灯器が立つ路面の高さ。elevated のときだけ
+  "signs": [ { "z": 6.5 } ]         // 標識が立つ路面の高さ。elevated のときだけ
+}
+```
+
+- **実地図は高さを取得していない**（標高データの取得元・精度・ライセンス・通信先が未決のため）。キャッシュ版 14 から
+  `structure` / `layer` / `incline` と節点の `ele` を保持するが、`elevationSource` は `none` のままで、車両の物理・
+  擬似カメラ・3D は平面として扱う。`layer` は**上下の順序**なので高さへ換算しない。高さが不明なまま `layer` が
+  分かる地図では、`layer` が違い端点を共有しない辺どうしの車・歩行者を衝突と前走車の判定から外す（実高さは作らない）
+- 合成プリセット `terrain_lab`（`presets[].synthetic`）は高さを明示した検証コースで、坂（最大 10.5%）・片勾配 6% の
+  カーブ・大通りとトンネルの道路をまたぐ高架（橋桁 6.5m・ランプは盛土）・高架から大通りへの接続ランプ・山を抜ける
+  トンネル（約 200m）を持つ。橋桁の厚さ 1.2m・トンネルの内空 5.0m は合成の値で、実地図の寸法としては使わない
+- 立体交差の接続は地図の辺のつながりだけで決まり、平面上の交差からは作らない（高架と下の道路は節点を共有しない）
 
 **信号機について（日本の設置基準に合わせた点）**
 
@@ -266,13 +309,17 @@ mesh.rotation.y = heading         // 追加の符号反転は不要
       },
       "v2xConnectedIds": [2, 5],  // V2X でメッセージを受け取った相手（近い順）。いなければ省略
       "currentOption": "CRUISE",  // 階層型の方策がいま選んでいる意図（下の表）。方策が運転していない車は省略
-      "route": [[x, y], ...]  // 目的地までの経路（省略可。変化時のみ入る場合あり）
+      "route": [[x, y], ...], // 目的地までの経路（省略可。変化時のみ入る場合あり）
+      "routeZ": [0.0, 0.1, ...], // 立体の地図で route を送るときだけ。route の点ごとの路面の高さ [m]
+      "z": 4.2,               // 立体の地図でだけ載る。車体の下端（路面）の高さ [m]
+      "pitch": 0.052,         // 同上。路面のピッチ [rad]（機首上げが正。1.2 を参照）
+      "roll": -0.004          // 同上。路面のロール [rad]（左が上がるのが正）
     }
   ],
   "obstacles": [
-    { "id": 3, "x": 1.0, "y": 2.0, "radius": 0.5 }
+    { "id": 3, "x": 1.0, "y": 2.0, "radius": 0.5 }   // 立体の地図では "z"（置かれた路面の高さ）も載る
   ],
-  "pedestrians": [                // 街を歩く NPC 歩行者。0 人のときは省略される
+  "pedestrians": [                // 街を歩く NPC 歩行者。0 人のときは省略される。立体の地図では "z"（足元の高さ）も載る
     { "id": 0, "x": 12.5, "y": -3.2, "heading": 1.57, "stride": 2.41, "crossing": false }
   ],
   "weather": {                    // いま効いている天候（weatherAuto の間はサーバーが決める）
@@ -1022,9 +1069,9 @@ HUDは250msごとに `frameBuffer` から採取し、4分割は既存のフレ�
 ```jsonc
 { "type": "load_map",     "presetId": "ginza" }
 { "type": "set_params",   "params": { "simSpeed": 2 } }       // 部分更新。渡したキーのみ反映。範囲外は丸めて反映し、INVALID_MESSAGE も返す
-{ "type": "spawn_vehicle","x": 10.0, "y": -20.0 }             // 通常運転では標準シナリオが台数を管理するため拒否する
+{ "type": "spawn_vehicle","x": 10.0, "y": -20.0 }             // 通常運転では標準シナリオが台数を管理するため拒否する。立体の地図では任意の "z"（クリックした路面の高さ）で上下どちらの道路かを選ぶ
 { "type": "despawn_vehicle", "id": 2 }                       // 通常運転では同じ理由で拒否する
-{ "type": "add_obstacle", "x": 10.0, "y": -20.0, "radius": 0.5 }
+{ "type": "add_obstacle", "x": 10.0, "y": -20.0, "radius": 0.5 }  // 立体の地図では任意の "z" で置く路面を選ぶ。省略時は地面に近い路面
 { "type": "remove_obstacle", "id": 3 }
 { "type": "clear_obstacles" }
 { "type": "set_render_paused", "paused": true }               // 描画のみ停止。学習は継続
@@ -1179,6 +1226,9 @@ Optuna が入っていない・いまの重みに NaN / Inf がある、のど�
   「止まるが迎えに行く先が決まらない」のどちらかになる。
 
 `protocolVersion` は **3** である。モデル書き出しを GET から JSON の POST へ変更したため上げた（#113）。
+高低差・立体道路（#136）で足した欄（`map.elevated` / `terrain` と各要素の `z` など、`frame` の `z` / `pitch` / `roll` /
+`routeZ`、`spawn_vehicle` / `add_obstacle` の `z`、`presets[].synthetic`）はすべて任意欄で、平面の地図では送らない。
+古いクライアントは無視でき、新しいクライアントは欄が無ければ平面として描くので、版は上げていない。
 
 2 へ上げた経緯: `taxi` を足したときは 1 のままでよかった
 （新しいメッセージ型と増えたキーは、クライアントが無視できる）が、NPC 歩行者の導入で

@@ -281,7 +281,8 @@ class MapIndexImpl:
             np.asarray(self._edge_tree.query(point, predicate="dwithin", distance=LEAD_SEARCH_RADIUS_M))
         ).ravel()
         want = ground if z_hint is None else float(z_hint)
-        best: tuple[float, float] | None = None
+        # 地面（桁下・坑口の外）も候補に入れる（フロントの `elevationView.surfaceZAt` と同じ選び方）
+        best: tuple[float, float] | None = (abs(ground - want), ground)
         for i in idx:
             edge_id = int(self._edge_line_ids[int(i)])
             surf = self.surface.edges.get(edge_id)
@@ -293,7 +294,7 @@ class MapIndexImpl:
             score = abs(float(z[0]) - want)
             if best is None or score < best[0]:
                 best = (score, float(z[0]))
-        return ground if best is None else best[1]
+        return best[1]
 
     def _build_occupancy(self, data: MapData) -> OccupancyGrid:
         """建物レイヤと道路レイヤをラスタ化した占有グリッドを作る。"""
