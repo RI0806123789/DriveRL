@@ -7,6 +7,7 @@ import * as THREE from 'three'
 import { useSimStore } from '../store/simStore'
 import { isRidingPhase } from '../types/protocol'
 import { usePalette } from './usePalette'
+import { elevationOf, surfaceZAt } from './elevationView'
 
 /** 柱の高さ [m]。 */
 const PILLAR_HEIGHT = 10
@@ -67,8 +68,10 @@ export function TaxiMarkers() {
     ring.visible = visible
     if (!visible || target === null) return
     const t = performance.now() * 0.0022
-    pillar.position.set(target[0], 0, -target[1])
-    ring.position.set(target[0], 0.08, -target[1])
+    // 立体の地図では、乗降地点（地面に近い路面）の高さに立てる
+    const ground = surfaceZAt(elevationOf(useSimStore.getState().map), target[0], target[1])
+    pillar.position.set(target[0], ground, -target[1])
+    ring.position.set(target[0], ground + 0.08, -target[1])
     ring.scale.setScalar(1 + 0.08 * Math.sin(t))
   })
 

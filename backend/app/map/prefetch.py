@@ -62,7 +62,8 @@ def main(argv: list[str] | None = None) -> int:
                 continue
             targets.append(preset)
     else:
-        targets = list_presets()
+        # 合成の地図は通信せずにその場で作るので、先読みするものが無い
+        targets = [p for p in list_presets() if not p.synthetic]
 
     if not targets:
         print("[エラー] 対象プリセットがありません。")

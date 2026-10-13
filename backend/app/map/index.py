@@ -34,6 +34,7 @@ __all__ = ["MapIndexImpl", "build_map_index"]
 
 from app.map.lanes import RouteSegment, build_lane_route, lane_corridors
 from app.map.intersections import IntersectionGeometry
+from app.map.elevation import LEVEL_GAP_M, RoadSurface, SolidGrids
 from app.warn import warn_once
 
 logger = logging.getLogger("autoware_sim")
@@ -51,6 +52,8 @@ LEAD_SEARCH_RADIUS_M = 25.0
 LEAD_CENTER_WEIGHT = 0.1
 #: 道路を選ぶとき、向きのずれ 1rad を距離何 m ぶんとみなすか
 LEAD_ANGLE_WEIGHT_M = 10.0
+#: 立体の地図で道路を選ぶとき、路面の高さのずれ 1m を中心線からの距離に換算した重み [m]
+LEAD_LEVEL_WEIGHT_M = 10.0
 #: 交差点を「まっすぐ抜けられる」とみなす向きのずれ [rad]
 LEAD_STRAIGHT_RAD = math.radians(35.0)
 #: まっすぐ抜ける道をたどる上限
@@ -89,6 +92,9 @@ class MapIndexImpl:
         }
 
         self._edges_by_id: dict[int, MapEdge] = {e.id: e for e in data.edges}
+        #: 路面の高さ。平面の地図では `elevated` が偽で、従来の 2 次元の処理だけを通る
+        self.surface = RoadSurface(data)
+        self.elevated = self.surface.elevated
         self.closed_edges: frozenset[int] = frozenset()
         self.closure_generation = 0
         self._physical_edges = self._physical_edge_aliases(data.edges)
@@ -116,6 +122,8 @@ class MapIndexImpl:
         self._edge_tree = shapely.STRtree(self._edge_lines) if self._edge_lines else None
 
         self._building_polys: list[Polygon] = []
+        #: `_building_polys` と同じ並びの (足元の高さ, 屋上の高さ)
+        self._building_span: list[tuple[float, float]] = []
         for b in data.buildings:
             if len(b.outline) < 3:
                 continue
@@ -125,6 +133,7 @@ class MapIndexImpl:
                 if poly.is_empty or poly.geom_type not in ("Polygon", "MultiPolygon"):
                     continue
             self._building_polys.append(poly)
+            self._building_span.append((float(b.base_z), float(b.base_z) + float(b.height)))
         self._building_tree = (
             shapely.STRtree(self._building_polys) if self._building_polys else None
         )
@@ -212,6 +221,10 @@ class MapIndexImpl:
             pairs = self._building_tree.query(lines, predicate="intersects")
             if pairs.shape[1] == 0:
                 return {}
+            if self.elevated:
+                pairs = pairs[:, self._edges_overlap_buildings(pairs)]
+                if pairs.shape[1] == 0:
+                    return {}
             parts = shapely.intersection(lines[pairs[0]], polys[pairs[1]])
             inside = np.zeros(len(self._edge_lines), dtype=np.float64)
             np.add.at(inside, pairs[0], shapely.length(parts))
@@ -225,6 +238,63 @@ class MapIndexImpl:
             int(self._edge_line_ids[i]): float(inside[i])
             for i in np.flatnonzero(inside >= BUILDING_OVERLAP_MIN_M)
         }
+
+    def _edges_overlap_buildings(self, pairs: np.ndarray) -> np.ndarray:
+        """(辺の添字, 建物の添字) の組のうち、辺の高さの範囲が建物の高さの範囲と重なるもの。"""
+        keep = np.ones(pairs.shape[1], dtype=bool)
+        for k in range(pairs.shape[1]):
+            surf = self.surface.edges.get(int(self._edge_line_ids[int(pairs[0, k])]))
+            if surf is None:
+                continue
+            lo, hi = self._building_span[int(pairs[1, k])]
+            keep[k] = float(surf.z.min()) < hi and lo < float(surf.z.max()) + config.VEHICLE_HEIGHT
+        return keep
+
+    def solid_grids(self) -> SolidGrids | None:
+        """擬似カメラと見通しが使う固体判定グリッド。平面の地図では None。"""
+        grids = self.surface.grids()
+        if grids is not None and grids.building is None:
+            occ = self.occupancy.building
+            # 占有グリッドと同じ原点・セルなら、建物も同じ添字で引けるよう持たせる
+            if occ.shape == grids.floor.shape and self.occupancy.cell_size == grids.cell and abs(self.occupancy.origin_x - grids.origin_x) < 1e-9 and abs(self.occupancy.origin_y - grids.origin_y) < 1e-9:
+                grids.building = occ
+        return grids
+
+    def route_profile(
+        self, points: np.ndarray, cum: np.ndarray, legs: Sequence[RouteLeg]
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """経路点ごとの (路面の高さ, 進行方向の左が上がる横断勾配, 縦断勾配)。"""
+        return self.surface.route_profile(points, cum, legs)
+
+    def edge_surface_z(self, edge_id: int, x: float, y: float) -> float:
+        """その辺の路面へ射影した点の高さ。"""
+        z, _dist = self.surface.edge_surface_z(int(edge_id), np.array([[float(x), float(y)]]))
+        return float(z[0])
+
+    def surface_z(self, x: float, y: float, z_hint: float | None = None) -> float:
+        """(x, y) にある路面の高さ。道路が重なる所では `z_hint` に近い路面、無ければ地面を選ぶ。"""
+        ground = float(self.surface.ground_z(float(x), float(y)))
+        if not self.elevated or self._edge_tree is None:
+            return ground
+        point = Point(float(x), float(y))
+        idx = np.atleast_1d(
+            np.asarray(self._edge_tree.query(point, predicate="dwithin", distance=LEAD_SEARCH_RADIUS_M))
+        ).ravel()
+        want = ground if z_hint is None else float(z_hint)
+        # 地面（桁下・坑口の外）も候補に入れる（フロントの `elevationView.surfaceZAt` と同じ選び方）
+        best: tuple[float, float] | None = (abs(ground - want), ground)
+        for i in idx:
+            edge_id = int(self._edge_line_ids[int(i)])
+            surf = self.surface.edges.get(edge_id)
+            if surf is None:
+                continue
+            z, dist = self.surface.edge_surface_z(edge_id, np.array([[float(x), float(y)]]))
+            if float(dist[0]) > surf.half_width + 1.0:
+                continue
+            score = abs(float(z[0]) - want)
+            if best is None or score < best[0]:
+                best = (score, float(z[0]))
+        return best[1]
 
     def _build_occupancy(self, data: MapData) -> OccupancyGrid:
         """建物レイヤと道路レイヤをラスタ化した占有グリッドを作る。"""
@@ -523,10 +593,10 @@ class MapIndexImpl:
         return self.route_polyline(path, resample_m), legs
 
     def road_lead(
-        self, x: float, y: float, heading: float | None, min_length_m: float = 0.0
+        self, x: float, y: float, heading: float | None, min_length_m: float = 0.0, z: float | None = None
     ) -> RoadLead | None:
-        """いま走っている道路を進行方向へたどり、最初に曲がれるノードまでの道のりを返す。"""
-        start = self._current_edge(float(x), float(y), heading)
+        """いま走っている道路を進行方向へたどり、最初に曲がれるノードまでの道のりを返す。立体の地図では `z` に近い路面を選ぶ。"""
+        start = self._current_edge(float(x), float(y), heading, z)
         if start is None:
             return None
         edge, points, exit_node, facing, lateral = start
@@ -555,7 +625,7 @@ class MapIndexImpl:
         )
 
     def _current_edge(
-        self, x: float, y: float, heading: float | None
+        self, x: float, y: float, heading: float | None, z: float | None = None
     ) -> tuple[MapEdge, list[tuple[float, float]], int, float, float] | None:
         """車の位置と向きに最も合う道路を選び、車の真横から先の中心線・出口・向き・横位置を返す。"""
         if self._edge_tree is None or not self._edge_lines:
@@ -580,6 +650,12 @@ class MapIndexImpl:
             gap = float(line.distance(point))
             # 道路の幅の内側にいれば、中心線からの距離はほとんど問わない（広い道路の外側の車線）
             outside = max(0.0, gap - float(edge.width) / 2.0) + LEAD_CENTER_WEIGHT * gap
+            if z is not None and self.elevated:
+                # 立体交差では、平面で最も近い道路が上（下）の階のことがある。高さの離れた路面は選ばない
+                dz = abs(self.edge_surface_z(int(edge.id), x, y) - float(z))
+                if dz > LEVEL_GAP_M:
+                    continue
+                outside += LEAD_LEVEL_WEIGHT_M * dz
             for forward in (True,) if edge.oneway else (True, False):
                 facing = tangent if forward else tangent + math.pi
                 turn = 0.0 if heading is None else abs(_wrap(float(heading) - facing))
@@ -794,9 +870,9 @@ class MapIndexImpl:
         return np.minimum(distances, max_d).astype(np.float32)
 
     def collides_with_buildings(
-        self, corners: np.ndarray, mask: np.ndarray
+        self, corners: np.ndarray, mask: np.ndarray, z: np.ndarray | None = None
     ) -> np.ndarray:
-        """複数車両ぶんの外接矩形をまとめて判定する。shape (N,) bool。"""
+        """複数車両ぶんの外接矩形をまとめて判定する。立体の地図で `z`（車体の下端）があれば高さも重ねる。shape (N,) bool。"""
         n = int(corners.shape[0])
         out = np.zeros(n, dtype=bool)
         if self._building_tree is None:
@@ -808,6 +884,10 @@ class MapIndexImpl:
             polys = shapely.polygons(np.asarray(corners[idx], dtype=np.float64))
             pairs = self._building_tree.query(polys, predicate="intersects")
             found = np.asarray(pairs)
+            if found.size and z is not None and self.elevated:
+                base = np.asarray(z, dtype=np.float64)[idx[found[0]]]
+                span = np.asarray(self._building_span, dtype=np.float64)[found[1]]
+                found = found[:, (base < span[:, 1]) & (span[:, 0] < base + config.VEHICLE_HEIGHT)]
             if found.size:
                 out[idx[np.unique(found[0])]] = True
         except Exception:

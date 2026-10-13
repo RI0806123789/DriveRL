@@ -307,8 +307,11 @@ class ScenarioTraffic:
                 center_x, center_y = x + ty * min(float(edge.width) * 0.25, 1.75), y - tx * min(float(edge.width) * 0.25, 1.75)
                 positions = [(center_x - ty * t, center_y + tx * t, radius) for t in np.linspace(-width / 2 + radius, width / 2 - radius, count)]
             ids = []
+            surface = getattr(env.world.map_index, "edge_surface_z", None) if env.world.elevated else None
             for px, py, radius in positions:
-                obstacle_id = env.world.add_obstacle(px, py, radius)
+                # 立体の地図では、その道路（橋桁・坑内）の路面に置く
+                level = float(surface(int(edge.id), px, py)) if surface is not None else None
+                obstacle_id = env.world.add_obstacle(px, py, radius, z=level)
                 if obstacle_id is None:
                     warn_once("scenario.event_capacity", "道路イベントの障害物が上限に達しました")
                     break

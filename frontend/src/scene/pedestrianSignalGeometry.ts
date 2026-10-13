@@ -45,7 +45,7 @@ export interface PedestrianLampSlot {
 export interface PedestrianSignalResult {
   lamps: PedestrianLampSlot[]
   /** 灯器ごとの位置と向き。支柱と筐体はこれを instancedMesh の行列にする */
-  placements: Array<{ x: number; z: number; facing: number; signalIndex: number }>
+  placements: Array<{ x: number; z: number; facing: number; signalIndex: number; ground: number }>
 }
 
 /** 支柱の高さ [m]。灯器の上端まで伸ばす */
@@ -68,6 +68,7 @@ export function buildPedestrianSignalPlacement(
     const leftX = -sin
     const leftY = cos
     const offset = sg.roadWidth / 2 + PED_SIDE_MARGIN
+    const ground = sg.z ?? 0
 
     for (const side of [-1, 1] as const) {
       const enuX = baseX + leftX * offset * side
@@ -77,7 +78,7 @@ export function buildPedestrianSignalPlacement(
       // 渡ってくる人に正対する。左端（side=+1）の灯器は右を向く
       const facing = sg.heading - (Math.PI / 2) * side
 
-      placements.push({ x, z, facing, signalIndex: si })
+      placements.push({ x, z, facing, signalIndex: si, ground })
 
       const frontX = Math.cos(facing)
       const frontZ = -Math.sin(facing)
@@ -86,7 +87,7 @@ export function buildPedestrianSignalPlacement(
         lamps.push({
           position: new THREE.Vector3(
             x + frontX * (PED_HOUSING_D / 2),
-            PED_MOUNT_HEIGHT + dy,
+            ground + PED_MOUNT_HEIGHT + dy,
             z + frontZ * (PED_HOUSING_D / 2),
           ),
           facing,

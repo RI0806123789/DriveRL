@@ -103,7 +103,7 @@ export function NavScreen() {
     if (!ok) return
 
     // 画面は車体に固定する（カメラと同じく、車内のものは車体に貼り付く。傾きも車体と同じ）
-    composeVehicleMatrix(scratch.transform, pose.x, pose.y, pose.heading, scratch.base)
+    composeVehicleMatrix(scratch.transform, pose.x, pose.y, pose.heading, scratch.base, pose.z, pose.pitch, pose.roll)
     const tilt = tiltOf(target)
     composeTiltMatrix(tilt.pitch, tilt.roll, scratch.tilt)
     composeBodyMatrix(scratch.base, scratch.tilt, scratch.body)

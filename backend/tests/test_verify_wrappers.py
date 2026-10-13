@@ -20,8 +20,9 @@ _VERSION_HEAD = re.compile(r'^\{"version":(\d+),')
 
 VERIFY_DIR = BACKEND_DIR / "verify"
 SCRIPTS = sorted(p.name for p in VERIFY_DIR.glob("verify_*.py"))
-ALL_PRESETS = tuple(p.id for p in list_presets())
-SMALL_PRESETS = tuple(p.id for p in list_presets() if p.radius_m <= LARGE_MAP_RADIUS_M)
+# 合成の地図（通信せずに作る検証コース）は実地図の検証に混ぜない。専用の verify_elevation.py で回す
+ALL_PRESETS = tuple(p.id for p in list_presets() if not p.synthetic)
+SMALL_PRESETS = tuple(p.id for p in list_presets() if not p.synthetic and p.radius_m <= LARGE_MAP_RADIUS_M)
 
 
 @dataclass(frozen=True)
@@ -42,6 +43,7 @@ PLANS: dict[str, Plan] = {
     "verify_occlusion.py": Plan(),
     "verify_intersection_priority.py": Plan(),
     "verify_lane_change.py": Plan(),
+    "verify_elevation.py": Plan(),
     "verify_publish_routes.py": Plan(maps=("ginza",)),
     "verify_signal_phases.py": Plan(maps=ALL_PRESETS, per_preset=True, fast_presets=SMALL_PRESETS),
     "verify_route_start.py": Plan(maps=ALL_PRESETS, per_preset=True),
@@ -68,7 +70,10 @@ def _stale_maps(presets: tuple[str, ...]) -> list[str]:
     """キャッシュが無いか版が古いプリセット（読むと Overpass から取り直しになる）。"""
     stale: list[str] = []
     for preset_id in presets:
-        path = cache_path_for(get_preset(preset_id))
+        preset = get_preset(preset_id)
+        if preset is not None and preset.synthetic:
+            continue
+        path = cache_path_for(preset)
         try:
             with path.open("r", encoding="utf-8") as fp:
                 head = _VERSION_HEAD.match(fp.read(64))

@@ -462,11 +462,11 @@ export function Vehicles({ maxVehicles, castShadow }: VehiclesProps) {
 
       // 傾き。**補間済みの速度**から加速度を出して均す（指令の throttle は 20Hz の段差なので使わない）
       if (pose.teleported) resetTilt(tilt, pose.speed)
-      else if (!paused) stepTilt(tilt, pose.speed, pose.steer, delta)
+      else if (!paused) stepTilt(tilt, pose.speed, pose.steer, delta, pose.pitch, pose.roll)
       vehicleTilt.pitch[id] = tilt.pitch
       vehicleTilt.roll[id] = tilt.roll
 
-      composeVehicleMatrix(scratch.transform, pose.x, pose.y, pose.heading, scratch.base)
+      composeVehicleMatrix(scratch.transform, pose.x, pose.y, pose.heading, scratch.base, pose.z, pose.pitch, pose.roll)
       composeTiltMatrix(tilt.pitch, tilt.roll, scratch.tilt)
       composeBodyMatrix(scratch.base, scratch.tilt, scratch.body)
 

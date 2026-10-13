@@ -17,6 +17,8 @@ export interface MapPreset {
   centerLat: number
   centerLon: number
   radiusM: number
+  /** 通信せずに作る検証用の合成地図（高さを明示した立体コースなど）。真のときだけ載る */
+  synthetic?: boolean
 }
 
 /** サーバー側の固定設定（起動後に変わらない） */
@@ -146,7 +148,17 @@ export interface MapNode {
   id: number
   x: number
   y: number
+  /** 高さ [m]（地図の原点の地面から上向き）。立体の地図（`MapMessage.elevated`）でだけ載る */
+  z?: number
+  /** OSM の ele（海抜 [m]）。まばらにしか無いので記録だけで、路面の高さには使わない */
+  ele?: number
 }
+
+/** 道路構造の種類。省略時は ground */
+export type RoadStructure = 'ground' | 'bridge' | 'tunnel'
+
+/** 高さの出典。none は不明で平面（z=0）として扱う */
+export type ElevationSource = 'none' | 'synthetic' | 'osm_ele'
 
 export interface MapEdge {
   id: number
@@ -164,6 +176,30 @@ export interface MapEdge {
   speedLimit: number
   /** [x, y] の列。始点 = u、終点 = v */
   polyline: Vec2[]
+  /** polyline の頂点ごとの中心線の高さ [m]。省略時は端点の MapNode.z を線形に結ぶ */
+  elevation?: number[]
+  /** 横断勾配（u→v の進行方向の左が上がる向きを正とする勾配の比）。省略時は 0 */
+  crossSlope?: number
+  /** 道路構造。省略時は ground */
+  structure?: RoadStructure
+  /** OSM の layer（上下の順序で、実測の高さではない）。省略時は 0 */
+  layer?: number
+  /** 高さの出典。省略時は none（不明） */
+  elevationSource?: ElevationSource
+  /** OSM の incline を u→v の向きの勾配の比にした値。記録だけで、高さは作らない */
+  incline?: number
+}
+
+/** 地面の高さの格子（2.2）。セルの中心の高さを持ち、双一次で補間する */
+export interface TerrainGrid {
+  originX: number
+  originY: number
+  cellSize: number
+  width: number
+  height: number
+  /** 行（y）優先で並べた高さ [m]。長さ width * height */
+  z: number[]
+  source: ElevationSource
 }
 
 export interface MapBuilding {
@@ -172,6 +208,8 @@ export interface MapBuilding {
   height: number
   /** 外周（閉じない。最後の点と最初の点は別）。CCW 保証なし */
   outline: Vec2[]
+  /** 足元の高さ [m]。省略時は 0 */
+  baseZ?: number
 }
 
 /** 交通信号機（車両用）。OSM の highway=traffic_signals から作られる。 */
@@ -190,6 +228,8 @@ export interface MapSignal {
   roadWidth: number
   /** OSM タグ由来・シミュレーターの補完・出典不明。 */
   source?: 'osm' | 'synthetic' | 'unknown'
+  /** 灯器が立つ路面の高さ [m]。立体の地図でだけ載る */
+  z?: number
 }
 
 export type SignKind = 'speed_limit' | 'stop' | 'crosswalk' | 'one_way' | 'mandatory_direction' | 'no_parking' | 'no_stopping'
@@ -213,6 +253,8 @@ export interface MapSign {
   kind?: SignKind
   /** 標識の矢印が示す許可方向。省略時は straight */
   direction?: SignDirection
+  /** 標識が立つ路面の高さ [m]。立体の地図でだけ載る */
+  z?: number
 }
 
 /** 2.2 map — マップ読込完了時（サイズが大きい・低頻度） */
@@ -228,6 +270,10 @@ export interface MapMessage {
   signals?: MapSignal[]
   /** 道路標識。古いサーバーだと入っていないことがある */
   signs?: MapSign[]
+  /** 高さを持つ地図か。真のときだけ載り、ノード・信号・標識に z、frame の車両に z / pitch / roll が載る */
+  elevated?: boolean
+  /** 地面の高さの格子。無ければ道路以外の地面は z=0 の平面 */
+  terrain?: TerrainGrid
 }
 
 /** 信号の灯色。日本の車両用信号機は青→黄→赤の順に変わる */
@@ -284,6 +330,14 @@ export interface VehicleState {
   currentOption?: DriveOption
   /** 目的地までの経路。変化があったフレームのみ含まれる。省略時は前回値を保持 */
   route?: Vec2[]
+  /** route の点ごとの路面の高さ [m]。立体の地図で route を送るときだけ載る */
+  routeZ?: number[]
+  /** 車体の下端（路面）の高さ [m]。立体の地図でだけ載る */
+  z?: number
+  /** 車体のピッチ [rad]（機首上げが正）。路面の勾配だけで、加減速の沈み込みは含まない */
+  pitch?: number
+  /** 車体のロール [rad]（左が上がるのが正）。路面の横断勾配と縦断勾配から作る */
+  roll?: number
 }
 
 /** 階層型の方策の意図。並びはサーバーの `config.HRL_OPTIONS`（上位方策の出力の添字）と同じ */
@@ -390,6 +444,8 @@ export interface ObstacleState {
   x: number
   y: number
   radius: number
+  /** 置かれた路面の高さ [m]。立体の地図でだけ載る */
+  z?: number
 }
 
 /** 街を歩く NPC 歩行者 1 人（protocol.md 2.3）。 */
@@ -406,6 +462,8 @@ export interface NpcPedestrianState {
   stride: number
   /** 車道を横断中か */
   crossing: boolean
+  /** 足元の高さ [m]。立体の地図でだけ載る */
+  z?: number
 }
 
 /** 画像認識の検出クラス。**バックエンドの `percep.DetClass` と同じ並び**。 */
@@ -861,6 +919,8 @@ export interface SpawnVehicleMessage {
   type: 'spawn_vehicle'
   x: number
   y: number
+  /** 立体の地図でクリックした路面の高さ [m]。道路が重なる所で上下どちらに出すかを決める */
+  z?: number
 }
 
 export interface DespawnVehicleMessage {
@@ -873,6 +933,8 @@ export interface AddObstacleMessage {
   x: number
   y: number
   radius: number
+  /** 立体の地図でクリックした路面の高さ [m]。省略時は地面に近い路面 */
+  z?: number
 }
 
 export interface RemoveObstacleMessage {

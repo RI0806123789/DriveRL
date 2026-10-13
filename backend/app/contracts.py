@@ -24,9 +24,11 @@ class MapPreset:
     center_lon: float
     radius_m: float
     signals_at_all_intersections: bool = True
+    #: 通信せずにコードから作る検証用の地図（`map/synthetic.py`）。キャッシュは作らない
+    synthetic: bool = False
 
     def to_wire(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "id": self.id,
             "name": self.name,
             "description": self.description,
@@ -34,6 +36,9 @@ class MapPreset:
             "centerLon": self.center_lon,
             "radiusM": self.radius_m,
         }
+        if self.synthetic:
+            out["synthetic"] = True
+        return out
 
 
 @dataclass(frozen=True)
@@ -47,6 +52,22 @@ class Bounds:
         return {"minX": self.min_x, "minY": self.min_y, "maxX": self.max_x, "maxY": self.max_y}
 
 
+#: 道路構造の種類（`MapEdge.structure`）
+STRUCTURE_GROUND = "ground"
+STRUCTURE_BRIDGE = "bridge"
+STRUCTURE_TUNNEL = "tunnel"
+ROAD_STRUCTURES = (STRUCTURE_GROUND, STRUCTURE_BRIDGE, STRUCTURE_TUNNEL)
+
+#: 高さの出典（`MapEdge.elevation_source` / `TerrainGrid.source`）。"none" は不明で平面（z=0）として扱う
+ELEVATION_NONE = "none"
+ELEVATION_SYNTHETIC = "synthetic"
+ELEVATION_OSM_ELE = "osm_ele"
+ELEVATION_SOURCES = (ELEVATION_NONE, ELEVATION_SYNTHETIC, ELEVATION_OSM_ELE)
+
+#: 横断勾配（`MapEdge.cross_slope`）の上限。道路構造令の片勾配の最大 10% に余裕を足した値
+MAX_CROSS_SLOPE = 0.12
+
+
 @dataclass
 class MapNode:
     """道路ネットワークの交差点／端点。"""
@@ -55,6 +76,10 @@ class MapNode:
     id: int
     x: float
     y: float
+    #: 高さ [m]（地図の原点の地面からの上向き）。不明なら 0
+    z: float = 0.0
+    #: OSM の ele（海抜 [m]）。付いている節点はまばらなので路面の高さには使わず、記録だけする
+    ele: float | None = None
 
 
 @dataclass
@@ -71,6 +96,56 @@ class MapEdge:
     polyline: list[tuple[float, float]]
     length: float
     lane_change_allowed: bool | None = None
+    #: polyline の頂点ごとの中心線の高さ [m]。None なら端点の `MapNode.z` を線形に結ぶ（両方 0 なら平面）
+    elevation: list[float] | None = None
+    #: 横断勾配（u→v の進行方向の左が上がる向きを正とする勾配の比）。片勾配のみで、路面の拝み勾配は持たない
+    cross_slope: float = 0.0
+    structure: str = STRUCTURE_GROUND
+    #: OSM の layer（上下の順序。実測の高さではない）
+    layer: int = 0
+    elevation_source: str = ELEVATION_NONE
+    #: OSM の incline を u→v の向きの勾配の比へ直した値（記録だけで、高さは作らない）。不明なら None
+    incline: float | None = None
+
+
+@dataclass
+class TerrainGrid:
+    """地面（道路以外も含む）の高さの格子。セルの中心の高さを持ち、双一次で補間する。"""
+
+    origin_x: float
+    origin_y: float
+    cell_size: float
+    width: int
+    height: int
+    #: shape (height, width) float32 [m]
+    z: np.ndarray
+    source: str = ELEVATION_SYNTHETIC
+
+    def sample(self, x: np.ndarray | float, y: np.ndarray | float) -> np.ndarray:
+        """ENU 座標の地面の高さ。格子の外は端のセルの値。"""
+        fx = (np.asarray(x, dtype=np.float64) - self.origin_x) / self.cell_size
+        fy = (np.asarray(y, dtype=np.float64) - self.origin_y) / self.cell_size
+        fx = np.clip(fx, 0.0, self.width - 1.000001)
+        fy = np.clip(fy, 0.0, self.height - 1.000001)
+        ix = fx.astype(np.int64)
+        iy = fy.astype(np.int64)
+        tx = fx - ix
+        ty = fy - iy
+        z = self.z
+        top = z[iy, ix] * (1.0 - tx) + z[iy, ix + 1] * tx
+        bottom = z[iy + 1, ix] * (1.0 - tx) + z[iy + 1, ix + 1] * tx
+        return top * (1.0 - ty) + bottom * ty
+
+    def to_wire(self) -> dict[str, Any]:
+        return {
+            "originX": round(self.origin_x, 3),
+            "originY": round(self.origin_y, 3),
+            "cellSize": round(self.cell_size, 3),
+            "width": int(self.width),
+            "height": int(self.height),
+            "z": [round(float(v), 2) for v in np.asarray(self.z, dtype=np.float64).reshape(-1)],
+            "source": self.source,
+        }
 
 
 @dataclass
@@ -168,6 +243,8 @@ class MapBuilding:
     id: int
     height: float
     outline: list[tuple[float, float]]
+    #: 建物の足元の高さ [m]。不明なら 0（地図の原点の地面）
+    base_z: float = 0.0
 
 
 #: これだけ近い灯器は同じ交差点とみなす [m]。
@@ -196,6 +273,8 @@ class MapSignal:
     #: この灯器が規制する進入路（`MapEdge.id`）。歩行者用の現示もここから引く
     edge_id: int
     source: str = "unknown"
+    #: 灯器が立つ路面の高さ [m]
+    z: float = 0.0
 
 
 @dataclass
@@ -211,6 +290,8 @@ class MapSign:
     speed_limit: float = 0.0
     kind: str = "speed_limit"
     direction: str = "straight"
+    #: 標識が立つ路面の高さ [m]
+    z: float = 0.0
 
 
 @dataclass
@@ -228,64 +309,117 @@ class MapData:
     buildings: list[MapBuilding]
     signals: list[MapSignal] = field(default_factory=list)
     signs: list[MapSign] = field(default_factory=list)
+    #: 地面の高さの格子。None なら道路以外の地面は z=0 の平面
+    terrain: TerrainGrid | None = None
+
+    @property
+    def elevated(self) -> bool:
+        """高さを持つ地図か（地形・辺の高さ・ノードの高さのどれか）。偽なら従来どおり平面として扱う。"""
+        if self.terrain is not None:
+            return True
+        if any(e.elevation is not None for e in self.edges):
+            return True
+        return any(n.z != 0.0 for n in self.nodes)
 
     def to_wire(self) -> dict[str, Any]:
         """docs/protocol.md 2.2 の map メッセージ本体を返す（type は呼び出し側で付与）。"""
-        return {
+        elevated = self.elevated
+        payload: dict[str, Any] = {
             "presetId": self.preset_id,
             "name": self.name,
             "bounds": self.bounds.to_wire(),
-            "nodes": [{"id": n.id, "x": round(n.x, 3), "y": round(n.y, 3)} for n in self.nodes],
-            "edges": [
-                {
-                    "id": e.id,
-                    "u": e.u,
-                    "v": e.v,
-                    "lanes": e.lanes,
-                    "width": round(e.width, 2),
-                    "oneway": e.oneway,
-                    "laneChangeAllowed": e.lane_change_allowed,
-                    "speedLimit": round(e.speed_limit, 2),
-                    "polyline": [[round(px, 3), round(py, 3)] for px, py in e.polyline],
-                }
-                for e in self.edges
-            ],
-            "buildings": [
-                {
-                    "id": b.id,
-                    "height": round(b.height, 2),
-                    "outline": [[round(px, 3), round(py, 3)] for px, py in b.outline],
-                }
-                for b in self.buildings
-            ],
-            "signals": [
-                {
-                    "id": s.id,
-                    "nodeId": s.node_id,
-                    "x": round(s.x, 3),
-                    "y": round(s.y, 3),
-                    "heading": round(s.heading, 4),
-                    "group": s.group,
-                    "roadWidth": round(s.road_width, 2),
-                    "source": s.source,
-                }
-                for s in self.signals
-            ],
-            "signs": [
-                {
-                    "id": sg.id,
-                    "nodeId": sg.node_id,
-                    "edgeId": sg.edge_id,
-                    "x": round(sg.x, 3),
-                    "y": round(sg.y, 3),
-                    "heading": round(sg.heading, 4),
-                    "speedLimit": round(sg.speed_limit, 3),
-                    "kind": sg.kind,
-                    "direction": sg.direction,
-                }
-                for sg in self.signs
-            ],
+            "nodes": [_node_wire(n, elevated) for n in self.nodes],
+            "edges": [_edge_wire(e) for e in self.edges],
+            "buildings": [_building_wire(b) for b in self.buildings],
+            "signals": [_signal_wire(s, elevated) for s in self.signals],
+            "signs": [_sign_wire(sg, elevated) for sg in self.signs],
         }
+        if elevated:
+            payload["elevated"] = True
+        if self.terrain is not None:
+            payload["terrain"] = self.terrain.to_wire()
+        return payload
+
+
+def _node_wire(n: MapNode, elevated: bool) -> dict[str, Any]:
+    out: dict[str, Any] = {"id": n.id, "x": round(n.x, 3), "y": round(n.y, 3)}
+    if elevated:
+        out["z"] = round(n.z, 3)
+    if n.ele is not None:
+        out["ele"] = round(n.ele, 2)
+    return out
+
+
+def _edge_wire(e: MapEdge) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "id": e.id,
+        "u": e.u,
+        "v": e.v,
+        "lanes": e.lanes,
+        "width": round(e.width, 2),
+        "oneway": e.oneway,
+        "laneChangeAllowed": e.lane_change_allowed,
+        "speedLimit": round(e.speed_limit, 2),
+        "polyline": [[round(px, 3), round(py, 3)] for px, py in e.polyline],
+    }
+    # 平面の地図では欄を足さない（金沢の map は 18MB あるので、既定値まで送らない）
+    if e.elevation is not None:
+        out["elevation"] = [round(float(z), 3) for z in e.elevation]
+    if e.cross_slope != 0.0:
+        out["crossSlope"] = round(e.cross_slope, 4)
+    if e.structure != STRUCTURE_GROUND:
+        out["structure"] = e.structure
+    if e.layer != 0:
+        out["layer"] = int(e.layer)
+    if e.elevation_source != ELEVATION_NONE:
+        out["elevationSource"] = e.elevation_source
+    if e.incline is not None:
+        out["incline"] = round(float(e.incline), 4)
+    return out
+
+
+def _building_wire(b: MapBuilding) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "id": b.id,
+        "height": round(b.height, 2),
+        "outline": [[round(px, 3), round(py, 3)] for px, py in b.outline],
+    }
+    if b.base_z != 0.0:
+        out["baseZ"] = round(b.base_z, 3)
+    return out
+
+
+def _signal_wire(s: MapSignal, elevated: bool) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "id": s.id,
+        "nodeId": s.node_id,
+        "x": round(s.x, 3),
+        "y": round(s.y, 3),
+        "heading": round(s.heading, 4),
+        "group": s.group,
+        "roadWidth": round(s.road_width, 2),
+        "source": s.source,
+    }
+    if elevated:
+        out["z"] = round(s.z, 3)
+    return out
+
+
+def _sign_wire(sg: MapSign, elevated: bool) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "id": sg.id,
+        "nodeId": sg.node_id,
+        "edgeId": sg.edge_id,
+        "x": round(sg.x, 3),
+        "y": round(sg.y, 3),
+        "heading": round(sg.heading, 4),
+        "speedLimit": round(sg.speed_limit, 3),
+        "kind": sg.kind,
+        "direction": sg.direction,
+    }
+    if elevated:
+        out["z"] = round(sg.z, 3)
+    return out
 
 
 @dataclass
@@ -684,6 +818,12 @@ class VehicleSnapshot:
     intersection: IntersectionDecision | None = None
     lane_change: LaneChangeDecision | None = None
     route: list[tuple[float, float]] | None = None
+    #: 立体の地図でだけ載せる車体の高さ [m]・ピッチ（機首上げが正）・ロール（左が上がるのが正）[rad]
+    z: float | None = None
+    pitch: float = 0.0
+    roll: float = 0.0
+    #: 立体の地図でだけ載せる、route の点ごとの高さ [m]
+    route_z: list[float] | None = None
 
     def to_wire(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -718,6 +858,12 @@ class VehicleSnapshot:
             out["laneChange"] = self.lane_change.to_wire()
         if self.route is not None:
             out["route"] = [[round(px, 2), round(py, 2)] for px, py in self.route]
+            if self.route_z is not None:
+                out["routeZ"] = [round(float(pz), 2) for pz in self.route_z]
+        if self.z is not None:
+            out["z"] = round(self.z, 3)
+            out["pitch"] = round(self.pitch, 4)
+            out["roll"] = round(self.roll, 4)
         return out
 
 
@@ -727,14 +873,19 @@ class ObstacleSnapshot:
     x: float
     y: float
     radius: float
+    #: 立体の地図でだけ載せる、障害物が置かれた路面の高さ [m]
+    z: float | None = None
 
     def to_wire(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "id": self.id,
             "x": round(self.x, 3),
             "y": round(self.y, 3),
             "radius": self.radius,
         }
+        if self.z is not None:
+            out["z"] = round(self.z, 3)
+        return out
 
 
 @dataclass
@@ -747,9 +898,11 @@ class PedestrianSnapshot:
     heading: float
     stride: float = 0.0
     crossing: bool = False
+    #: 立体の地図でだけ載せる、足元の高さ [m]
+    z: float | None = None
 
     def to_wire(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "id": self.id,
             "x": round(self.x, 2),
             "y": round(self.y, 2),
@@ -757,6 +910,9 @@ class PedestrianSnapshot:
             "stride": round(self.stride, 2),
             "crossing": self.crossing,
         }
+        if self.z is not None:
+            out["z"] = round(self.z, 2)
+        return out
 
 
 @dataclass

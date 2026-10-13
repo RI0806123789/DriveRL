@@ -94,7 +94,7 @@ export function Obstacles({ castShadow }: ObstaclesProps) {
     for (let i = 0; i < n; i++) {
       const o = list[i]
       const r = Math.max(0.15, o.radius)
-      dummy.position.set(o.x, 0, -o.y)
+      dummy.position.set(o.x, o.z ?? 0, -o.y)
 
       dummy.scale.set(r, CONE_HEIGHT, r)
       dummy.updateMatrix()

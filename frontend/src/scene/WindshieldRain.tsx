@@ -211,7 +211,7 @@ export function WindshieldRain() {
     mesh.visible = ok
     if (!ok) return
 
-    composeVehicleMatrix(scratch.transform, pose.x, pose.y, pose.heading, scratch.base)
+    composeVehicleMatrix(scratch.transform, pose.x, pose.y, pose.heading, scratch.base, pose.z, pose.pitch, pose.roll)
     const tilt = tiltOf(target)
     composeTiltMatrix(tilt.pitch, tilt.roll, scratch.tilt)
     composeBodyMatrix(scratch.base, scratch.tilt, mesh.matrix)

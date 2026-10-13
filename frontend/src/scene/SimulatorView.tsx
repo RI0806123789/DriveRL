@@ -1,9 +1,10 @@
 /** 左側のシミュレーター画面（memo 4章）。 */
 
-import { useEffect, useRef } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import * as THREE from 'three'
 import { Buildings } from './Buildings'
+import { ElevationStructures } from './ElevationStructures'
 import { CameraRig } from './CameraRig'
 import { DetectionOverlay } from './DetectionOverlay'
 import { Ground } from './Ground'
@@ -78,6 +79,14 @@ export function SimulatorView() {
   useWatchOcclusion()
 
   const bounds = map?.bounds ?? null
+  // 立体の地図では、平面の地面を地形の最も低い所より下へ敷く（要素が多いのでスプレッドで Math.min に渡さない）
+  const groundBaseY = useMemo(() => {
+    const z = map?.terrain?.z
+    if (!z) return 0
+    let low = 0
+    for (const v of z) if (v < low) low = v
+    return low - 0.2
+  }, [map])
   const extent = shadowExtent(bounds)
   const span = mapSpan(bounds)
   const cx = bounds ? (bounds.minX + bounds.maxX) / 2 : 0
@@ -100,7 +109,13 @@ export function SimulatorView() {
           <SceneLights />
           <SunLight cx={cx} cz={cz} extent={extent} castShadow={view.shadows} />
 
-          <Ground bounds={bounds} showGrid={view.grid} receiveShadow={view.shadows} />
+          <Ground
+            bounds={bounds}
+            showGrid={view.grid}
+            receiveShadow={view.shadows}
+            baseY={groundBaseY}
+          />
+          {map?.elevated && <ElevationStructures castShadow={view.shadows} receiveShadow={view.shadows} />}
 
           {map && view.roads && <RoadNetwork edges={map.edges} receiveShadow={view.shadows} />}
           {map && view.markings && (

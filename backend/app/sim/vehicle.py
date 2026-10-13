@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 
 from app import config
+from app.map.elevation import gravity_components
 from app.sim.dynamics import VehicleDynamics
 
 __all__ = ["VehicleFleet", "wrap_angle"]
@@ -35,7 +36,7 @@ class VehicleFleet:
     __slots__ = (
         "size", "x", "y", "heading", "speed", "steer", "active", "gear",
         "dynamics", "lateral_speed", "yaw_rate", "throttle", "brake",
-        "longitudinal_accel", "lateral_accel",
+        "longitudinal_accel", "lateral_accel", "slope_x", "slope_y",
     )
 
     def __init__(
@@ -58,6 +59,9 @@ class VehicleFleet:
         self.brake = np.zeros(self.size, dtype=np.float32)
         self.longitudinal_accel = np.zeros(self.size, dtype=np.float32)
         self.lateral_accel = np.zeros(self.size, dtype=np.float32)
+        #: 車体の前（機首上げが正）・左（左が上がるのが正）の路面勾配の比。world が経路の高さから入れる。平面では 0
+        self.slope_x = np.zeros(self.size, dtype=np.float32)
+        self.slope_y = np.zeros(self.size, dtype=np.float32)
 
     def set_gear(self, slot: int, gear: int) -> bool:
         """ギアを切り替える。止まっていなければ切り替えず False を返す。"""
@@ -86,8 +90,15 @@ class VehicleFleet:
         max_speed: float,
     ) -> None:
         """全スロットを 1 ステップ進める。指令の正はギアの向きへの加速、負は 0 へ向けた制動。"""
+        sloped = bool(np.any(self.slope_x[self.active] != 0.0) or np.any(self.slope_y[self.active] != 0.0))
         if self.dynamics is not None:
-            self._step_dynamic(accel_cmd, steer_cmd, dt, max_speed)
+            if sloped:
+                self._step_dynamic_sloped(accel_cmd, steer_cmd, dt, max_speed)
+            else:
+                self._step_dynamic(accel_cmd, steer_cmd, dt, max_speed)
+            return
+        if sloped:
+            self._step_kinematic_sloped(accel_cmd, steer_cmd, dt, max_speed)
             return
         accel_cmd = np.clip(
             np.asarray(accel_cmd, dtype=np.float32).reshape(self.size), -1.0, 1.0
@@ -137,6 +148,43 @@ class VehicleFleet:
         self.x = np.where(active, new_x, self.x).astype(np.float32)
         self.y = np.where(active, new_y, self.y).astype(np.float32)
 
+    def _step_kinematic_sloped(
+        self, accel_cmd: np.ndarray, steer_cmd: np.ndarray, dt: float, max_speed: float
+    ) -> None:
+        """運動学モデルに、路面に沿った重力の成分を足して進める。止まっている車は勾配で後退しない（坂道発進の保持）。"""
+        accel_cmd = np.clip(np.asarray(accel_cmd, dtype=np.float64).reshape(self.size), -1.0, 1.0)
+        steer_cmd = np.clip(np.asarray(steer_cmd, dtype=np.float64).reshape(self.size), -1.0, 1.0)
+        dt = float(dt)
+        limit_speed = max(float(max_speed), 0.0)
+        active = self.active
+        g_x, _g_y, _g_n = gravity_components(self.slope_x, self.slope_y)
+        accel = np.where(accel_cmd >= 0.0, accel_cmd * config.MAX_ACCEL, accel_cmd * abs(config.MAX_DECEL))
+        sign = self.gear.astype(np.float64)
+        cap = np.where(self.gear > 0, limit_speed, config.REVERSE_MAX_SPEED)
+        # 後退ギアでは車体の後ろ向きに進むので、前後の重力の成分は向きを裏返して効く
+        magnitude = np.clip(self.speed.astype(np.float64) * sign + (accel + sign * g_x) * dt, 0.0, cap)
+        new_speed = magnitude * sign
+
+        target_steer = steer_cmd * config.MAX_STEER
+        max_delta = config.STEER_RATE * dt
+        new_steer = self.steer + np.clip(target_steer - self.steer, -max_delta, max_delta)
+        steer_limit = np.minimum(
+            np.arctan(config.MAX_LATERAL_ACCEL * config.WHEELBASE / np.maximum(new_speed * new_speed, 1e-3)),
+            config.MAX_STEER,
+        )
+        new_steer = np.clip(new_steer, -steer_limit, steer_limit)
+        new_heading = wrap_angle(self.heading + (new_speed / config.WHEELBASE) * np.tan(new_steer) * dt)
+        # 速度は路面に沿った速さなので、平面へ写すと坂の分だけ短くなる
+        flat = new_speed / np.sqrt(1.0 + self.slope_x.astype(np.float64) ** 2)
+        new_x = self.x + flat * np.cos(new_heading) * dt
+        new_y = self.y + flat * np.sin(new_heading) * dt
+
+        self.steer = np.where(active, new_steer, self.steer).astype(np.float32)
+        self.speed = np.where(active, new_speed, self.speed).astype(np.float32)
+        self.heading = np.where(active, new_heading, self.heading).astype(np.float32)
+        self.x = np.where(active, new_x, self.x).astype(np.float32)
+        self.y = np.where(active, new_y, self.y).astype(np.float32)
+
     def corners(self) -> np.ndarray:
         """車両外形の 4 隅を返す。shape (MAX_VEHICLES, 4, 2) float32。"""
         cos_h = np.cos(self.heading)[:, None]
@@ -157,6 +205,8 @@ class VehicleFleet:
         self.speed[slot] = np.float32(0.0)
         self.steer[slot] = np.float32(0.0)
         self.gear[slot] = np.int8(1)
+        self.slope_x[slot] = np.float32(0.0)
+        self.slope_y[slot] = np.float32(0.0)
         self._reset_dynamics(slot)
 
     def _reset_dynamics(self, slot: int) -> None:
@@ -259,3 +309,111 @@ class VehicleFleet:
             self.yaw_rate[indices] = new_yaw
             self.longitudinal_accel[indices] = (integrated_vx - vx) / h
             self.lateral_accel[indices] = (integrated_vy - vy) / h
+
+    def _step_dynamic_sloped(
+        self, accel_cmd: np.ndarray, steer_cmd: np.ndarray, dt: float, max_speed: float
+    ) -> None:
+        """動的自転車モデルに、路面の勾配による前後・左右の重力の成分と、法線の押し付けの減りを入れて進める。"""
+        parameters = self.dynamics
+        assert parameters is not None
+        if not np.isfinite(dt) or not 0 < dt <= 0.1:
+            raise ValueError("dt は 0 秒超・0.1 秒以下の有限数が必要です")
+        if not np.isfinite(max_speed) or max_speed < 0:
+            raise ValueError("max_speed は有限の非負数が必要です")
+        accel_cmd = np.clip(np.asarray(accel_cmd, dtype=np.float64).reshape(self.size), -1, 1)
+        steer_cmd = np.clip(np.asarray(steer_cmd, dtype=np.float64).reshape(self.size), -1, 1)
+        if not np.all(np.isfinite(accel_cmd)) or not np.all(np.isfinite(steer_cmd)):
+            raise ValueError("操作指令は有限の数値が必要です")
+        indices = np.flatnonzero(self.active)
+        if not indices.size:
+            return
+        count = int(np.ceil(dt / parameters.substep_s))
+        h = float(dt) / count
+        mass = parameters.mass_kg
+        front = parameters.front_axle_m
+        rear = config.WHEELBASE - front
+        g_x, g_y, g_n = gravity_components(self.slope_x[indices], self.slope_y[indices])
+        flat_x = 1.0 / np.sqrt(1.0 + self.slope_x[indices].astype(np.float64) ** 2)
+        mu_g = parameters.friction * g_n
+        sign = self.gear[indices].astype(np.float64)
+        cap = np.where(sign > 0, max_speed, config.REVERSE_MAX_SPEED)
+        throttle_target = np.maximum(accel_cmd[indices], 0)
+        brake_target = np.maximum(-accel_cmd[indices], 0)
+        steer_target = steer_cmd[indices] * config.MAX_STEER
+        throttle_gain = -np.expm1(-h / parameters.throttle_tau) if parameters.throttle_tau else 1.0
+        brake_gain = -np.expm1(-h / parameters.brake_tau) if parameters.brake_tau else 1.0
+        steer_gain = -np.expm1(-h / parameters.steering_tau) if parameters.steering_tau else 1.0
+        x = self.x[indices].astype(np.float64)
+        y = self.y[indices].astype(np.float64)
+        heading = self.heading[indices].astype(np.float64)
+        vx = self.speed[indices].astype(np.float64)
+        vy = self.lateral_speed[indices].astype(np.float64)
+        yaw = self.yaw_rate[indices].astype(np.float64)
+        steer = self.steer[indices].astype(np.float64)
+        throttle = self.throttle[indices].astype(np.float64)
+        brake = self.brake[indices].astype(np.float64)
+        ax_out = np.zeros_like(vx)
+        ay_out = np.zeros_like(vy)
+        for _ in range(count):
+            throttle += throttle_gain * (throttle_target - throttle)
+            brake += brake_gain * (brake_target - brake)
+            steer = steer + np.clip(
+                steer_gain * (steer_target - steer), -config.STEER_RATE * h, config.STEER_RATE * h,
+            )
+            drive = sign * throttle * config.MAX_ACCEL
+            # ブレーキは「このままなら出る速さ」を 0 へ戻す向きに、踏み込みに応じた力まで効く（止まっていれば勾配の分まで支える）
+            coast = vx + h * (drive + g_x)
+            braking = np.minimum(brake * abs(config.MAX_DECEL), np.abs(coast) / h)
+            ax_request = np.clip(drive - np.sign(coast) * braking, -mu_g, mu_g)
+            front_load = np.clip(
+                mass * (g_n * rear - ax_request * parameters.cg_height_m) / config.WHEELBASE,
+                mass * g_n * 0.05, mass * g_n * 0.95,
+            )
+            rear_load = mass * g_n - front_load
+            fx_front = ax_request * front_load / g_n
+            fx_rear = ax_request * rear_load / g_n
+            front_budget = np.sqrt(np.maximum((parameters.friction * front_load) ** 2 - fx_front ** 2, 0))
+            rear_budget = np.sqrt(np.maximum((parameters.friction * rear_load) ** 2 - fx_rear ** 2, 0))
+            slip_speed = np.maximum(np.abs(vx), parameters.low_speed_m_s)
+            slip_front = steer * vx / slip_speed - np.arctan2(vy + front * yaw, slip_speed)
+            slip_rear = -np.arctan2(vy - rear * yaw, slip_speed)
+            fy_front = front_budget * np.tanh(
+                parameters.front_cornering_stiffness * slip_front / np.maximum(front_budget, 1e-6)
+            )
+            fy_rear = rear_budget * np.tanh(
+                parameters.rear_cornering_stiffness * slip_rear / np.maximum(rear_budget, 1e-6)
+            )
+            front_longitudinal = fx_front * np.cos(steer) - fy_front * np.sin(steer)
+            front_lateral = fy_front * np.cos(steer) + fx_front * np.sin(steer)
+            ax_force = (front_longitudinal + fx_rear) / mass + g_x
+            ay_force = (front_lateral + fy_rear) / mass + g_y
+            yaw_dot = (front * front_lateral - rear * fy_rear) / parameters.yaw_inertia_kg_m2
+            new_yaw = yaw + h * yaw_dot
+            rotation = h * new_yaw
+            cos_rotation, sin_rotation = np.cos(rotation), np.sin(rotation)
+            integrated_vx = vx + h * ax_force
+            integrated_vy = vy + h * ay_force
+            magnitude = np.hypot(integrated_vx, integrated_vy)
+            current_cap = np.maximum(cap, np.hypot(vx, vy))
+            scale = np.minimum(1, current_cap / np.maximum(magnitude, 1e-12))
+            integrated_vx *= scale
+            integrated_vy *= scale
+            new_vx = integrated_vx * cos_rotation + integrated_vy * sin_rotation
+            new_vy = -integrated_vx * sin_rotation + integrated_vy * cos_rotation
+            heading = np.arctan2(np.sin(heading + rotation), np.cos(heading + rotation))
+            x += h * (new_vx * flat_x * np.cos(heading) - new_vy * np.sin(heading))
+            y += h * (new_vx * flat_x * np.sin(heading) + new_vy * np.cos(heading))
+            ax_out = (integrated_vx - vx) / h
+            ay_out = (integrated_vy - vy) / h
+            vx, vy, yaw = new_vx, new_vy, new_yaw
+        self.x[indices] = x
+        self.y[indices] = y
+        self.heading[indices] = heading
+        self.speed[indices] = vx
+        self.steer[indices] = steer
+        self.lateral_speed[indices] = vy
+        self.yaw_rate[indices] = yaw
+        self.throttle[indices] = throttle
+        self.brake[indices] = brake
+        self.longitudinal_accel[indices] = ax_out
+        self.lateral_accel[indices] = ay_out

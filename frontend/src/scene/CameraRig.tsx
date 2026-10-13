@@ -15,13 +15,10 @@ import {
   DRIVER_FOLLOW_RATE,
   DRIVER_FOV_DEG,
   FOLLOW_FOLLOW_RATE,
-  driverEye,
-  driverLookAt,
+  driverPlacement,
   firstActiveSlot,
-  followEye,
   followLerpFactor,
-  followLookAt,
-  vehicleLocalToThree,
+  followPlacement,
 } from './cameraMath'
 import { tiltLocalPoint, tiltOf } from './vehicleMotion'
 import { eyeLookAt, eyePosition } from './pedestrianGeometry'
@@ -71,6 +68,7 @@ export const CameraRig = memo(function CameraRig({ bounds }: CameraRigProps) {
   const desiredPos = useMemo(() => new THREE.Vector3(), [])
   const desiredLook = useMemo(() => new THREE.Vector3(), [])
   const currentLook = useMemo(() => new THREE.Vector3(), [])
+  const desiredUp = useMemo(() => new THREE.Vector3(0, 1, 0), [])
   const initialised = useRef(false)
   /** 追従対象を見失った時刻。0 なら見えている */
   const lostSince = useRef(0)
@@ -119,12 +117,18 @@ export const CameraRig = memo(function CameraRig({ bounds }: CameraRigProps) {
         12,
         pedestrian.bob,
       )
-      camera.position.set(eye.x, eye.y, eye.z)
-      camera.lookAt(look.x, look.y, look.z)
+      // 立体の地図では、足元の地面の高さだけ持ち上げる
+      const lift = pedestrian.z
+      if (camera.up.y !== 1) camera.up.set(0, 1, 0)
+      camera.position.set(eye.x, eye.y + lift, eye.z)
+      camera.lookAt(look.x, look.y + lift, look.z)
       return
     }
 
-    if (mode === 'orbit') return
+    if (mode === 'orbit') {
+      if (camera.up.y !== 1) camera.up.set(0, 1, 0)
+      return
+    }
 
     const paused = useSimStore.getState().status.renderPaused
     // 車体と同じ時刻で補間する（別の時刻で取ると、車内が車体に対して前後に揺れる）
@@ -137,24 +141,20 @@ export const CameraRig = memo(function CameraRig({ bounds }: CameraRigProps) {
     lostSince.current = 0
 
     if (mode === 'driver') {
-      // 目は車体と一緒に傾くが、視線は水平のまま（首で傾きを打ち消す）。枠は擬似カメラと揃ったまま
-      const level = driverEye(pose.x, pose.y, pose.heading)
+      // 目は車体と一緒に傾くが、視線は水平のまま（首で傾きを打ち消す）。枠は擬似カメラと揃ったまま。
+      //   立体の地図では、擬似カメラと同じく路面の姿勢には追従する
       const tilt = tiltOf(followTarget)
-      const eye = vehicleLocalToThree(
-        tiltLocalPoint(DRIVER_EYE_LOCAL, tilt.pitch, tilt.roll),
-        pose.x,
-        pose.y,
-        pose.heading,
-      )
-      const look = driverLookAt(pose.x, pose.y, pose.heading)
-      desiredPos.set(eye.x, eye.y, eye.z)
-      desiredLook.set(look.x + eye.x - level.x, look.y + eye.y - level.y, look.z + eye.z - level.z)
+      const placed = driverPlacement(pose, tiltLocalPoint(DRIVER_EYE_LOCAL, tilt.pitch, tilt.roll))
+      desiredPos.set(placed.eye.x, placed.eye.y, placed.eye.z)
+      desiredLook.set(placed.look.x, placed.look.y, placed.look.z)
+      desiredUp.set(placed.up.x, placed.up.y, placed.up.z)
     } else {
-      const eye = followEye(pose.x, pose.y, pose.heading)
-      const look = followLookAt(pose.x, pose.y, pose.heading)
-      desiredPos.set(eye.x, eye.y, eye.z)
-      desiredLook.set(look.x, look.y, look.z)
+      const placed = followPlacement(pose)
+      desiredPos.set(placed.eye.x, placed.eye.y, placed.eye.z)
+      desiredLook.set(placed.look.x, placed.look.y, placed.look.z)
+      desiredUp.set(0, 1, 0)
     }
+    if (!camera.up.equals(desiredUp)) camera.up.copy(desiredUp)
 
     if (!initialised.current || pose.teleported) {
       camera.position.copy(desiredPos)

@@ -9,6 +9,7 @@ import { useSimStore } from '../store/simStore'
 import type { MapBounds } from '../types/protocol'
 import { usePalette } from './usePalette'
 import { vehicleColor } from './vehicleColors'
+import { elevationOf, pickSurface } from './elevationView'
 
 /** これ以上動いたらドラッグ（＝カメラ操作）とみなす [px] */
 const DRAG_THRESHOLD_PX = 5
@@ -39,7 +40,7 @@ export function InteractionPlane({ bounds }: InteractionPlaneProps) {
   const { size, cx, cz } = useMemo(() => planeFromBounds(bounds), [bounds])
 
   const down = useRef<{ x: number; y: number; t: number } | null>(null)
-  const cursor = useRef<{ x: number; z: number } | null>(null)
+  const cursor = useRef<{ x: number; z: number; y: number } | null>(null)
   const ghostRef = useRef<THREE.Group>(null)
 
   // 実用モードでは介入しない（案内どおり 3D 画面をクリックするたびに障害物が置かれる）
@@ -61,13 +62,21 @@ export function InteractionPlane({ bounds }: InteractionPlaneProps) {
     if (moved > DRAG_THRESHOLD_PX) return
     if (performance.now() - start.t > CLICK_MAX_MS) return
 
-    const enuX = e.point.x
-    const enuY = -e.point.z
+    let enuX = e.point.x
+    let enuY = -e.point.z
+    // 立体の地図では、高さ 0 の板ではなく見えている路面（橋桁の上・坂）で拾い、その高さも送る
+    const model = elevationOf(useSimStore.getState().map)
+    const hit = model ? pickSurface(model, e.ray.origin, e.ray.direction) : null
+    if (hit) {
+      enuX = hit.x
+      enuY = hit.y
+    }
+    const z = hit ? { z: hit.z } : {}
 
     if (interaction === 'obstacle') {
-      send({ type: 'add_obstacle', x: enuX, y: enuY, radius: obstacleRadius })
+      send({ type: 'add_obstacle', x: enuX, y: enuY, radius: obstacleRadius, ...z })
     } else if (interaction === 'vehicle') {
-      send({ type: 'spawn_vehicle', x: enuX, y: enuY })
+      send({ type: 'spawn_vehicle', x: enuX, y: enuY, ...z })
     }
   }
 
@@ -76,7 +85,9 @@ export function InteractionPlane({ bounds }: InteractionPlaneProps) {
       cursor.current = null
       return
     }
-    cursor.current = { x: e.point.x, z: e.point.z }
+    const model = elevationOf(useSimStore.getState().map)
+    const hit = model ? pickSurface(model, e.ray.origin, e.ray.direction) : null
+    cursor.current = hit ? { x: hit.x, z: -hit.y, y: hit.z } : { x: e.point.x, z: e.point.z, y: 0 }
   }
 
   const handlePointerOut = () => {
@@ -88,7 +99,7 @@ export function InteractionPlane({ bounds }: InteractionPlaneProps) {
     if (!g) return
     const at = active ? cursor.current : null
     g.visible = at !== null
-    if (at) g.position.set(at.x, 0, at.z)
+    if (at) g.position.set(at.x, at.y, at.z)
   })
 
   return (

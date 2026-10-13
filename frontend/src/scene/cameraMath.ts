@@ -1,6 +1,7 @@
 /** カメラ位置の計算（純粋関数）。 */
 
 import type { SurroundKey } from '../types/protocol.ts'
+import { attitudeAxes, attitudeLocalToThree } from './elevationView.ts'
 
 /** カメラが目標位置を追う強さ [1/秒]。 */
 export const DRIVER_FOLLOW_RATE = 0
@@ -157,4 +158,78 @@ export function followLookAt(x: number, y: number, heading: number): Vec3 {
   const cos = Math.cos(heading)
   const sin = Math.sin(heading)
   return toThree(x + cos * FOLLOW_LOOK_AHEAD, y + sin * FOLLOW_LOOK_AHEAD, 1.2)
+}
+
+/** 車体の位置と、立体の地図での路面の高さ・姿勢（平面の地図ではすべて 0）。 */
+export interface RoadPose {
+  x: number
+  y: number
+  heading: number
+  z: number
+  pitch: number
+  roll: number
+}
+
+/** カメラの置き方（three 空間の目・注視点・上向き）。 */
+export interface CameraPlacement {
+  eye: Vec3
+  look: Vec3
+  up: Vec3
+}
+
+const WORLD_UP: Vec3 = { x: 0, y: 1, z: 0 }
+
+/** 路面の姿勢を持たない（平面の地図の）ポーズか。真なら従来の式をそのまま使う */
+export function isLevelPose(p: RoadPose): boolean {
+  return p.z === 0 && p.pitch === 0 && p.roll === 0
+}
+
+/** 運転席の見る先（車両ローカル）。`driverLookAt` と同じ点 */
+export const DRIVER_LOOK_LOCAL: readonly [number, number, number] = [DRIVER_LOOK_AHEAD, DRIVER_EYE_HEIGHT - DRIVER_LOOK_DROP, 0]
+
+/** 運転席カメラの置き方。目は車体と一緒に動かし（`eyeLocal` は車体の傾きを入れた目の位置）、視線は路面の姿勢には追従する。 */
+export function driverPlacement(p: RoadPose, eyeLocal: readonly [number, number, number]): CameraPlacement {
+  if (isLevelPose(p)) {
+    const level = driverEye(p.x, p.y, p.heading)
+    const eye = vehicleLocalToThree(eyeLocal, p.x, p.y, p.heading)
+    const look = driverLookAt(p.x, p.y, p.heading)
+    return { eye, look: { x: look.x + eye.x - level.x, y: look.y + eye.y - level.y, z: look.z + eye.z - level.z }, up: WORLD_UP }
+  }
+  // 擬似カメラは路面の姿勢に追従するので、検出枠と揃えるため運転席の視線も同じ姿勢で傾ける
+  const level = attitudeLocalToThree(DRIVER_EYE_LOCAL, p.x, p.y, p.z, p.heading, p.pitch, p.roll)
+  const eye = attitudeLocalToThree(eyeLocal, p.x, p.y, p.z, p.heading, p.pitch, p.roll)
+  const look = attitudeLocalToThree(DRIVER_LOOK_LOCAL, p.x, p.y, p.z, p.heading, p.pitch, p.roll)
+  const a = attitudeAxes(p.heading, p.pitch, p.roll)
+  return {
+    eye,
+    look: { x: look.x + eye.x - level.x, y: look.y + eye.y - level.y, z: look.z + eye.z - level.z },
+    up: { x: a[3], y: a[4], z: a[5] },
+  }
+}
+
+/** 周囲カメラの置き方。立体の地図では路面の高さ・姿勢込み */
+export function surroundPlacement(cam: SurroundCamera, p: RoadPose): CameraPlacement {
+  if (isLevelPose(p)) {
+    return { eye: surroundEye(cam, p.x, p.y, p.heading), look: surroundLookAt(cam, p.x, p.y, p.heading), up: WORLD_UP }
+  }
+  const eye = attitudeLocalToThree([cam.forward, cam.height, cam.right], p.x, p.y, p.z, p.heading, p.pitch, p.roll)
+  const yaw = (cam.yawDeg * Math.PI) / 180
+  const pitch = (cam.pitchDeg * Math.PI) / 180
+  const reach = 10
+  // 車両ローカル（前 x・上 y・右 z）での視線。左向き（yaw 正）は右の逆
+  const local: [number, number, number] = [
+    cam.forward + Math.cos(yaw) * Math.cos(pitch) * reach,
+    cam.height + Math.sin(pitch) * reach,
+    cam.right - Math.sin(yaw) * Math.cos(pitch) * reach,
+  ]
+  const look = attitudeLocalToThree(local, p.x, p.y, p.z, p.heading, p.pitch, p.roll)
+  const a = attitudeAxes(p.heading, p.pitch, p.roll)
+  return { eye, look, up: { x: a[3], y: a[4], z: a[5] } }
+}
+
+/** 追従カメラの置き方（車の後ろ上から。立体の地図では路面の高さだけ持ち上げる） */
+export function followPlacement(p: RoadPose): CameraPlacement {
+  const eye = followEye(p.x, p.y, p.heading)
+  const look = followLookAt(p.x, p.y, p.heading)
+  return { eye: { x: eye.x, y: eye.y + p.z, z: eye.z }, look: { x: look.x, y: look.y + p.z, z: look.z }, up: WORLD_UP }
 }

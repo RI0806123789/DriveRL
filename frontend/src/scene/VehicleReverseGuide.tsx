@@ -134,7 +134,7 @@ export function VehicleReverseGuide() {
     pos.needsUpdate = true
     col.needsUpdate = true
     geometry.computeBoundingSphere()
-    composeVehicleMatrix(scratch.transform, scratch.pose.x, scratch.pose.y, scratch.pose.heading, m.matrix)
+    composeVehicleMatrix(scratch.transform, scratch.pose.x, scratch.pose.y, scratch.pose.heading, m.matrix, scratch.pose.z, scratch.pose.pitch, scratch.pose.roll)
     m.matrixWorldNeedsUpdate = true
     m.visible = true
   })

@@ -31,6 +31,8 @@ export interface FrameBuffer {
   displayed: number
   /** 車両ごとの最新経路。frame.route は変化時のみ届くので、ここで保持する */
   routes: Map<number, Vec2[]>
+  /** 立体の地図での、経路の点ごとの路面の高さ（`routes` と同じ時に入れ替わる）。平面の地図では空 */
+  routeHeights: Map<number, number[]>
   /** 車両ごとの経路の版。経路が届くたびにバッファ全体の通し番号を振る（リセットをまたいでも同じ値を二度使わない） */
   routeRevisions: Map<number, number>
   /** routes が変わるたびに増える。3D 側はこれを見て作り直しの要否を判断する */
@@ -60,6 +62,7 @@ export const frameBuffer: FrameBuffer = {
   received: 0,
   displayed: 0,
   routes: EMPTY_ROUTES,
+  routeHeights: new Map(),
   routeRevisions: EMPTY_REVISIONS,
   routeVersion: 0,
   obstacles: [],
@@ -104,12 +107,15 @@ export function pushFrame(frame: FrameMessage): void {
       if (frameBuffer.routes === EMPTY_ROUTES) frameBuffer.routes = new Map()
       if (frameBuffer.routeRevisions === EMPTY_REVISIONS) frameBuffer.routeRevisions = new Map()
       frameBuffer.routes.set(v.id, v.route)
+      if (v.routeZ && v.routeZ.length === v.route.length) frameBuffer.routeHeights.set(v.id, v.routeZ)
+      else frameBuffer.routeHeights.delete(v.id)
       routeSerial += 1
       frameBuffer.routeRevisions.set(v.id, routeSerial)
       routeChanged = true
     }
     if (!v.active && frameBuffer.routes.has(v.id)) {
       frameBuffer.routes.delete(v.id)
+      frameBuffer.routeHeights.delete(v.id)
       frameBuffer.routeRevisions.delete(v.id)
       routeChanged = true
     }
@@ -183,6 +189,7 @@ export function resetFrameBuffer(): void {
   frameBuffer.received = 0
   frameBuffer.displayed += 1
   frameBuffer.routes = new Map()
+  frameBuffer.routeHeights = new Map()
   frameBuffer.routeRevisions = new Map()
   frameBuffer.routeVersion += 1
   frameBuffer.obstacles = []

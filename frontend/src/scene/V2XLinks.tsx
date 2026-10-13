@@ -50,7 +50,7 @@ export function V2XLinks({ maxVehicles }: { maxVehicles: number }) {
     const count = vehicles
       ? writeLinkSegments(
           linkPairs(vehicles),
-          (id) => (sampleVehicle(id, alpha, pose) ? { x: pose.x, y: pose.y } : null),
+          (id) => (sampleVehicle(id, alpha, pose) ? { x: pose.x, y: pose.y, z: pose.z } : null),
           resources.positions,
         )
       : 0

@@ -85,6 +85,8 @@ export function buildBuildingChunks(buildings: readonly MapBuilding[]): THREE.Bu
       shade[i * 2 + 1] = 0.82 + 0.28 * Math.min(1, yv / Math.max(1, height))
     }
     geom.setAttribute('shade', new THREE.BufferAttribute(shade, 2))
+    // 立体の地図では足元の高さ（地形の上）へ置く。陰りは足元からの高さで付けたまま
+    if (b.baseZ) geom.translate(0, b.baseZ, 0)
 
     pending.push(geom)
     if (pending.length >= CHUNK_SIZE) flush()

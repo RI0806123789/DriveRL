@@ -87,11 +87,11 @@ export function PedestrianSignals({ signals, castShadow }: PedestrianSignalsProp
     for (let i = 0; i < placements.length; i++) {
       const p = placements[i]
       dummy.rotation.set(0, 0, 0)
-      dummy.position.set(p.x, 0, p.z)
+      dummy.position.set(p.x, p.ground, p.z)
       dummy.updateMatrix()
       pole.setMatrixAt(i, dummy.matrix)
 
-      dummy.position.set(p.x, PED_MOUNT_HEIGHT, p.z)
+      dummy.position.set(p.x, p.ground + PED_MOUNT_HEIGHT, p.z)
       dummy.rotation.set(0, p.facing, 0)
       dummy.updateMatrix()
       housing.setMatrixAt(i, dummy.matrix)

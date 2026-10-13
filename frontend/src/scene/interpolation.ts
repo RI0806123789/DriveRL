@@ -39,6 +39,10 @@ export interface VehiclePose {
   turnSignal: number
   /** この呼び出しで瞬間移動したか（カメラ側で減衰を切るのに使う） */
   teleported: boolean
+  /** 車体の下端の高さ [m]・路面のピッチ（機首上げが正）・ロール（左が上がるのが正）[rad]。平面の地図では 0 */
+  z: number
+  pitch: number
+  roll: number
 }
 
 /** 現在時刻における補間係数 alpha を求める。表示の区間（prev / curr）もここで進める */
@@ -84,6 +88,9 @@ export function sampleVehicle(
     out.heading = cv.heading
     out.speed = cv.speed
     out.steer = cv.steer
+    out.z = cv.z ?? 0
+    out.pitch = cv.pitch ?? 0
+    out.roll = cv.roll ?? 0
     out.teleported = true
     return true
   }
@@ -96,6 +103,9 @@ export function sampleVehicle(
     out.heading = cv.heading
     out.speed = cv.speed
     out.steer = cv.steer
+    out.z = cv.z ?? 0
+    out.pitch = cv.pitch ?? 0
+    out.roll = cv.roll ?? 0
     out.teleported = true
     return true
   }
@@ -105,6 +115,10 @@ export function sampleVehicle(
   out.heading = lerpAngle(pv.heading, cv.heading, alpha)
   out.speed = lerp(pv.speed, cv.speed, alpha)
   out.steer = lerp(pv.steer, cv.steer, alpha)
+  // 高さと姿勢も位置と同じ時刻・同じ区間で補間する（車体が路面から浮いたり沈んだりしない）
+  out.z = lerp(pv.z ?? 0, cv.z ?? 0, alpha)
+  out.pitch = lerp(pv.pitch ?? 0, cv.pitch ?? 0, alpha)
+  out.roll = lerp(pv.roll ?? 0, cv.roll ?? 0, alpha)
   return true
 }
 
@@ -125,5 +139,8 @@ export function createPose(): VehiclePose {
     throttle: 0,
     turnSignal: 0,
     teleported: false,
+    z: 0,
+    pitch: 0,
+    roll: 0,
   }
 }

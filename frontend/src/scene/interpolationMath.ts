@@ -28,11 +28,13 @@ export interface PedestrianPose {
   /** 手足の振りの位相 [rad] */
   stride: number
   crossing: boolean
+  /** 足元の高さ [m]。平面の地図では 0 */
+  z: number
 }
 
 /** 使い回し用の空ポーズを作る（毎フレームのアロケーションを避ける） */
 export function createPedestrianPose(): PedestrianPose {
-  return { x: 0, y: 0, heading: 0, stride: 0, crossing: false }
+  return { x: 0, y: 0, heading: 0, stride: 0, crossing: false, z: 0 }
 }
 
 /** NPC 歩行者を補間して out に書き込む。 */
@@ -50,12 +52,14 @@ export function samplePedestrian(
   if (jumped) {
     out.x = curr.x
     out.y = curr.y
+    out.z = curr.z ?? 0
     out.heading = curr.heading
     out.stride = curr.stride
     return
   }
   out.x = lerp(prev.x, curr.x, alpha)
   out.y = lerp(prev.y, curr.y, alpha)
+  out.z = lerp(prev.z ?? 0, curr.z ?? 0, alpha)
   out.heading = lerpAngle(prev.heading, curr.heading, alpha)
   // 位相は 2π で折り返すので、角度と同じ扱いにしないと手足が逆回りする
   out.stride = lerpAngle(prev.stride, curr.stride, alpha)

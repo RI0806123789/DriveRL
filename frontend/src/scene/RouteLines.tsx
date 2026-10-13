@@ -5,7 +5,7 @@ import { useFrame } from '@react-three/fiber'
 import * as THREE from 'three'
 import { frameBuffer } from '../store/frameBuffer'
 import type { Vec2 } from '../types/protocol'
-import { buildChevrons, buildRibbon } from './routeArrowGeometry'
+import { buildChevrons, buildRibbon, liftAlongRoute } from './routeArrowGeometry'
 import { syncRouteCache, type HeldRoute } from './routeCache'
 import { vehicleColor } from './vehicleColors'
 
@@ -16,7 +16,20 @@ interface RouteEntry {
 }
 
 function buildEntry(id: number, points: Vec2[]): RouteEntry {
-  return { id, ribbon: buildRibbon(points), chevrons: buildChevrons(points) }
+  const ribbon = buildRibbon(points)
+  const chevrons = buildChevrons(points)
+  // 立体の地図では、経路の点ごとの路面の高さだけ持ち上げる（坂・橋桁・トンネル）
+  const heights = frameBuffer.routeHeights.get(id)
+  if (heights) {
+    for (const geom of [ribbon, chevrons]) {
+      const attr = geom?.getAttribute('position') as THREE.BufferAttribute | undefined
+      if (!geom || !attr) continue
+      liftAlongRoute(attr.array as Float32Array, points, heights)
+      attr.needsUpdate = true
+      geom.computeBoundingSphere()
+    }
+  }
+  return { id, ribbon, chevrons }
 }
 
 export interface RouteLinesProps {
@@ -181,7 +194,9 @@ const GoalMarker = memo(function GoalMarker({ id }: { id: number }) {
       return
     }
     g.visible = true
-    g.position.set(v.goal[0], 0, -v.goal[1])
+    // 立体の地図では、経路の終点の路面の高さに立てる
+    const heights = frameBuffer.routeHeights.get(id)
+    g.position.set(v.goal[0], heights && heights.length ? heights[heights.length - 1] : 0, -v.goal[1])
     g.rotation.y = performance.now() * 0.0008
   })
 

@@ -280,3 +280,9 @@ cd backend
   退避してから最良の試行を適用・保存する。Optuna（SQLite・TPE）と最良の書き出しは専用スレッドで回し、エンジンスレッドに
   乗せない。CLI（`tune_hyperparams.py`）と画面は同じ実装（`autotune.py` と `runtime/learning_step.py`）を通る。検査は
   `backend/tests/test_tuning.py`
+- **高低差・立体道路（#136）は、高さを持つ地図（`MapData.elevated`）でだけ新しい経路に入る。** 平面の地図では物理・衝突・
+  擬似カメラ・ワイヤとも従来のまま（銀座・金沢で新旧の指紋が一致）。擬似カメラと正解ラベルは同じ固体判定グリッド
+  （`map/elevation.py` の `SolidGrids`）と同じカメラ姿勢を使う（片方だけ地形を見ると、頂上の向こうの車にラベルが付く）。
+  OSM の `layer` は上下の順序なので高さに換算しない。車体の姿勢の式は `attitude_from_slopes`・`percep/elevated_view.py`・
+  `scene/elevationView.ts` の `attitudeAxes` の 3 か所で同じ。検査は `backend/tests/test_elevation.py` と
+  `backend/verify/verify_elevation.py`（合成の `terrain_lab` で回す。キャッシュ不要）

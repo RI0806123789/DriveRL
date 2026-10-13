@@ -9,9 +9,11 @@ import { computeAlpha, createPose, sampleVehicle } from './interpolation'
 import { buildRibbon, writeRibbonPositions, type Point2 } from './routeArrowGeometry'
 import { usePalette } from './usePalette'
 import { DET_LANE, type Detection } from '../types/protocol'
+import { attitudeAxes } from './elevationView'
 
 /** 路面から浮かせる高さ [m]。進路の矢羽根(0.13)より手前 */
 const LANE_Y = 0.15
+const attitudeMatrix = new THREE.Matrix4()
 /** 車線帯の全幅 [m]。バックエンドの車線幅（中心から左右 1.6m）に合わせる */
 const LANE_WIDTH = 3.2
 /** 中心線の表示上の太さ [m] */
@@ -166,8 +168,15 @@ export function LaneDetectionOverlay() {
     }
 
     g.visible = true
-    g.position.set(pose.x, 0, -pose.y)
-    g.rotation.y = pose.heading
+    g.position.set(pose.x, pose.z, -pose.y)
+    if (pose.pitch !== 0 || pose.roll !== 0) {
+      // 立体の地図では、車線（自車座標で認識したもの）を車体の路面の姿勢に載せる
+      const a = attitudeAxes(pose.heading, pose.pitch, pose.roll)
+      attitudeMatrix.set(a[0], a[3], a[6], 0, a[1], a[4], a[7], 0, a[2], a[5], a[8], 0, 0, 0, 0, 1)
+      g.quaternion.setFromRotationMatrix(attitudeMatrix)
+    } else {
+      g.rotation.set(0, pose.heading, 0)
+    }
   })
 
   return (

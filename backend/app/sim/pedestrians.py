@@ -73,11 +73,39 @@ class SidewalkNetwork:
         self.node_v = np.array([e.v for e in edges], dtype=np.int64)
 
         ids = np.array([e.id for e in edges], dtype=np.int64)
+        #: 歩道の番号 → 地図の辺の ID（layer で上下の路面を見分けるのに使う）
+        self.edge_ids = ids
         order = np.argsort(ids, kind="stable")
         self._id_sorted = ids[order]
         self._id_index = order.astype(np.int64)
         self._build_adjacency()
         self._build_signal_table(data, edges)
+        self._build_heights(data, edges)
+
+    def _build_heights(self, data: MapData, edges: list) -> None:
+        """立体の地図でだけ、歩道の点ごとの路面の高さと辺ごとの横断勾配を持つ。"""
+        self.elevated = bool(data.elevated)
+        self.point_z = np.zeros(self.points.shape[0], dtype=np.float64)
+        self.cross = np.zeros(self.count, dtype=np.float64)
+        if not self.elevated:
+            return
+        from app.map.elevation import edge_heights
+
+        node_z = {int(n.id): float(n.z) for n in data.nodes}
+        for i, e in enumerate(edges):
+            z = edge_heights(e, node_z)
+            if z is not None:
+                lo = int(self.start[i])
+                self.point_z[lo : lo + int(self.point_count[i])] = z
+            self.cross[i] = float(e.cross_slope)
+
+    def height(self, edge: np.ndarray, arc: np.ndarray) -> np.ndarray:
+        """道路中心線上の弧長位置の高さ。"""
+        seg = self.segment_of(edge, arc)
+        d = self.points[seg + 1] - self.points[seg]
+        seg_len = np.maximum(np.hypot(d[:, 0], d[:, 1]), 1e-6)
+        t = np.clip((self.offset[edge] + arc - self.cum[seg]) / seg_len, 0.0, 1.0)
+        return self.point_z[seg] + (self.point_z[seg + 1] - self.point_z[seg]) * t
 
     def _build_signal_table(self, data: MapData, edges: list) -> None:
         """エッジの端ごとに「そこへ入る車両を規制する信号」を引けるようにする。"""
@@ -261,14 +289,18 @@ class PedestrianCrowd:
 
         self.x = np.zeros(n, dtype=np.float64)
         self.y = np.zeros(n, dtype=np.float64)
+        #: 足元の高さ [m]。平面の地図では 0 のまま
+        self.z = np.zeros(n, dtype=np.float64)
         self.heading = np.zeros(n, dtype=np.float64)
 
         #: 位置が変わるたびに増える。`World.pedestrian_xy` のキャッシュ鍵
         self.revision = 0
         self._positions: np.ndarray | None = None
+        self._heights: np.ndarray | None = None
 
     def _invalidate_positions(self) -> None:
         self._positions = None
+        self._heights = None
         self.revision += 1
 
     @property
@@ -463,6 +495,8 @@ class PedestrianCrowd:
         offset = side_now * self.net.walk_offset[edge]
         self.x[idx] = cx - ty * offset
         self.y[idx] = cy + tx * offset
+        if self.net.elevated:
+            self.z[idx] = self.net.height(edge, arc) + offset * self.net.cross[edge]
 
         walk_heading = np.arctan2(ty * self.dir[idx], tx * self.dir[idx])
         toward = np.sign(self.cross_to[idx] - self.side[idx])
@@ -571,8 +605,20 @@ class PedestrianCrowd:
                     heading=float(self.heading[slot]),
                     stride=float(self.stride[slot] % (2.0 * math.pi)),
                     crossing=bool(self.crossing[slot]),
+                    z=float(self.z[slot]) if self.net.elevated else None,
                 )
             )
+        return out
+
+    @property
+    def heights(self) -> np.ndarray:
+        """`positions` と同じ並びの足元の高さ (K,) float64。**書き換え不可**。"""
+        cached = self._heights
+        if cached is not None:
+            return cached
+        out = self.z[np.flatnonzero(self.active)].copy()
+        out.flags.writeable = False
+        self._heights = out
         return out
 
     @property
