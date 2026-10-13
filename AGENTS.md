@@ -147,6 +147,9 @@ cd backend
 - **CSS はレイアウトを起こすプロパティを遷移させない**（`width` / `height` / `flex-grow` /
   `box-shadow` など）。動かしてよいのは `transform` と `opacity` で、色と `border-radius` は
   塗り直しだけなので可。パネルは 3D と同じメインスレッドに乗っています
+- **大文字と小文字だけが違うファイル名を置かないこと**（Windows では拡張子を省いた import が別のファイルを掴む。検査は `npm run verify:conventions`）
+- **HTTP の応答に例外の文（`str(exc)`）を載せないこと**（CodeQL「Information exposure through an exception」対策。定数のメッセージを返す。検査は `backend/tests/test_error_responses.py`）
+- **使っていないローカル変数・引数・import は型チェックが落とします**
 
 ### 数字を文書に手で書くとき
 
@@ -286,3 +289,12 @@ cd backend
   OSM の `layer` は上下の順序なので高さに換算しない。車体の姿勢の式は `attitude_from_slopes`・`percep/elevated_view.py`・
   `scene/elevationView.ts` の `attitudeAxes` の 3 か所で同じ。検査は `backend/tests/test_elevation.py` と
   `backend/verify/verify_elevation.py`（合成の `terrain_lab` で回す。キャッシュ不要）
+- **交差点の優先・進入制御（#134）は車両の観測をカメラ由来のまま維持する。** 地図から他車の位置・速度・意図を取らない
+  （前後左右の検出を local_xy で換算し、過去 0.5 秒の差分から速度推定）。背景車（`traffic.mask`）のみ専用入力で真値を使う
+  （学習車・配車車・一般車には渡さない）。右折時は対向直進・左折に譲り、無信号交差点は幅差 2m 以上で広い道路優先、同格なら左方優先。
+  待ち時間で優先判断を強制解除しない（詰まり防止のために解除すると衝突する）。安全ギミック介入ステップは PPO 学習から除外する（`learn`）。
+  検査は `backend/tests/test_intersection_priority.py` と `backend/verify/verify_intersection_priority.py`
+- **固定障害物の回避・復帰と全幅閉鎖（#135）は、同方向 2 車線の直線区間（`LaneCorridor`）でのみ車線変更を許可する。**
+  交差点・曲線・規制不明では変更しない。変更軌道は滑らかな五次多項式風で接続し、隣車線の後続車との車間・減速・横加加速度（RMS 0.8 以下）を担保。
+  安全ギミック介入ステップは PPO 学習から除外する（`learn`）。道路全幅閉鎖時は非同期で迂回路を探索（`road_closure.py`）。
+  検査は `backend/tests/test_lane_change.py` と `backend/verify/verify_lane_change.py`

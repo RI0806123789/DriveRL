@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -28,6 +29,7 @@ from app.rl.hierarchical_policy import (
     sub_reward_shaping,
 )
 from app.rl.policy import ActorCritic
+from app.warn import warn_once
 
 __all__ = [
     "PPOTrainer",
@@ -351,7 +353,7 @@ class PPOTrainer:
             new_log_probs, entropy, values = self.policy.evaluate(
                 batch["obs"], batch["actions"], batch["options"]
             )
-            log_ratio = new_log_probs - batch["log_probs"]
+            log_ratio = torch.clamp(new_log_probs - batch["log_probs"], -20.0, 20.0)
             ratio = torch.exp(log_ratio)
 
             adv = batch["advantages"]
@@ -389,6 +391,7 @@ class PPOTrainer:
                 + float(config.PPO_VALUE_COEF) * meta_value_loss
                 - float(config.HRL_META_ENTROPY_COEF) * meta_entropy
             )
+            bc_loss = None
             if bool(assisted.any()):
                 # 下位はエキスパートの操作を、そのときの状況に合う意図（`expert_options`）の下で真似る
                 labels = batch["expert_options"][assisted]
@@ -403,21 +406,29 @@ class PPOTrainer:
                 )
                 bc_loss = ((mean_action - target) ** 2).sum(dim=-1).mean() + meta_bc
                 loss = loss + float(config.PPO_BC_COEF) * bc_loss
-                pending.bc_losses.append(float(bc_loss.detach()))
 
             self.optimizer.zero_grad(set_to_none=True)
+            if not bool(torch.isfinite(loss)):
+                warn_once("rl.ppo.nonfinite_loss", "PPO の損失が非有限のため、このミニバッチの更新を見送りました")
+                continue
             loss.backward()
+            grad_norms: dict[str, float] = {}
             with torch.no_grad():
                 for name, prm in self.policy.named_parameters():
                     if prm.grad is None:
                         continue
-                    g = float(prm.grad.norm())
-                    pending.grad_sums[name] = pending.grad_sums.get(name, 0.0) + g
-                    pending.grad_counts[name] = pending.grad_counts.get(name, 0) + 1
+                    grad_norms[name] = float(prm.grad.norm())
             max_grad_norm = float(config.PPO_MAX_GRAD_NORM)
             total_norm = float(
                 nn.utils.clip_grad_norm_(self.policy.parameters(), max_grad_norm)
             )
+            if not math.isfinite(total_norm):
+                self.optimizer.zero_grad(set_to_none=True)
+                warn_once("rl.ppo.nonfinite_gradient", "PPO の勾配が非有限のため、このミニバッチの更新を見送りました")
+                continue
+            for name, norm in grad_norms.items():
+                pending.grad_sums[name] = pending.grad_sums.get(name, 0.0) + norm
+                pending.grad_counts[name] = pending.grad_counts.get(name, 0) + 1
             pending.grad_totals.append(total_norm)
             if total_norm > max_grad_norm:
                 pending.grad_clipped += 1
@@ -434,12 +445,16 @@ class PPOTrainer:
             pending.meta_policy_losses.append(float(meta_policy_loss.detach()))
             pending.meta_value_losses.append(float(meta_value_loss.detach()))
             pending.meta_entropies.append(float(meta_entropy.detach()))
+            if bc_loss is not None:
+                pending.bc_losses.append(float(bc_loss.detach()))
 
         pending.cursor = end
         if pending.cursor < len(pending.schedule):
             return None
 
         self._pending = None
+        if not pending.grad_totals:
+            return None
         self._updates += 1
         self._last_grad_norms = {
             k: pending.grad_sums[k] / max(1, pending.grad_counts.get(k, 1))
@@ -480,7 +495,8 @@ class PPOTrainer:
         policy_loss = zero
         if bool(own.any()):
             new_log_probs = dist.log_prob(batch["options"])[own]
-            ratio = torch.exp(new_log_probs - batch["meta_log_probs"][own])
+            log_ratio = torch.clamp(new_log_probs - batch["meta_log_probs"][own], -20.0, 20.0)
+            ratio = torch.exp(log_ratio)
             adv = batch["meta_advantages"][own]
             surrogate = torch.min(ratio * adv, torch.clamp(ratio, 1.0 - clip, 1.0 + clip) * adv)
             policy_loss = -surrogate.mean()
@@ -589,6 +605,10 @@ class PPOTrainer:
         self._last_meta = None
         self.scheduler.restart()
         self._drop_pending()
+        self._clear_update_diagnostics()
+
+    def _clear_update_diagnostics(self) -> None:
+        """重みを差し替えたときに前の方策の更新統計を捨てる。"""
         self._last_grad_norms = {}
         self._last_grad_total = 0.0
         self._last_grad_clip_rate = 0.0
@@ -681,6 +701,7 @@ class PPOTrainer:
         self.optimizer = prepared.optimizer
         self._updates = prepared.updates
         self.reset_rollout()
+        self._clear_update_diagnostics()
         self.widened_from = prepared.obs_dim if prepared.obs_dim != self.obs_dim else None
         self.upgraded_flat = prepared.flat
         if prepared.flat:

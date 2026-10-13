@@ -13,6 +13,7 @@ from app.contracts import IntersectionDecision, IntersectionMovement, RouteInter
 from app.percep.encoder import local_xy
 from app.percep.types import CAMERA_RIG, DetClass, OcclusionResult, PerceptionResult
 from app.sim.signals import stop_speed_limit
+from app.warn import warn_once
 
 if TYPE_CHECKING:
     from app.sim.world import World
@@ -67,6 +68,10 @@ class _State:
 
 def _project(points: np.ndarray, cum: np.ndarray, x: float, y: float) -> tuple[float, float, float]:
     """点列上の最近点の弧長・距離・接線方位を返す。"""
+    if len(points) == 0:
+        return 0.0, math.inf, 0.0
+    if len(points) == 1:
+        return float(cum[0]), math.hypot(x - float(points[0, 0]), y - float(points[0, 1])), 0.0
     seg = np.diff(points, axis=0)
     sq = np.sum(seg * seg, axis=1)
     delta = np.array([x, y]) - points[:-1]
@@ -288,7 +293,16 @@ class IntersectionSupervisor:
         route = world.slots[slot]
         lo = max(0, int(np.searchsorted(route.route_cum, max(arc, passage.entry_arc - 5.0))) - 1)
         hi = min(len(route.route), int(np.searchsorted(route.route_cum, passage.exit_arc + config.VEHICLE_LENGTH + 5.0)) + 2)
+        if hi - lo < 2:
+            lo = max(0, min(lo, len(route.route) - 2))
+            hi = min(len(route.route), lo + 2)
         points, cum = route.route[lo:hi], route.route_cum[lo:hi]
+        if len(points) < 2:
+            warn_once("intersection.short_route", "交差点判断の経路に線分がないため、安全確認待ちにします。")
+            decision.speed_cap, decision.reason = 0.0, "visibility"
+            if not committed:
+                decision.state = "waiting"
+            return decision
         ego_edge = next((leg.edge_id for leg in route.route_legs if leg.exit_node == passage.node_id and abs(leg.end_arc - passage.entry_arc) < 0.5), -1)
         for actor in actors:
             x, y = actor.position(now)

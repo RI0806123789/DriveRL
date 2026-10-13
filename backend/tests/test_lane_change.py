@@ -6,11 +6,11 @@ import numpy as np
 import pytest
 
 from app import config
-from app.contracts import Bounds, MapData, MapEdge, MapNode, MapPreset, SimParams
+from app.contracts import Bounds, LaneCorridor, MapData, MapEdge, MapNode, MapPreset, SimParams
 from app.map.index import build_map_index
 from app.percep.types import CAMERA_RIG, CameraVisibility, DetClass, OcclusionResult
 from app.sim.env import SimulationEnv
-from app.sim.lane_change import LaneChangeSupervisor, avoidance_path
+from app.sim.lane_change import LaneChangeSupervisor, _LaneState, avoidance_path
 from app.sim.world import Route, World
 from tests.test_intersection_priority import camera_views, place
 
@@ -300,3 +300,28 @@ def test_unknown_or_prohibited_regulation_never_starts_old_cutback(allowed):
     assert env.world.fleet.speed[0] < 0.01
     assert env.world.route_serial[0] == serial
     assert env.lane_changes.decisions[0].reason == ("unknown_regulation" if allowed is None else "regulation")
+
+
+@pytest.mark.parametrize("begin,end", [(29.0, 30.0), (31.0, 32.0), (-2.0, -1.0), (100.0, 0.0)])
+def test_lane_frame_short_window_keeps_segment_heading(begin, end):
+    state = _LaneState(0, points=np.array([(5.0, 0.0), (5.0, 10.0), (5.0, 20.0), (5.0, 30.0)]), cum=np.array([0.0, 10.0, 20.0, 30.0]),
+                       corridor=LaneCorridor(0, 0, 3.5, -3.5, begin, end, True, ""))
+    arc, lateral, heading = LaneChangeSupervisor._frame(state, 7.0, 31.0)
+    assert (arc, lateral, heading) == pytest.approx((10.0 if begin < 0.0 else 30.0, -2.0, math.pi / 2))
+
+
+@pytest.mark.parametrize("count", [0, 1])
+@pytest.mark.parametrize("active", [False, True])
+def test_lane_change_without_route_segment_never_proposes_path(count, active):
+    world = lane_world()
+    corridor = world.map_index.lane_corridor(world.slots[0].route, world.slots[0].route_legs, 20.0)
+    state = _LaneState(int(world.route_serial[0]), corridor=corridor,
+                       points=world.slots[0].route[:count], cum=world.slots[0].route_cum[:count],
+                       active=active, completed=2)
+    controller = LaneChangeSupervisor()
+    controller._evaluate_slot(world, 0, state, [], 0.0, False, None, {}, {}, None)
+    decision, command = controller.decisions[0], controller.commands[0]
+    assert decision.state == "waiting" and decision.reason == "visibility"
+    assert decision.completed == 2 and decision.source == "camera"
+    assert command.speed_cap == 0.0 and command.plan is None and not command.driving
+    assert state.active == active

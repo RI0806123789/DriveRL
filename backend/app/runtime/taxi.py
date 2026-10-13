@@ -233,8 +233,8 @@ class TaxiService:
         people = env._pedestrian_gap(slot)
         situation.update(
             speedKmh=round(speed * 3.6, 1),
-            etaSeconds=round(float(status.eta_seconds), 0),
-            remainingDistanceM=round(float(status.remaining_distance_m), 0),
+            etaSeconds=_finite_or_none(status.eta_seconds, 0),
+            remainingDistanceM=_finite_or_none(status.remaining_distance_m, 0),
             nextSignalDistanceM=_finite_or_none(signal_distance),
             nextSignalColor=_signal_color(signal_phase) if math.isfinite(signal_distance) else None,
             leadVehicleGapM=_finite_or_none(lead),
@@ -442,8 +442,8 @@ class TaxiService:
         self.status.eta_seconds = remaining / max(self._speed_avg, ETA_MIN_SPEED_MPS)
 
 
-def _finite_or_none(value: float) -> float | None:
-    return round(float(value), 1) if math.isfinite(float(value)) else None
+def _finite_or_none(value: float, ndigits: int = 1) -> float | None:
+    return round(float(value), ndigits) if math.isfinite(float(value)) else None
 
 
 def _signal_color(phase: int) -> str:

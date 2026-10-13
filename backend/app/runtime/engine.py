@@ -1014,6 +1014,9 @@ class SimulationEngine:
                 )
                 return
 
+            with self._lock:
+                self._network = {}
+
             try:
                 trainer.save(config.CHECKPOINT_PATH)
             except Exception:
