@@ -437,15 +437,18 @@ class MockServer {
       }
 
       case 'set_params': {
+        if (!msg.params || typeof msg.params !== 'object' || Array.isArray(msg.params)) {
+          this.send({ type: 'error', code: 'INVALID_MESSAGE', message: 'params が不正です' })
+          return
+        }
         const { patch, blocked } = this.autotune.strip(msg.params)
         if (blocked) {
           this.sendStatus({ message: '（モック）学習の自動化の間は、探索している値を変えられません' })
         }
-        this.params = { ...this.params, ...patch }
-        this.params.vehicleCount = Math.max(
-          1,
-          Math.min(MOCK_CONFIG.maxVehicles, Math.round(this.params.vehicleCount)),
-        )
+        const rejectedCount = 'vehicleCount' in patch
+        const writablePatch = { ...patch }
+        delete writablePatch.vehicleCount
+        this.params = { ...this.params, ...writablePatch }
         // 値域は実機（contracts.SimParams の simSpeed）と同じ 0.25〜8
         this.params.simSpeed = Math.max(0.25, Math.min(8, this.params.simSpeed))
         this.params.rewardOverspeed = Math.max(
@@ -456,8 +459,14 @@ class MockServer {
           0,
           Math.min(MOCK_MAX_PEDESTRIANS, Math.round(this.params.pedestrianCount)),
         )
-        this.traffic.applyVehicleCount(this.params.vehicleCount)
         this.traffic.applyPedestrianCount(this.params.pedestrianCount, MOCK_MAX_PEDESTRIANS)
+        if (rejectedCount) {
+          this.send({
+            type: 'error',
+            code: 'INVALID_MESSAGE',
+            message: 'params の値が許容範囲外です。無視した項目: vehicleCount',
+          })
+        }
         this.sendParams()
         break
       }
@@ -472,16 +481,12 @@ class MockServer {
           this.sendStatus({ message: '空きスロットがありません' })
           return
         }
-        this.params.vehicleCount = this.traffic.activeCount()
-        this.sendParams()
         this.sendStatus({ message: `（モック）車両 #${slot.id} をスポーンしました` })
         break
       }
 
       case 'despawn_vehicle': {
         this.traffic.despawn(msg.id)
-        this.params.vehicleCount = Math.max(1, this.traffic.activeCount())
-        this.sendParams()
         break
       }
 

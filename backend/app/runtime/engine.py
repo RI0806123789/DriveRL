@@ -509,6 +509,9 @@ class SimulationEngine:
             self._notify(
                 "シミュレーションスレッドが異常終了しました。サーバーを再起動してください"
             )
+        finally:
+            if self._env is not None:
+                self._env.road_closures.close()
 
     def _run_loop(self) -> None:
         import torch
@@ -543,6 +546,8 @@ class SimulationEngine:
                 with self._lock:
                     self._state = "error"
                     self._message = "シミュレーション中に内部エラーが発生しました"
+                if self._env is not None:
+                    self._env.road_closures.close()
                 self._env = None
                 continue
             self._step_marks.append(step_started)
@@ -1152,6 +1157,8 @@ class SimulationEngine:
         #   CNN で走っている間は真値が呼ばれず、置き換わることもない
         clear_static_cache()
         # 新しい env を作る間、古い env（前のマップの擬似カメラと認識器）を並べて持たない
+        if self._env is not None:
+            self._env.road_closures.close()
         self._env = None
 
         params = self.snapshot_params()

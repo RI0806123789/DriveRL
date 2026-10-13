@@ -14,6 +14,7 @@ from app.map.index import build_map_index
 from app.runtime.taxi import TaxiService
 from app.sim import road_closure
 from app.sim.road_closure import RoadClosureSupervisor
+from app.sim.routes import RoutePlanner
 from app.sim.world import Route, World
 
 
@@ -207,7 +208,7 @@ def test_detour_crossing_building_or_sweeping_body_is_rejected(clearance, search
     candidate = Route(np.asarray(points, dtype=np.float32), good.legs)
     if clearance == "body":
         assert not np.any(world.map_index.occupancy.sample_building(candidate.points[:, 0], candidate.points[:, 1]))
-    monkeypatch.setattr(world, "route_between", lambda *args, **kwargs: candidate)
+    monkeypatch.setattr(RoutePlanner, "route_between", lambda self, *args, **kwargs: candidate)
     supervisor = RoadClosureSupervisor()
     serial, original = int(world.route_serial[0]), world.slots[0].route.copy()
     supervisor.evaluate(world, frozenset((0,)))
@@ -296,7 +297,7 @@ def test_short_detour_checks_both_endpoints_and_body_width(length, heading, monk
     along = np.array([math.cos(heading), math.sin(heading)])
     left = np.array([-along[1], along[0]])
     candidate = Route(np.array([start, start + length * along]), ())
-    monkeypatch.setattr(world, "route_between", lambda *args, **kwargs: candidate)
+    monkeypatch.setattr(RoutePlanner, "route_between", lambda self, *args, **kwargs: candidate)
     probes = []
 
     def sample_building(x, y):
@@ -304,7 +305,7 @@ def test_short_detour_checks_both_endpoints_and_body_width(length, heading, monk
         return np.zeros(len(x), dtype=bool)
 
     monkeypatch.setattr(world.map_index.occupancy, "sample_building", sample_building)
-    assert road_closure._detour(world, tuple(start), tuple(candidate.points[-1]), heading, frozenset()) is candidate
+    assert road_closure._detour(world.map_index, tuple(start), tuple(candidate.points[-1]), heading, frozenset()) is candidate
     assert len(probes) == 3
     width = road_closure.config.VEHICLE_WIDTH / 2.0 + 0.3
     for points, side in zip(probes, (-width, 0.0, width)):
@@ -320,14 +321,14 @@ def test_short_detour_rejects_building_at_endpoint_body_edge(heading, monkeypatc
     along = np.array([math.cos(heading), math.sin(heading)])
     left = np.array([-along[1], along[0]])
     candidate = Route(np.array([start, start + 0.1 * along]), ())
-    monkeypatch.setattr(world, "route_between", lambda *args, **kwargs: candidate)
+    monkeypatch.setattr(RoutePlanner, "route_between", lambda self, *args, **kwargs: candidate)
 
     def sample_building(x, y):
         delta = np.column_stack((x, y)) - start
         return (delta @ along >= 0.09) & (delta @ left > road_closure.config.VEHICLE_WIDTH / 2.0 + 0.2)
 
     monkeypatch.setattr(world.map_index.occupancy, "sample_building", sample_building)
-    assert road_closure._detour(world, tuple(start), tuple(candidate.points[-1]), heading, frozenset()) is None
+    assert road_closure._detour(world.map_index, tuple(start), tuple(candidate.points[-1]), heading, frozenset()) is None
 
 
 @pytest.mark.parametrize("points", [[], [(20.0, 1.625)], [(20.0, 1.625)] * 2,
@@ -335,8 +336,8 @@ def test_short_detour_rejects_building_at_endpoint_body_edge(heading, monkeypatc
 def test_detour_without_finite_segment_is_rejected(points, monkeypatch) -> None:
     world = world_on_route()
     candidate = Route(np.array(points).reshape(-1, 2), ())
-    monkeypatch.setattr(world, "route_between", lambda *args, **kwargs: candidate)
-    assert road_closure._detour(world, (20.0, 1.625), (20.0, 1.625), 0.0, frozenset()) is None
+    monkeypatch.setattr(RoutePlanner, "route_between", lambda self, *args, **kwargs: candidate)
+    assert road_closure._detour(world.map_index, (20.0, 1.625), (20.0, 1.625), 0.0, frozenset()) is None
 
 
 def test_short_async_detour_is_installed_without_permanent_failed_search(searches, monkeypatch) -> None:
@@ -346,7 +347,7 @@ def test_short_async_detour_is_installed_without_permanent_failed_search(searche
     goal = (start[0] + 0.1, start[1])
     world.slots[0].goal = goal
     candidate = Route(np.array([start, goal], dtype=np.float32), ())
-    monkeypatch.setattr(world, "route_between", lambda *args, **kwargs: candidate)
+    monkeypatch.setattr(RoutePlanner, "route_between", lambda self, *args, **kwargs: candidate)
     supervisor = RoadClosureSupervisor()
     serial = int(world.route_serial[0])
     supervisor.evaluate(world, frozenset((0,)))
