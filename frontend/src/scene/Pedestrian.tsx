@@ -41,6 +41,7 @@ import {
 } from './pedestrianGeometry'
 import { isSceneKeyEvent, isUiControlTarget } from './sceneKeys'
 import { usePalette } from './usePalette'
+import { elevationOf, surfaceZAt } from './elevationView'
 
 /** マウス感度 [rad/px] と、見上げ・見下ろしの限界 [rad] */
 const LOOK_SENSITIVITY = 0.0022
@@ -406,12 +407,14 @@ export function Pedestrian() {
     const intensity = Math.min(1, pedestrian.speed / WALK_SPEED_MPS)
     const swing = limbSwing(pedestrian.stride, intensity)
     pedestrian.bob = swing.bob
+    // 立体の地図では地面（地面に近い路面）の高さに立つ。サーバーも同じ選び方で足元の高さを決める
+    pedestrian.z = surfaceZAt(elevationOf(useSimStore.getState().map), pedestrian.x, pedestrian.y)
     composePedestrianMatrix(
       scratch.transform,
       pedestrian.x,
       pedestrian.y,
       pedestrian.heading,
-      swing.bob,
+      swing.bob + pedestrian.z,
       scratch.base,
     )
 

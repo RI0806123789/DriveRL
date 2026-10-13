@@ -5,7 +5,10 @@ import { useFrame } from '@react-three/fiber'
 import * as THREE from 'three'
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import type { MapEdge, Vec2 } from '../types/protocol'
+import { useSimStore } from '../store/simStore'
 import { usePalette } from './usePalette'
+import { TUNNEL_LIGHT_FACTOR, elevationOf, type ElevationModel } from './elevationView'
+import { ribbonHeights } from './elevationGeometry'
 import {
   WET_DARKEN,
   WET_METALNESS,
@@ -22,21 +25,29 @@ const CENTERLINE_Y = 0.035
 /** 中央線の幅 [m] */
 const CENTERLINE_WIDTH = 0.28
 
-/** 連続する重複点を除く（法線計算がゼロ除算にならないように） */
-function dedupe(points: Vec2[]): Vec2[] {
-  const out: Vec2[] = []
-  for (const p of points) {
-    const last = out[out.length - 1]
+/** 連続する重複点を除いた点の添字（法線計算がゼロ除算にならないように） */
+function dedupeIndices(points: Vec2[]): number[] {
+  const out: number[] = []
+  for (let i = 0; i < points.length; i++) {
+    const p = points[i]
+    const last = out.length ? points[out[out.length - 1]] : undefined
     if (!last || Math.abs(last[0] - p[0]) > 1e-6 || Math.abs(last[1] - p[1]) > 1e-6) {
-      out.push(p)
+      out.push(i)
     }
   }
   return out
 }
 
-/** ENU の折れ線から、幅 width のリボンジオメトリを作る。 */
-function buildRibbon(points: Vec2[], width: number, height: number): THREE.BufferGeometry | null {
-  const pts = dedupe(points)
+/** 立体の地図での、頂点ごとの左右の端の路面の高さ（`points` と同じ並び） */
+interface RibbonLift {
+  left: ArrayLike<number>
+  right: ArrayLike<number>
+}
+
+/** ENU の折れ線から、幅 width のリボンジオメトリを作る。`lift` があれば左右の端をその高さだけ持ち上げる。 */
+function buildRibbon(points: Vec2[], width: number, height: number, lift?: RibbonLift): THREE.BufferGeometry | null {
+  const keep = dedupeIndices(points)
+  const pts = keep.map((i) => points[i])
   const n = pts.length
   if (n < 2) return null
 
@@ -81,10 +92,10 @@ function buildRibbon(points: Vec2[], width: number, height: number): THREE.Buffe
     const py = pts[i][1]
     const o = i * 6
     position[o + 0] = px + nx * half
-    position[o + 1] = height
+    position[o + 1] = height + (lift ? lift.left[keep[i]] : 0)
     position[o + 2] = -(py + ny * half)
     position[o + 3] = px - nx * half
-    position[o + 4] = height
+    position[o + 4] = height + (lift ? lift.right[keep[i]] : 0)
     position[o + 5] = -(py - ny * half)
 
     normal[o + 1] = 1
@@ -118,33 +129,40 @@ function buildRibbon(points: Vec2[], width: number, height: number): THREE.Buffe
 
 interface RoadGeometries {
   surface: THREE.BufferGeometry | null
+  /** 立体の地図のトンネルの中の路面（暗く塗る） */
+  tunnel: THREE.BufferGeometry | null
   centerline: THREE.BufferGeometry | null
   edgeCount: number
 }
 
-function buildRoadGeometries(edges: MapEdge[]): RoadGeometries {
+function buildRoadGeometries(edges: MapEdge[], model: ElevationModel | null): RoadGeometries {
   const surfaces: THREE.BufferGeometry[] = []
+  const tunnels: THREE.BufferGeometry[] = []
   const centers: THREE.BufferGeometry[] = []
 
   for (const e of edges) {
     if (!e.polyline || e.polyline.length < 2) continue
     const width = e.width > 0 ? e.width : 6
-    const g = buildRibbon(e.polyline, width, ROAD_Y)
-    if (g) surfaces.push(g)
+    const profile = model?.profiles.get(e.id)
+    const g = buildRibbon(e.polyline, width, ROAD_Y, profile ? ribbonHeights(profile, width / 2) : undefined)
+    if (g) (profile?.structure === 'tunnel' ? tunnels : surfaces).push(g)
 
     if (!e.oneway && e.lanes >= 2) {
-      const c = buildRibbon(e.polyline, CENTERLINE_WIDTH, CENTERLINE_Y)
+      const lift = profile ? { left: profile.z, right: profile.z } : undefined
+      const c = buildRibbon(e.polyline, CENTERLINE_WIDTH, CENTERLINE_Y, lift)
       if (c) centers.push(c)
     }
   }
 
   const surface = surfaces.length ? mergeGeometries(surfaces, false) : null
+  const tunnel = tunnels.length ? mergeGeometries(tunnels, false) : null
   const centerline = centers.length ? mergeGeometries(centers, false) : null
 
   for (const g of surfaces) g.dispose()
+  for (const g of tunnels) g.dispose()
   for (const g of centers) g.dispose()
 
-  return { surface, centerline, edgeCount: edges.length }
+  return { surface, tunnel, centerline, edgeCount: edges.length }
 }
 
 export interface RoadNetworkProps {
@@ -158,7 +176,13 @@ const DRY_METALNESS = 0.02
 
 export function RoadNetwork({ edges, receiveShadow }: RoadNetworkProps) {
   const palette = usePalette()
-  const geoms = useMemo(() => buildRoadGeometries(edges), [edges])
+  const map = useSimStore((s) => s.map)
+  const model = elevationOf(map)
+  const geoms = useMemo(() => buildRoadGeometries(edges, model), [edges, model])
+  const tunnelColor = useMemo(
+    () => new THREE.Color(palette.roadSurface).multiplyScalar(TUNNEL_LIGHT_FACTOR),
+    [palette.roadSurface],
+  )
   const surface = useRef<THREE.MeshStandardMaterial>(null)
   const dryColor = useMemo(() => new THREE.Color(palette.roadSurface), [palette.roadSurface])
   const skyColor = useMemo(() => new THREE.Color(palette.sky), [palette.sky])
@@ -166,6 +190,7 @@ export function RoadNetwork({ edges, receiveShadow }: RoadNetworkProps) {
   useEffect(() => {
     return () => {
       geoms.surface?.dispose()
+      geoms.tunnel?.dispose()
       geoms.centerline?.dispose()
     }
   }, [geoms])
@@ -184,11 +209,25 @@ export function RoadNetwork({ edges, receiveShadow }: RoadNetworkProps) {
       .lerp(skyColor, wet * WET_SKY_MIX)
   })
 
-  if (!geoms.surface) return null
+  if (!geoms.surface && !geoms.tunnel) return null
 
   return (
     <group>
-      <mesh geometry={geoms.surface} receiveShadow={receiveShadow}>
+      {geoms.tunnel && (
+        <mesh geometry={geoms.tunnel}>
+          {/* トンネルの中は暗い（擬似カメラの TUNNEL_LIGHT_FACTOR と揃える）。日差しの影を受けないので色で沈める */}
+          <meshStandardMaterial
+            color={tunnelColor}
+            roughness={DRY_ROUGHNESS}
+            metalness={DRY_METALNESS}
+            side={THREE.DoubleSide}
+            polygonOffset
+            polygonOffsetFactor={-1}
+            polygonOffsetUnits={-2}
+          />
+        </mesh>
+      )}
+      {geoms.surface && <mesh geometry={geoms.surface} receiveShadow={receiveShadow}>
         <meshStandardMaterial
           ref={surface}
           color={palette.roadSurface}
@@ -199,7 +238,7 @@ export function RoadNetwork({ edges, receiveShadow }: RoadNetworkProps) {
           polygonOffsetFactor={-1}
           polygonOffsetUnits={-2}
         />
-      </mesh>
+      </mesh>}
       {geoms.centerline && (
         <mesh geometry={geoms.centerline}>
           <meshStandardMaterial

@@ -5,7 +5,7 @@ import { useFrame, useThree } from '@react-three/fiber'
 import * as THREE from 'three'
 
 import { useSimStore } from '../store/simStore'
-import { SURROUND_CAMERAS, SURROUND_FOV_DEG, surroundEye, surroundLookAt } from './cameraMath'
+import { SURROUND_CAMERAS, SURROUND_FOV_DEG, surroundPlacement } from './cameraMath'
 import { computeAlpha, createPose, sampleVehicle } from './interpolation'
 import { hiddenFromMirrors } from './mirrorHidden'
 import { QUAD_PANES, frontPanePointer, quadViewport, surroundCameraFor } from './quadLayout'
@@ -90,13 +90,13 @@ export function QuadViewRenderer() {
         return
       }
       const cam = cameras[SURROUND_CAMERAS.indexOf(spec)]
-      const eye = surroundEye(spec, pose.x, pose.y, pose.heading)
-      const look = surroundLookAt(spec, pose.x, pose.y, pose.heading)
+      const placed = surroundPlacement(spec, pose)
       cam.aspect = vp.h > 0 ? vp.w / vp.h : 1
       if (cam.far !== far) cam.far = far
       cam.updateProjectionMatrix()
-      cam.position.set(eye.x, eye.y, eye.z)
-      cam.lookAt(look.x, look.y, look.z)
+      cam.up.set(placed.up.x, placed.up.y, placed.up.z)
+      cam.position.set(placed.eye.x, placed.eye.y, placed.eye.z)
+      cam.lookAt(placed.look.x, placed.look.y, placed.look.z)
       cam.updateMatrixWorld()
       gl.render(scene, cam)
     })

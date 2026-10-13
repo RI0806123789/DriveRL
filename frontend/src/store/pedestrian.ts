@@ -13,6 +13,8 @@ export interface PedestrianState {
   x: number
   /** ENU y [m]（北が正） */
   y: number
+  /** 足元の高さ [m]。立体の地図では地面の高さ（`scene/Pedestrian.tsx` が毎フレーム入れる）。平面の地図では 0 */
+  z: number
   /** 体の向き [rad]。ENU +x から反時計回り */
   heading: number
   /** 視線の上下 [rad]。上が正。**体の向きには影響しない** */
@@ -41,6 +43,7 @@ export interface PedestrianState {
 export const pedestrian: PedestrianState = {
   x: 0,
   y: 0,
+  z: 0,
   heading: 0,
   pitch: 0,
   riding: false,

@@ -102,7 +102,7 @@ export function RearViewMirrors() {
     }
 
     const pose = scratch.pose
-    composeVehicleMatrix(scratch.transform, pose.x, pose.y, pose.heading, scratch.base)
+    composeVehicleMatrix(scratch.transform, pose.x, pose.y, pose.heading, scratch.base, pose.z, pose.pitch, pose.roll)
     const tilt = tiltOf(target)
     composeTiltMatrix(tilt.pitch, tilt.roll, scratch.tilt)
     composeBodyMatrix(scratch.base, scratch.tilt, g.matrix)

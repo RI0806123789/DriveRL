@@ -59,7 +59,7 @@ export function linkPairs(vehicles: readonly LinkVehicle[]): Array<[number, numb
 /** 組ごとの線分の頂点を three の座標（x, 高さ, -y）で `out` に書き、書いた頂点の数を返す。位置が分からない組は飛ばす。 */
 export function writeLinkSegments(
   pairs: ReadonlyArray<readonly [number, number]>,
-  position: (id: number) => { x: number; y: number } | null,
+  position: (id: number) => { x: number; y: number; z?: number } | null,
   out: Float32Array,
   height = V2X_LINK_HEIGHT_M,
 ): number {
@@ -69,7 +69,8 @@ export function writeLinkSegments(
     const pa = position(a)
     const pb = position(b)
     if (!pa || !pb) continue
-    out.set([pa.x, height, -pa.y, pb.x, height, -pb.y], n * 3)
+    // 立体の地図では車の路面の高さ（z）から測る
+    out.set([pa.x, height + (pa.z ?? 0), -pa.y, pb.x, height + (pb.z ?? 0), -pb.y], n * 3)
     n += 2
   }
   return n

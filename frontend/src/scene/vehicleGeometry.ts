@@ -2,6 +2,7 @@
 
 import * as THREE from 'three'
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
+import { attitudeAxes } from './elevationView.ts'
 
 /** 車両ローカル座標は **+X が前方・+Y が上・+Z が右**。 */
 
@@ -318,14 +319,22 @@ export function createTransformScratch(): TransformScratch {
   }
 }
 
-/** 車両そのものの姿勢（ENU の位置と方位 → three のワールド行列）。 */
+/** 車両そのものの姿勢（ENU の位置と方位 → three のワールド行列）。立体の地図では路面の高さ・ピッチ・ロールも掛ける。 */
 export function composeVehicleMatrix(
   scratch: TransformScratch,
   enuX: number,
   enuY: number,
   heading: number,
   out: THREE.Matrix4,
+  z = 0,
+  pitch = 0,
+  roll = 0,
 ): THREE.Matrix4 {
+  if (z !== 0 || pitch !== 0 || roll !== 0) {
+    // 列は車体の前・上・右（バックエンドの `body_rotation` と同じ回転。`elevationView.attitudeAxes`）
+    const a = attitudeAxes(heading, pitch, roll)
+    return out.set(a[0], a[3], a[6], enuX, a[1], a[4], a[7], z, a[2], a[5], a[8], -enuY, 0, 0, 0, 1)
+  }
   const n = scratch.node
   n.position.set(enuX, 0, -enuY)
   n.rotation.set(0, heading, 0)

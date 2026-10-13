@@ -175,7 +175,7 @@ export function NpcPedestrians({ castShadow }: NpcPedestriansProps) {
         scratch.pose.x,
         scratch.pose.y,
         scratch.pose.heading,
-        swing.bob,
+        swing.bob + scratch.pose.z,
         scratch.base,
       )
       head.setMatrixAt(i, scratch.base)

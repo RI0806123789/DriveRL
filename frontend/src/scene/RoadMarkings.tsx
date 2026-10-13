@@ -3,7 +3,10 @@
 import { useEffect, useLayoutEffect, useMemo } from 'react'
 import * as THREE from 'three'
 import type { MapEdge, MapSignal, Vec2 } from '../types/protocol'
+import { useSimStore } from '../store/simStore'
 import { usePalette } from './usePalette'
+import { elevationOf, type ElevationModel } from './elevationView'
+import { liftConstant, liftVertices } from './elevationGeometry'
 import {
   CROSSWALK_GAP,
   CROSSWALK_LENGTH,
@@ -133,11 +136,12 @@ function pushLineAlong(
   }
 }
 
-function buildMarkings(edges: MapEdge[], signals: MapSignal[]): THREE.BufferGeometry | null {
+function buildMarkings(edges: MapEdge[], signals: MapSignal[], model: ElevationModel | null): THREE.BufferGeometry | null {
   const positions: number[] = []
 
   for (const e of edges) {
     const half = e.width / 2
+    const first = positions.length / 3
 
     pushLineAlong(positions, e.polyline, half - EDGE_LINE_INSET, LINE_WIDTH, false)
     pushLineAlong(positions, e.polyline, -(half - EDGE_LINE_INSET), LINE_WIDTH, false)
@@ -159,9 +163,13 @@ function buildMarkings(edges: MapEdge[], signals: MapSignal[]): THREE.BufferGeom
         pushLineAlong(positions, e.polyline, -half + laneWidth * i, LINE_WIDTH, true)
       }
     }
+    // 立体の地図では、その辺の路面（横断勾配込み）まで持ち上げる
+    const profile = model?.profiles.get(e.id)
+    if (profile) liftVertices(positions, first, positions.length / 3, profile)
   }
 
   for (const sg of signals) {
+    const first = positions.length / 3
     const cos = Math.cos(sg.heading)
     const sin = Math.sin(sg.heading)
     const laneSpan = sg.roadWidth / 2
@@ -188,6 +196,7 @@ function buildMarkings(edges: MapEdge[], signals: MapSignal[]): THREE.BufferGeom
         CROSSWALK_STRIPE,
       )
     }
+    if (model) liftConstant(positions, first, positions.length / 3, sg.z ?? 0)
   }
 
   if (positions.length === 0) return null
@@ -205,7 +214,9 @@ export interface RoadMarkingsProps {
 
 export function RoadMarkings({ edges, signals }: RoadMarkingsProps) {
   const palette = usePalette()
-  const geometry = useMemo(() => buildMarkings(edges, signals), [edges, signals])
+  const map = useSimStore((s) => s.map)
+  const model = elevationOf(map)
+  const geometry = useMemo(() => buildMarkings(edges, signals, model), [edges, signals, model])
 
   // マテリアルは作り直さず色だけ差し替える
   const material = useMemo(

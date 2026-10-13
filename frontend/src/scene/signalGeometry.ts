@@ -30,6 +30,8 @@ export interface SignalPlacementInput {
   y: number
   heading: number
   roadWidth: number
+  /** 灯器が立つ路面の高さ [m]（立体の地図だけ。省略時は 0） */
+  z?: number
 }
 
 export interface NodePosition {
@@ -97,14 +99,15 @@ export function buildSignalPlacement(
     const poleX = poleEnuX
     const poleZ = -poleEnuY
 
-    const headCenterY = MOUNT_HEIGHT + HOUSING_H / 2
+    const ground = sg.z ?? 0
+    const headCenterY = ground + MOUNT_HEIGHT + HOUSING_H / 2
     const facing = sg.heading + Math.PI
 
     placements.push({ headX, headZ, poleX, poleZ, facing })
 
     const poleHeight = MOUNT_HEIGHT + HOUSING_H + 0.4
     const pole = new THREE.CylinderGeometry(POLE_RADIUS, POLE_RADIUS * 1.2, poleHeight, 8)
-    pole.translate(poleX, poleHeight / 2, poleZ)
+    pole.translate(poleX, ground + poleHeight / 2, poleZ)
     parts.push(pole)
 
     const armDx = headX - poleX
@@ -114,7 +117,7 @@ export function buildSignalPlacement(
       const arm = new THREE.CylinderGeometry(ARM_RADIUS, ARM_RADIUS, armLen, 6)
       arm.rotateZ(Math.PI / 2)
       arm.rotateY(-Math.atan2(armDz, armDx))
-      arm.translate((poleX + headX) / 2, poleHeight - 0.25, (poleZ + headZ) / 2)
+      arm.translate((poleX + headX) / 2, ground + poleHeight - 0.25, (poleZ + headZ) / 2)
       parts.push(arm)
     }
 

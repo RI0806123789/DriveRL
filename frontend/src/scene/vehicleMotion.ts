@@ -86,18 +86,24 @@ function spring(x: number, v: number, target: number, dt: number): [number, numb
   return [x, v]
 }
 
-/** 補間済みの速度・舵角から、傾きを 1 フレーム進める。`dt` は描画の間隔 [s] */
-export function stepTilt(s: TiltState, speed: number, steer: number, dt: number): void {
+/** 重力加速度 [m/s²]（バックエンドの `map/elevation.py` の GRAVITY と同じ値） */
+export const GRAVITY = 9.81
+
+/** 補間済みの速度・舵角から、傾きを 1 フレーム進める。`dt` は描画の間隔 [s]。`roadPitch` / `roadRoll` は路面の姿勢 [rad] */
+export function stepTilt(s: TiltState, speed: number, steer: number, dt: number, roadPitch = 0, roadRoll = 0): void {
   if (!s.primed) {
     resetTilt(s, speed)
     return
   }
   const h = Math.min(Math.max(dt, 0), 0.1)
   if (h <= 0) return
-  const raw = Math.max(ACCEL_RANGE[0], Math.min(ACCEL_RANGE[1], (speed - s.lastSpeed) / h))
+  // 車体が沈むのはタイヤが受ける力（比力）による。坂で重力が速度を変えた分は差し引く（路面の傾きと二重に傾けない）
+  const slope = roadPitch === 0 ? 0 : GRAVITY * Math.sin(roadPitch)
+  const raw = Math.max(ACCEL_RANGE[0], Math.min(ACCEL_RANGE[1], (speed - s.lastSpeed) / h + slope))
   s.lastSpeed = speed
   s.accel += (raw - s.accel) * (1 - Math.exp(-h / ACCEL_TAU_S))
-  const target = tiltTarget(s.accel, lateralAccel(speed, steer))
+  const bank = roadRoll === 0 ? 0 : GRAVITY * Math.sin(roadRoll)
+  const target = tiltTarget(s.accel, lateralAccel(speed, steer) + bank)
   ;[s.pitch, s.pitchRate] = spring(s.pitch, s.pitchRate, target.pitch, h)
   ;[s.roll, s.rollRate] = spring(s.roll, s.rollRate, target.roll, h)
   s.pitch = Math.max(-MAX_PITCH * TILT_OVERSHOOT, Math.min(MAX_PITCH * TILT_OVERSHOOT, s.pitch))

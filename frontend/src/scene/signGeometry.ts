@@ -24,11 +24,13 @@ export interface SignPlacementInput {
   heading: number
   /** 規制速度 [m/s] */
   speedLimit: number
+  /** 立つ路面の高さ [m]（立体の地図だけ。省略時は 0） */
+  z?: number
 }
 
 /** 標示板の中心（three 空間）。 */
 export function signBoardCenter(sign: SignPlacementInput): [number, number, number] {
-  return [sign.x, SIGN_BOTTOM_HEIGHT + SIGN_RADIUS, -sign.y]
+  return [sign.x, (sign.z ?? 0) + SIGN_BOTTOM_HEIGHT + SIGN_RADIUS, -sign.y]
 }
 
 /** 標示板の正面が向く方位 [rad]。インスタンスの rotation.y にそのまま入れる。 */
@@ -50,7 +52,7 @@ export function signPoleHeight(sign: SignPlacementInput): number {
 
 /** 支柱（円柱）の中心。円柱は中心基準なので高さの半分だけ持ち上げる */
 export function signPoleCenter(sign: SignPlacementInput): [number, number, number] {
-  return [sign.x, signPoleHeight(sign) / 2, -sign.y]
+  return [sign.x, (sign.z ?? 0) + signPoleHeight(sign) / 2, -sign.y]
 }
 
 /** 標示板に描く数字。規制速度 [m/s] を km/h の整数に丸める */

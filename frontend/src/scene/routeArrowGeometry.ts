@@ -135,6 +135,40 @@ export function chevronsAlong(points: Point2[]): Chevron[] {
   return out
 }
 
+/** 立体の地図で、頂点列 [x, y, z, ...] を経路の最寄りの点の路面の高さだけ持ち上げる（リボンと矢羽根に使う）。 */
+export function liftAlongRoute(positions: ArrayLike<number> & { [i: number]: number }, points: Point2[], heights: readonly number[]): void {
+  if (heights.length !== points.length || points.length === 0) return
+  const count = positions.length / 3
+  let hint = 0
+  for (let v = 0; v < count; v++) {
+    const x = positions[v * 3]
+    const y = -positions[v * 3 + 2]
+    // 頂点は経路に沿って並んでいるので、前の頂点の近くから探す
+    let best = hint
+    let bestD = Infinity
+    const lo = Math.max(0, hint - 8)
+    const hi = Math.min(points.length - 1, hint + 40)
+    for (let i = lo; i <= hi; i++) {
+      const d = (points[i][0] - x) ** 2 + (points[i][1] - y) ** 2
+      if (d < bestD) {
+        bestD = d
+        best = i
+      }
+    }
+    if (bestD > 25) {
+      for (let i = 0; i < points.length; i++) {
+        const d = (points[i][0] - x) ** 2 + (points[i][1] - y) ** 2
+        if (d < bestD) {
+          bestD = d
+          best = i
+        }
+      }
+    }
+    hint = best
+    positions[v * 3 + 1] += heights[best]
+  }
+}
+
 /** 矢羽根を三角形メッシュにする */
 export function buildChevrons(
   points: Point2[],

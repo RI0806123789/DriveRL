@@ -9,6 +9,8 @@ export interface GroundProps {
   bounds: MapBounds | null
   showGrid: boolean
   receiveShadow: boolean
+  /** 平面の地面を敷く高さ [m]。立体の地図では地形の最も低い所より下へ下げ、地形と重ねない */
+  baseY?: number
 }
 
 /** ENU の bounds から地面のサイズと中心（Three 座標）を求める */
@@ -22,7 +24,7 @@ function groundFromBounds(bounds: MapBounds | null) {
   return { size, cx, cz }
 }
 
-export function Ground({ bounds, showGrid, receiveShadow }: GroundProps) {
+export function Ground({ bounds, showGrid, receiveShadow, baseY = 0 }: GroundProps) {
   const palette = usePalette()
   const { size, cx, cz } = useMemo(() => groundFromBounds(bounds), [bounds])
 
@@ -38,7 +40,7 @@ export function Ground({ bounds, showGrid, receiveShadow }: GroundProps) {
   }, [size, palette])
 
   return (
-    <group position={[cx, 0, cz]}>
+    <group position={[cx, baseY, cz]}>
       <mesh rotation={[-Math.PI / 2, 0, 0]} receiveShadow={receiveShadow}>
         <planeGeometry args={[size, size]} />
         <meshStandardMaterial color={palette.ground} roughness={1} metalness={0} />

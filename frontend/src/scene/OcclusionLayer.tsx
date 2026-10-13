@@ -87,7 +87,7 @@ export function OcclusionLayer({ toggle, write, opacity, renderOrder }: Props) {
       resources.geometry.setDrawRange(0, count)
       drawn.current = { view, count }
     }
-    composeVehicleMatrix(scratch.transform, scratch.pose.x, scratch.pose.y, scratch.pose.heading, m.matrix)
+    composeVehicleMatrix(scratch.transform, scratch.pose.x, scratch.pose.y, scratch.pose.heading, m.matrix, scratch.pose.z, scratch.pose.pitch, scratch.pose.roll)
     m.matrixWorldNeedsUpdate = true
     m.visible = drawn.current.count > 0
   })
