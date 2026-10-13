@@ -85,7 +85,8 @@ def main() -> int:
         f"リターンの平均 {data.returns.mean():+.1f}）"
     )
 
-    hidden = peek_hidden_sizes(config.CHECKPOINT_PATH) if config.CHECKPOINT_PATH.exists() else None
+    checkpoint_exists = config.CHECKPOINT_PATH.exists()
+    hidden = peek_hidden_sizes(config.CHECKPOINT_PATH) if checkpoint_exists else None
     trainer = PPOTrainer(
         obs_dim=config.OBS_DIM,
         action_dim=config.ACTION_DIM,
@@ -94,13 +95,14 @@ def main() -> int:
         seed=0,
         hidden_sizes=tuple(hidden) if hidden else None,
     )
-    restored = trainer.load(config.CHECKPOINT_PATH)
-    print(f"いまの重み: {'読めた' if restored else '無い（新規）'} / 更新回数 {trainer.updates}")
-
-    if restored and not args.no_backup:
+    if checkpoint_exists and not args.no_backup:
         backup = config.CHECKPOINT_PATH.with_suffix(".pt.before-warmstart")
         shutil.copy2(config.CHECKPOINT_PATH, backup)
         print(f"  元の重みを {backup.name} へ控えました")
+
+    restored = trainer.load(config.CHECKPOINT_PATH)
+    weight_status = '読めた' if restored else '読めない（新規）' if checkpoint_exists else '無い（新規）'
+    print(f"いまの重み: {weight_status} / 更新回数 {trainer.updates}")
 
     print("\n方策を回帰します")
     fitted = fit_policy(
