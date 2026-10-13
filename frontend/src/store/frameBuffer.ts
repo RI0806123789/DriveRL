@@ -50,6 +50,7 @@ export interface FrameBuffer {
 }
 
 const CLEAR_WEATHER: WeatherState = { rain: 0, fog: 0, visibility: 120 }
+const MAX_PENDING_FRAMES = 30
 
 const EMPTY_ROUTES = new Map<number, Vec2[]>()
 const EMPTY_REVISIONS = new Map<number, number>()
@@ -97,9 +98,10 @@ export function pushFrame(frame: FrameMessage): void {
     frameBuffer.displayed += 1
   } else if (event !== 'stale') {
     frameBuffer.pending.push(frame)
+    if (frameBuffer.pending.length > MAX_PENDING_FRAMES) {
+      frameBuffer.pending.splice(0, frameBuffer.pending.length - MAX_PENDING_FRAMES)
+    }
   }
-  // 描画が止まっているタブでも待ち行列を溜め込まない
-  advanceDisplay(now, false)
 
   let routeChanged = false
   for (const v of frame.vehicles) {

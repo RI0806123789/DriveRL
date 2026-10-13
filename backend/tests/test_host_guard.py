@@ -5,10 +5,17 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from starlette.applications import Starlette
+from starlette.middleware.cors import CORSMiddleware
+from starlette.responses import JSONResponse
+from starlette.routing import Route, WebSocketRoute
 
+from app.config import CORS_ORIGINS
 from app.host_guard import HostOriginGuard, host_allowed, origin_allowed, split_host
 
-ORIGINS = ["http://localhost:5173", "http://127.0.0.1:5173"]
+ORIGINS = CORS_ORIGINS
+DEV_ORIGINS = ["http://localhost:5173", "http://127.0.0.1:5173", "http://[::1]:5173"]
+OTHER_ORIGINS = ["http://[::1]:5174", "https://[::1]:5173", "http://203.0.113.5:5173", "https://evil.example"]
 
 
 class TestHost:
@@ -33,13 +40,18 @@ class TestHost:
 
 
 class TestOrigin:
+    @pytest.mark.parametrize("origin", DEV_ORIGINS)
+    def test_configured_dev_server(self, origin: str) -> None:
+        assert origin_allowed(origin, "127.0.0.1:8000", ORIGINS)
+
     def test_same_origin_and_dev_server(self) -> None:
         assert origin_allowed("http://127.0.0.1:8000", "127.0.0.1:8000", ORIGINS)
+        assert origin_allowed("http://[::1]:8000", "[::1]:8000", ORIGINS)
         assert origin_allowed("http://192.168.1.5:8000", "192.168.1.5:8000", ORIGINS)
         assert origin_allowed("http://localhost:5173", "127.0.0.1:8000", ORIGINS)
 
     @pytest.mark.parametrize(
-        "origin", ["https://evil.example", "http://203.0.113.5", "http://127.0.0.1:9999", "null", "file://"]
+        "origin", OTHER_ORIGINS + ["http://203.0.113.5", "http://127.0.0.1:9999", "null", "file://"]
     )
     def test_other_sites_are_rejected(self, origin: str) -> None:
         assert not origin_allowed(origin, "127.0.0.1:8000", ORIGINS)
@@ -66,6 +78,78 @@ def run(scope: dict, messages: list[dict] | None = None) -> tuple[list[dict], bo
 
 def headers(**kw: str) -> list[tuple[bytes, bytes]]:
     return [(k.encode(), v.encode()) for k, v in kw.items()]
+
+
+@pytest.fixture
+def guarded_app():
+    async def mutate(request):
+        return JSONResponse({"ok": True})
+
+    async def websocket(websocket):
+        await websocket.accept()
+        await websocket.send_json({"ok": True})
+        await websocket.close()
+
+    app = Starlette(routes=[Route("/api/change", mutate, methods=["POST"]), WebSocketRoute("/ws", websocket)])
+    app.add_middleware(CORSMiddleware, allow_origins=ORIGINS, allow_methods=["*"], allow_headers=["*"])
+    app.add_middleware(HostOriginGuard, allowed_origins=ORIGINS)
+    return app
+
+
+def exchange(app, kind: str, origin: str, method: str = "POST") -> list[dict]:
+    request_headers = {"host": "127.0.0.1:8000", "origin": origin}
+    if method == "OPTIONS":
+        request_headers.update({"access-control-request-method": "POST", "access-control-request-headers": "content-type"})
+    scope = {
+        "type": kind, "asgi": {"version": "3.0"}, "http_version": "1.1",
+        "method": method, "scheme": "ws" if kind == "websocket" else "http",
+        "path": "/ws" if kind == "websocket" else "/api/change", "query_string": b"",
+        "headers": headers(**request_headers), "server": ("127.0.0.1", 8000),
+        "client": ("127.0.0.1", 12345), "root_path": "", "subprotocols": [],
+    }
+    sent = []
+
+    async def receive():
+        return {"type": "websocket.connect"} if kind == "websocket" else {"type": "http.request", "body": b""}
+
+    async def send(message):
+        sent.append(message)
+
+    asyncio.run(app(scope, receive, send))
+    return sent
+
+
+class TestConfiguredMiddleware:
+    @pytest.mark.parametrize("origin", DEV_ORIGINS)
+    @pytest.mark.parametrize("method", ["POST", "OPTIONS"])
+    def test_dev_http_origin_and_preflight_pass(self, guarded_app, origin: str, method: str) -> None:
+        sent = exchange(guarded_app, "http", origin, method)
+        assert sent[0]["status"] == 200
+        assert dict(sent[0]["headers"])[b"access-control-allow-origin"] == origin.encode()
+        if method == "POST":
+            assert sent[1]["body"] == b'{"ok":true}'
+
+    @pytest.mark.parametrize("origin", DEV_ORIGINS)
+    def test_dev_websocket_origin_passes(self, guarded_app, origin: str) -> None:
+        sent = exchange(guarded_app, "websocket", origin)
+        assert [message["type"] for message in sent] == ["websocket.accept", "websocket.send", "websocket.close"]
+        assert sent[1]["text"] == '{"ok":true}'
+
+    @pytest.mark.parametrize("origin", OTHER_ORIGINS)
+    def test_other_http_origins_are_rejected(self, guarded_app, origin: str) -> None:
+        sent = exchange(guarded_app, "http", origin)
+        assert sent[0]["status"] == 403
+        assert b"access-control-allow-origin" not in dict(sent[0]["headers"])
+
+    @pytest.mark.parametrize("origin", OTHER_ORIGINS)
+    def test_other_preflights_are_rejected(self, guarded_app, origin: str) -> None:
+        sent = exchange(guarded_app, "http", origin, "OPTIONS")
+        assert sent[0]["status"] == 400
+        assert b"access-control-allow-origin" not in dict(sent[0]["headers"])
+
+    @pytest.mark.parametrize("origin", OTHER_ORIGINS)
+    def test_other_websocket_origins_are_closed(self, guarded_app, origin: str) -> None:
+        assert exchange(guarded_app, "websocket", origin) == [{"type": "websocket.close", "code": 1008}]
 
 
 class TestMiddleware:

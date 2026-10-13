@@ -71,6 +71,7 @@ PROTOCOL_VERSION = 3
 CORS_ORIGINS = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
+    "http://[::1]:5173",
 ]
 
 #: IP アドレスと localhost のほかに、Host として受け付ける名前（カンマ区切り。例: mypc.local）。app/host_guard.py
